@@ -1,0 +1,1 @@
+"""QSS theme resources."""

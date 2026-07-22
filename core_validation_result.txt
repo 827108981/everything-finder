@@ -1,0 +1,2 @@
+CORE_VALIDATION_OK
+scanned=6; indexed=6; skipped=0; failed=0; unsupported=0

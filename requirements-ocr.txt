@@ -1,0 +1,5 @@
+# OCR 依赖体积较大，建议确认 Python/PaddlePaddle 兼容性后单独安装。
+# Windows 上 PaddlePaddle 对 Python 版本较敏感；如 Python 3.12 安装失败，可使用 Python 3.11。
+numpy==2.3.5
+paddlepaddle==3.2.2
+paddleocr==3.7.0
