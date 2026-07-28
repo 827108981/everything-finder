@@ -18,7 +18,11 @@ class SettingsService:
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
             if isinstance(data, dict):
-                return AppSettings.from_dict(data)
+                settings = AppSettings.from_dict(data)
+                normalized = settings.to_dict()
+                if data != normalized:
+                    self.save(settings)
+                return settings
         except (OSError, json.JSONDecodeError):
             pass
         return DEFAULT_SETTINGS

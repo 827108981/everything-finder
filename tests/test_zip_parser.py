@@ -4,12 +4,15 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest.mock import patch
 
 from local_full_text_search.config.defaults import AppSettings
 from local_full_text_search.core.database import DatabaseManager
 from local_full_text_search.core.index_manager import IndexManager
 from local_full_text_search.core.search_engine import SearchEngine
 from local_full_text_search.models.search_query import SearchQuery
+from local_full_text_search.core.task_manager import CancelToken
+from local_full_text_search.parsers.zip_parser import ZipParser
 
 
 class ZipParserTests(unittest.TestCase):
@@ -46,6 +49,20 @@ class ZipParserTests(unittest.TestCase):
             self.assertEqual(summary.failed, 0)
             page = SearchEngine(db).search(SearchQuery(text="ZIP_SAFE_HIT", mode="exact"))
             self.assertEqual(page.total_confirmed, 1)
+
+    def test_zip_temporary_directory_is_removed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            temp_root = base / "temp"
+            archive = base / "archive.zip"
+            with zipfile.ZipFile(archive, "w") as handle:
+                handle.writestr("readme.txt", "ZIP_TEMP_CLEANUP")
+
+            with patch("local_full_text_search.parsers.zip_parser.TEMP_DIR", temp_root):
+                blocks = list(ZipParser(AppSettings()).parse(archive, CancelToken()))
+
+            self.assertTrue(blocks)
+            self.assertFalse(list(temp_root.glob("zip_index_*")))
 
 
 if __name__ == "__main__":

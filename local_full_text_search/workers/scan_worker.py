@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import traceback
+import logging
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Signal, Slot
@@ -9,6 +9,8 @@ from local_full_text_search.config.defaults import AppSettings
 from local_full_text_search.core.database import DatabaseManager
 from local_full_text_search.core.index_manager import IndexManager
 from local_full_text_search.core.task_manager import CancelToken
+
+logger = logging.getLogger(__name__)
 
 
 class ScanWorker(QObject):
@@ -21,21 +23,27 @@ class ScanWorker(QObject):
         self.db_path = db_path
         self.settings = settings
         self.token = CancelToken()
+        self.manager: IndexManager | None = None
 
     @Slot()
     def run(self) -> None:
         try:
             db = DatabaseManager(self.db_path)
             db.initialize()
-            manager = IndexManager(db, self.settings)
-            summary = manager.index_enabled_roots(self.token, self.progress.emit)
+            self.manager = IndexManager(db, self.settings)
+            summary = self.manager.index_enabled_roots(self.token, self.progress.emit)
             self.finished.emit(summary)
-        except Exception:
-            self.failed.emit(traceback.format_exc())
+        except Exception as exc:
+            logger.exception("Index scan failed")
+            self.failed.emit(str(exc) or exc.__class__.__name__)
+        finally:
+            self.manager = None
 
     @Slot()
-    def cancel(self) -> None:
-        self.token.cancel()
+    def cancel(self, *, force: bool = False) -> None:
+        self.token.cancel(force=force)
+        if force and self.manager is not None:
+            self.manager.force_terminate_processes()
 
     @Slot()
     def pause(self) -> None:

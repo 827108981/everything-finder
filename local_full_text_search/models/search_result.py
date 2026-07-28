@@ -1,6 +1,17 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+
+
+@dataclass(slots=True)
+class SearchHit:
+    block_id: int | None
+    location_text: str
+    context: str
+    hit_count: int
+    source_type: str
+    ocr_confidence: float | None = None
+    is_fuzzy: bool = False
 
 
 @dataclass(slots=True)
@@ -19,3 +30,5 @@ class SearchResult:
     parse_status: str
     score: float
     ocr_confidence: float | None = None
+    has_fuzzy_match: bool = False
+    matches: list[SearchHit] = field(default_factory=list)

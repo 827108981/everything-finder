@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import traceback
+import logging
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Signal, Slot
@@ -10,6 +10,8 @@ from local_full_text_search.core.errors import CancelledError
 from local_full_text_search.core.search_engine import SearchEngine
 from local_full_text_search.core.task_manager import CancelToken
 from local_full_text_search.models.search_query import SearchQuery
+
+logger = logging.getLogger(__name__)
 
 
 class SearchWorker(QObject):
@@ -31,8 +33,9 @@ class SearchWorker(QObject):
             self.finished.emit(engine.search(self.query, self.token))
         except CancelledError:
             self.cancelled.emit()
-        except Exception:
-            self.failed.emit(traceback.format_exc())
+        except Exception as exc:
+            logger.exception("Search failed")
+            self.failed.emit(str(exc) or exc.__class__.__name__)
 
     @Slot()
     def cancel(self) -> None:

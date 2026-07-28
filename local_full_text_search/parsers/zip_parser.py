@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import codecs
 import hashlib
+import io
+import shutil
 import tempfile
 import zipfile
 from pathlib import Path, PurePosixPath
@@ -14,10 +17,14 @@ from local_full_text_search.models.content_block import ContentBlock
 from local_full_text_search.parsers.base_parser import BaseParser
 from local_full_text_search.parsers.docx_parser import DocxParser
 from local_full_text_search.parsers.image_parser import ImageParser
+from local_full_text_search.parsers.ooxml.docx_stream_parser import DocxStreamParser
+from local_full_text_search.parsers.ooxml.pptx_stream_parser import PptxStreamParser
+from local_full_text_search.parsers.ooxml.xlsx_stream_parser import XlsxStreamParser
 from local_full_text_search.parsers.pdf_parser import PdfParser
 from local_full_text_search.parsers.pptx_parser import PptxParser
 from local_full_text_search.parsers.text_parser import TextParser
 from local_full_text_search.parsers.xlsx_parser import XlsxParser
+from local_full_text_search.ocr.ocr_engine import OcrEngine
 
 
 class ZipParser(BaseParser):
@@ -30,10 +37,16 @@ class ZipParser(BaseParser):
 
     name = "zip"
 
-    def __init__(self, settings: AppSettings, depth: int = 0) -> None:
+    def __init__(
+        self,
+        settings: AppSettings,
+        depth: int = 0,
+        ocr_engine: OcrEngine | None = None,
+    ) -> None:
         super().__init__()
         self.settings = settings
         self.depth = depth
+        self.ocr_engine = ocr_engine
 
     def supports(self, file_path: Path) -> bool:
         return file_path.suffix.lower() == ".zip"
@@ -71,6 +84,22 @@ class ZipParser(BaseParser):
                     if parser is None:
                         skipped_members += 1
                         continue
+                    if Path(safe_name).suffix.lower() in {
+                        ".txt", ".log", ".csv", ".md", ".json", ".xml", ".ini"
+                    }:
+                        try:
+                            for block in self._parse_text_member(
+                                archive,
+                                info,
+                                file_path,
+                                safe_name,
+                                cancel_token,
+                            ):
+                                yielded += 1
+                                yield block
+                        except Exception:
+                            failed_members += 1
+                        continue
                     extracted = extracted_root / hashlib.sha256(info.filename.encode("utf-8")).hexdigest()
                     extracted = extracted.with_suffix(Path(safe_name).suffix)
                     with archive.open(info) as source, extracted.open("wb") as target:
@@ -96,6 +125,60 @@ class ZipParser(BaseParser):
                     self.set_status("metadata_only", "ZIP_NO_SUPPORTED_MEMBER", "压缩包内没有可解析文件")
         except zipfile.BadZipFile:
             self.set_status("failed", "ZIP_CORRUPTED", "压缩包损坏或格式异常")
+        finally:
+            shutil.rmtree(extracted_root, ignore_errors=True)
+
+    def _parse_text_member(
+        self,
+        archive: zipfile.ZipFile,
+        info: zipfile.ZipInfo,
+        outer_path: Path,
+        safe_name: str,
+        cancel_token: CancelToken,
+    ) -> Iterable[ContentBlock]:
+        with archive.open(info) as sample_stream:
+            sample = sample_stream.read(65536)
+        encoding = _detect_bytes_encoding(sample)
+        lines: list[str] = []
+        start_line = 1
+        block_index = 0
+        with archive.open(info) as binary_stream:
+            with io.TextIOWrapper(
+                binary_stream,
+                encoding=encoding,
+                errors="replace",
+                newline="",
+            ) as text_stream:
+                for line_number, line in enumerate(text_stream, start=1):
+                    cancel_token.wait_if_paused()
+                    cancel_token.throw_if_cancelled()
+                    lines.append(line.rstrip("\r\n"))
+                    if len(lines) >= 500:
+                        yield self.make_block(
+                            outer_path,
+                            block_index,
+                            "zip_text",
+                            f"{outer_path.name} > {safe_name} > 第 {start_line}-{line_number} 行",
+                            "\n".join(lines),
+                            line_start=start_line,
+                            line_end=line_number,
+                            extra={"zip_internal_path": safe_name},
+                        )
+                        block_index += 1
+                        start_line = line_number + 1
+                        lines = []
+        if lines:
+            end_line = start_line + len(lines) - 1
+            yield self.make_block(
+                outer_path,
+                block_index,
+                "zip_text",
+                f"{outer_path.name} > {safe_name} > 第 {start_line}-{end_line} 行",
+                "\n".join(lines),
+                line_start=start_line,
+                line_end=end_line,
+                extra={"zip_internal_path": safe_name},
+            )
 
     def _parser_for_member(self, internal_path: str) -> BaseParser | None:
         suffix = Path(internal_path).suffix.lower()
@@ -105,22 +188,36 @@ class ZipParser(BaseParser):
             return PdfParser(
                 enable_scanned_ocr=self.settings.enable_ocr and self.settings.ocr_scanned_pdf,
                 ocr_language=self.settings.ocr_language,
+                parallel_min_bytes=self.settings.pdf_parallel_min_bytes,
+                parallel_min_pages=self.settings.pdf_parallel_min_pages,
+                parallel_workers=max(2, self.settings.parser_workers),
+                ocr_engine=self.ocr_engine,
+                ocr_cpu_threads=self.settings.ocr_cpu_threads,
             )
         if suffix == ".docx":
-            return DocxParser()
+            fallback = DocxParser()
+            return DocxStreamParser(fallback, defer_normalization=True) if self.settings.fast_ooxml_enabled else fallback
         if suffix in {".xlsx", ".xlsm"}:
-            return XlsxParser()
+            fallback = XlsxParser()
+            return XlsxStreamParser(fallback, defer_normalization=True) if self.settings.fast_ooxml_enabled else fallback
         if suffix == ".pptx":
-            return PptxParser()
+            fallback = PptxParser()
+            return PptxStreamParser(fallback, defer_normalization=True) if self.settings.fast_ooxml_enabled else fallback
         if suffix in {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}:
             return ImageParser(
                 language=self.settings.ocr_language,
                 enabled=self.settings.enable_ocr and self.settings.ocr_images,
                 min_pixels=self.settings.min_ocr_image_pixels,
                 max_side=self.settings.max_ocr_image_side,
+                ocr_engine=self.ocr_engine,
+                ocr_cpu_threads=self.settings.ocr_cpu_threads,
             )
         if suffix == ".zip":
-            return ZipParser(self.settings, depth=self.depth + 1)
+            return ZipParser(
+                self.settings,
+                depth=self.depth + 1,
+                ocr_engine=self.ocr_engine,
+            )
         return None
 
 
@@ -130,3 +227,27 @@ def safe_zip_member_name(name: str) -> str | None:
         return None
     clean = str(candidate)
     return clean if clean and clean != "." else None
+
+
+def _detect_bytes_encoding(sample: bytes) -> str:
+    if sample.startswith(codecs.BOM_UTF8):
+        return "utf-8-sig"
+    if sample.startswith(codecs.BOM_UTF16_LE):
+        return "utf-16-le"
+    if sample.startswith(codecs.BOM_UTF16_BE):
+        return "utf-16-be"
+    for encoding in ("utf-8", "gb18030", "utf-16"):
+        try:
+            sample.decode(encoding)
+            return encoding
+        except UnicodeDecodeError:
+            continue
+    try:
+        from charset_normalizer import from_bytes
+
+        detected = from_bytes(sample).best()
+        if detected and detected.encoding:
+            return detected.encoding
+    except ImportError:
+        pass
+    return "utf-8"

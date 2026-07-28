@@ -15,7 +15,9 @@ class FileMonitor:
         self.callback = callback
         self.debounce_seconds = debounce_seconds
         self._observer = None
-        self._timers: dict[str, threading.Timer] = {}
+        self._timer: threading.Timer | None = None
+        self._pending_path: Path | None = None
+        self._lock = threading.Lock()
 
     def start(self, roots: list[Path]) -> None:
         try:
@@ -41,19 +43,35 @@ class FileMonitor:
         self._observer.start()
 
     def stop(self) -> None:
-        for timer in self._timers.values():
-            timer.cancel()
-        self._timers.clear()
         if self._observer is not None:
             self._observer.stop()
-            self._observer.join(timeout=5)
+            self._observer.join(timeout=0.75)
             self._observer = None
+        with self._lock:
+            timer = self._timer
+            self._timer = None
+            self._pending_path = None
+        if timer is not None:
+            timer.cancel()
 
     def _schedule(self, path: Path) -> None:
-        key = str(path)
-        existing = self._timers.get(key)
-        if existing:
-            existing.cancel()
-        timer = threading.Timer(self.debounce_seconds, self.callback, args=(path,))
-        self._timers[key] = timer
+        with self._lock:
+            if self._timer is not None:
+                self._timer.cancel()
+            self._pending_path = path
+            timer = threading.Timer(self.debounce_seconds, self._fire)
+            timer.daemon = True
+            self._timer = timer
         timer.start()
+
+    def _fire(self) -> None:
+        with self._lock:
+            path = self._pending_path
+            self._timer = None
+            self._pending_path = None
+        if path is None:
+            return
+        try:
+            self.callback(path)
+        except Exception:
+            logger.exception("File monitor callback failed for %s", path)

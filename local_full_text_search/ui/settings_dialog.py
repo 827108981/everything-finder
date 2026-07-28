@@ -17,7 +17,7 @@ class SettingsDialog(QDialog):
         self.enable_ocr.setChecked(settings.enable_ocr)
         self.ocr_images = QCheckBox("索引图片 OCR")
         self.ocr_images.setChecked(settings.ocr_images)
-        self.monitor_changes = QCheckBox("监控文件变化")
+        self.monitor_changes = QCheckBox("检测文件变化并提示更新")
         self.monitor_changes.setChecked(settings.monitor_file_changes)
 
         form = QFormLayout()

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import tempfile
 import time
 import unittest
@@ -31,6 +32,55 @@ class IncrementalIndexTests(unittest.TestCase):
             engine = SearchEngine(db)
             self.assertEqual(engine.search(SearchQuery(text="old", mode="exact")).total_confirmed, 0)
             self.assertEqual(engine.search(SearchQuery(text="new", mode="exact")).total_confirmed, 1)
+
+    def test_restored_file_with_same_fingerprint_rebuilds_content(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = base / "files"
+            root.mkdir()
+            target = root / "restore.txt"
+            target.write_text("RESTORE_BODY_HIT", encoding="utf-8")
+            original = target.stat()
+            db = DatabaseManager(base / "index.db")
+            db.initialize()
+            root_id = db.add_root(root)
+            manager = IndexManager(db, AppSettings())
+            manager.index_root(root_id)
+            target.unlink()
+            manager.index_root(root_id)
+
+            target.write_text("RESTORE_BODY_HIT", encoding="utf-8")
+            os.utime(target, ns=(original.st_atime_ns, original.st_mtime_ns))
+            restored = manager.index_root(root_id)
+            page = SearchEngine(db).search(
+                SearchQuery(
+                    text="RESTORE_BODY_HIT",
+                    mode="exact",
+                    search_filename=False,
+                    search_path=False,
+                )
+            )
+
+            self.assertEqual(restored.indexed, 1)
+            self.assertEqual(page.total_confirmed, 1)
+
+    def test_permanently_corrupted_file_is_not_retried_until_changed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = base / "files"
+            root.mkdir()
+            (root / "broken.zip").write_bytes(b"not a zip")
+            db = DatabaseManager(base / "index.db")
+            db.initialize()
+            root_id = db.add_root(root)
+            manager = IndexManager(db, AppSettings(retry_failed_files=True))
+
+            first = manager.index_root(root_id)
+            second = manager.index_root(root_id)
+
+            self.assertEqual(first.failed, 1)
+            self.assertEqual(second.failed, 0)
+            self.assertEqual(second.skipped, 1)
 
 
 if __name__ == "__main__":

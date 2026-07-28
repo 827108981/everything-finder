@@ -11,6 +11,7 @@ from local_full_text_search.models.content_block import ContentBlock
 
 class BaseParser(ABC):
     name = "base"
+    defer_normalization = False
 
     def __init__(self) -> None:
         self.last_status = "success"
@@ -60,7 +61,7 @@ class BaseParser(ABC):
             block_type=block_type,
             location_text=location_text,
             raw_text=raw_text,
-            normalized_text=normalize_text(raw_text),
+            normalized_text="" if self.defer_normalization else normalize_text(raw_text),
             page_number=page_number,
             slide_number=slide_number,
             sheet_name=sheet_name,

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import sqlite3
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -82,6 +85,99 @@ class DatabaseIndexSearchTests(unittest.TestCase):
             self.assertEqual(summary.failed, 0)
             diagnostics = db.failed_files()
             self.assertEqual(diagnostics[0]["parse_status"], "metadata_only")
+
+    def test_search_history_is_deduplicated_and_bounded(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = DatabaseManager(Path(tmp) / "index.db")
+            db.initialize()
+            db.add_search_history("alpha", max_entries=2)
+            db.add_search_history("beta", max_entries=2)
+            db.add_search_history("alpha", max_entries=2)
+
+            self.assertEqual(db.search_history(), ["alpha", "beta"])
+            db.clear_search_history()
+            self.assertEqual(db.search_history(), [])
+
+    def test_diagnostic_task_updates_skip_a_busy_database_quickly(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = base / "files"
+            root.mkdir()
+            target = root / "sample.txt"
+            target.write_text("database lock regression", encoding="utf-8")
+            db = DatabaseManager(base / "index.db")
+            db.initialize()
+            root_id = db.add_root(root)
+            file_id, _ = db.upsert_file_metadata(root_id, target)
+            task_id = db.create_parse_task(file_id, "lock-test", "normal")
+
+            locker = sqlite3.connect(db.db_path, timeout=0.1)
+            try:
+                locker.execute("BEGIN IMMEDIATE")
+                started = time.perf_counter()
+                self.assertFalse(
+                    db.try_mark_tasks_running([task_id], timeout_seconds=0.0)
+                )
+                self.assertFalse(
+                    db.try_mark_task_spooled(
+                        task_id,
+                        base / "result.spool",
+                        "checksum",
+                        timeout_seconds=0.0,
+                    )
+                )
+                self.assertLess(time.perf_counter() - started, 0.2)
+            finally:
+                locker.rollback()
+                locker.close()
+
+            db.mark_task_running(task_id)
+            db.mark_task_spooled(task_id, base / "result.spool", "checksum")
+            with db.connect() as con:
+                task = con.execute(
+                    "SELECT status, spool_checksum FROM parse_tasks WHERE id = ?",
+                    (task_id,),
+                ).fetchone()
+            self.assertEqual(task["status"], "spooled")
+            self.assertEqual(task["spool_checksum"], "checksum")
+
+    def test_interrupt_active_connections_stops_a_long_statement(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = DatabaseManager(Path(tmp) / "index.db")
+            db.initialize()
+            query_started = threading.Event()
+            errors: list[BaseException] = []
+
+            def run_query() -> None:
+                try:
+                    with db.connect() as con:
+                        query_started.set()
+                        con.execute(
+                            """
+                            WITH RECURSIVE counter(value) AS (
+                                VALUES(0)
+                                UNION ALL
+                                SELECT value + 1 FROM counter WHERE value < 100000000
+                            )
+                            SELECT SUM(value) FROM counter
+                            """
+                        ).fetchone()
+                except BaseException as exc:
+                    errors.append(exc)
+
+            worker = threading.Thread(target=run_query, daemon=True)
+            worker.start()
+            self.assertTrue(query_started.wait(timeout=1.0))
+            time.sleep(0.05)
+            started = time.perf_counter()
+            self.assertGreaterEqual(db.interrupt_active_connections(), 1)
+            worker.join(timeout=1.0)
+
+            self.assertFalse(worker.is_alive())
+            self.assertLess(time.perf_counter() - started, 0.5)
+            self.assertEqual(len(errors), 1)
+            self.assertIsInstance(errors[0], sqlite3.OperationalError)
+            self.assertIn("interrupted", str(errors[0]).lower())
 
 
 if __name__ == "__main__":

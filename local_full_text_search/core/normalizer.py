@@ -39,6 +39,8 @@ def parse_terms(text: str, mode: str) -> list[str]:
     text = text.strip()
     if not text:
         return []
+    if mode == "regex":
+        return [text]
     if mode == "phrase":
         return [_strip_wrapping_quotes(text)]
     quoted = re.findall(r'"([^"]+)"|“([^”]+)”', text)

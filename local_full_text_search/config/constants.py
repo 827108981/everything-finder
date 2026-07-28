@@ -110,4 +110,19 @@ def bundled_resource_dir(name: str) -> Path:
 
 OCR_MODELS_DIR = bundled_resource_dir("ocr_models")
 
-PARSER_VERSION = "2"
+PARSER_VERSION = "3"
+
+PARSER_VERSIONS = {
+    "docx": "2",
+    "docx_stream": "1",
+    "pptx": "2",
+    "pptx_stream": "1",
+    "xlsx": "2",
+    "xlsx_stream": "1",
+    "pdf": "3",
+    "image_ocr": "3",
+    "zip": "3",
+    "legacy_office": "2",
+    "text": "2",
+    "metadata": "2",
+}

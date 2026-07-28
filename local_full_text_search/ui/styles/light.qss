@@ -24,11 +24,18 @@ QLabel#TopSubtitle, QLabel#PageSubtitle, QLabel#MutedText, QLabel#ResultMeta, QL
     font-size: 12px;
 }
 
+QLabel#IndexEta {
+    color: #1769E0;
+    font-size: 12px;
+    font-weight: 600;
+    min-width: 120px;
+}
+
 QPushButton#IndexStatusButton {
     min-height: 32px;
     padding: 5px 12px;
     border: 1px solid #D0D5DD;
-    border-radius: 16px;
+    border-radius: 6px;
     background: #FFFFFF;
     color: #344054;
 }
@@ -45,6 +52,12 @@ QPushButton#IndexStatusButton[state="running"] {
     border-color: #BFDBFE;
 }
 
+QPushButton#IndexStatusButton[state="pending"] {
+    color: #B45309;
+    background: #FFFBEB;
+    border-color: #FCD34D;
+}
+
 QPushButton#IndexStatusButton[state="error"] {
     color: #DC2626;
     background: #FEF2F2;
@@ -56,24 +69,16 @@ QFrame#Sidebar {
     border-right: 1px solid #E4E7EC;
 }
 
-QLabel#SidebarSection {
-    color: #98A2B3;
-    font-size: 11px;
-    font-weight: 600;
-    padding: 8px 10px 4px 10px;
-}
-
 QFrame#Separator {
     background: #E4E7EC;
 }
 
 QPushButton#NavButton {
-    min-height: 38px;
+    min-height: 40px;
     text-align: left;
-    padding: 0 12px;
+    padding: 0 14px;
     border: none;
-    border-left: 3px solid transparent;
-    border-radius: 8px;
+    border-radius: 6px;
     background: transparent;
     color: #344054;
 }
@@ -83,14 +88,18 @@ QPushButton#NavButton:hover {
 }
 
 QPushButton#NavButton[active="true"] {
-    background: #EFF6FF;
-    border-left: 3px solid #2563EB;
-    color: #2563EB;
+    background: #EAF0F6;
+    color: #174EA6;
     font-weight: 600;
 }
 
 QWidget#Page {
     background: #F6F7F9;
+}
+
+QScrollArea, QScrollArea > QWidget > QWidget {
+    background: transparent;
+    border: none;
 }
 
 QLabel#PageTitle {
@@ -99,11 +108,17 @@ QLabel#PageTitle {
     color: #182230;
 }
 
+QLabel#ContentHeading {
+    font-size: 15px;
+    font-weight: 600;
+    color: #182230;
+}
+
 QFrame#SearchBox {
-    min-height: 52px;
-    max-height: 52px;
+    min-height: 50px;
+    max-height: 50px;
     border: 1px solid #D0D5DD;
-    border-radius: 10px;
+    border-radius: 7px;
     background: #FFFFFF;
 }
 
@@ -137,11 +152,17 @@ QLineEdit:focus {
     border: 1px solid #2563EB;
 }
 
+QLineEdit:disabled, QComboBox:disabled, QSpinBox:disabled, QDoubleSpinBox:disabled, QTextEdit:disabled {
+    color: #98A2B3;
+    background: #F2F4F7;
+    border-color: #E4E7EC;
+}
+
 QPushButton {
     min-height: 34px;
     padding: 0 12px;
     border: 1px solid #D0D5DD;
-    border-radius: 8px;
+    border-radius: 6px;
     background: #FFFFFF;
     color: #344054;
 }
@@ -190,18 +211,24 @@ QPushButton#StopButton {
     color: #DC2626;
 }
 
-QPushButton#ChipButton, QComboBox#FilterChip {
-    min-height: 36px;
+QPushButton#FilterButton, QComboBox#FilterControl {
+    min-height: 34px;
     padding: 0 12px;
     border: 1px solid #D0D5DD;
-    border-radius: 18px;
+    border-radius: 6px;
     background: #FFFFFF;
     color: #344054;
 }
 
-QPushButton#ChipButton:hover, QComboBox#FilterChip:hover {
+QPushButton#FilterButton:hover, QComboBox#FilterControl:hover {
     background: #F9FAFB;
     border-color: #B8C0CC;
+}
+
+QPushButton#FilterButton[active="true"] {
+    color: #174EA6;
+    background: #EAF0F6;
+    border-color: #AFC5E2;
 }
 
 QComboBox {
@@ -226,15 +253,27 @@ QComboBox QAbstractItemView {
     selection-color: #2563EB;
 }
 
-QFrame#AdvancedFilters, QFrame#TaskStrip, QFrame#TaskPanel {
+QFrame#AdvancedFilters {
+    background: #EEF2F6;
+    border: none;
+    border-radius: 6px;
+}
+
+QFrame#TaskStrip {
     background: #FFFFFF;
     border: 1px solid #E4E7EC;
-    border-radius: 10px;
+    border-radius: 6px;
 }
 
 QLabel#InlineStatus {
     color: #667085;
     font-size: 12px;
+}
+
+QLabel#TimingLabel {
+    color: #174EA6;
+    font-size: 12px;
+    font-weight: 600;
 }
 
 QFrame#EmptyState {
@@ -267,7 +306,7 @@ QListWidget#ResultList::item {
 QFrame#ResultCard {
     background: #FFFFFF;
     border: 1px solid #E4E7EC;
-    border-radius: 9px;
+    border-radius: 6px;
 }
 
 QFrame#ResultCard:hover {
@@ -376,14 +415,22 @@ QLabel#PreviewImage {
     padding: 8px;
 }
 
-QFrame#ScopeCard, QFrame#SettingsCard {
+QFrame#ScopeCard {
     background: #FFFFFF;
-    border: 1px solid #E4E7EC;
-    border-radius: 9px;
+    border: none;
+    border-bottom: 1px solid #E4E7EC;
+    border-radius: 0;
 }
 
 QFrame#ScopeCard:hover {
-    border-color: #BFDBFE;
+    background: #F9FAFB;
+}
+
+QFrame#SettingsCard {
+    background: transparent;
+    border: none;
+    border-bottom: 1px solid #E4E7EC;
+    border-radius: 0;
 }
 
 QLabel#ScopeTitle {
@@ -399,7 +446,7 @@ QFrame#Pager {
 QTableWidget#FailedTable {
     background: #FFFFFF;
     border: 1px solid #E4E7EC;
-    border-radius: 9px;
+    border-radius: 6px;
     gridline-color: transparent;
     selection-background-color: #EFF6FF;
     selection-color: #182230;
@@ -438,12 +485,27 @@ QCheckBox::indicator:checked {
     border-color: #2563EB;
 }
 
-QSpinBox {
+QSpinBox, QDoubleSpinBox {
     min-height: 34px;
     border: 1px solid #D0D5DD;
     border-radius: 8px;
     background: #FFFFFF;
     padding: 0 8px;
+}
+
+QPushButton#DisclosureButton {
+    min-height: 38px;
+    text-align: left;
+    padding: 0 14px;
+    border: none;
+    border-radius: 6px;
+    background: #FFFFFF;
+    color: #174EA6;
+    font-weight: 600;
+}
+
+QPushButton#DisclosureButton:hover, QPushButton#DisclosureButton:checked {
+    background: #EAF0F6;
 }
 
 QProgressBar {

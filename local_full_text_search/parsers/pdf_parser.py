@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import os
+from collections.abc import Iterable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Iterable
 
 from local_full_text_search.config.constants import TEMP_DIR
 from local_full_text_search.core.errors import ParserDependencyError, PasswordProtectedError
@@ -13,18 +15,31 @@ from local_full_text_search.parsers.base_parser import BaseParser
 
 
 class PdfParser(BaseParser):
-    """PDF parser with native text first and optional scanned-page OCR.
-
-    OCR is deliberately page-level and best-effort: a failed OCR pass should not
-    discard native PDF text that was already extracted from other pages.
-    """
+    """Extract native PDF text and optionally OCR scanned pages."""
 
     name = "pdf"
 
-    def __init__(self, enable_scanned_ocr: bool = False, ocr_language: str = "ch") -> None:
+    def __init__(
+        self,
+        enable_scanned_ocr: bool = False,
+        ocr_language: str = "ch",
+        *,
+        parallel_min_bytes: int = 64 * 1024 * 1024,
+        parallel_min_pages: int = 500,
+        parallel_workers: int = 4,
+        ocr_engine: OcrEngine | None = None,
+        ocr_cpu_threads: int = 2,
+    ) -> None:
         super().__init__()
         self.enable_scanned_ocr = enable_scanned_ocr
-        self.ocr = OcrEngine(ocr_language) if enable_scanned_ocr else None
+        self.ocr = (
+            ocr_engine or OcrEngine(ocr_language, ocr_cpu_threads)
+            if enable_scanned_ocr
+            else None
+        )
+        self.parallel_min_bytes = max(0, int(parallel_min_bytes))
+        self.parallel_min_pages = max(1, int(parallel_min_pages))
+        self.parallel_workers = max(1, int(parallel_workers))
 
     def supports(self, file_path: Path) -> bool:
         return file_path.suffix.lower() == ".pdf"
@@ -38,13 +53,28 @@ class PdfParser(BaseParser):
         try:
             if doc.needs_pass:
                 raise PasswordProtectedError("PDF 已加密，需要密码")
+            use_parallel = (
+                not self.enable_scanned_ocr
+                and self.parallel_workers > 1
+                and (
+                    file_path.stat().st_size >= self.parallel_min_bytes
+                    or doc.page_count >= self.parallel_min_pages
+                )
+            )
+            if use_parallel:
+                page_count = doc.page_count
+                doc.close()
+                doc = None
+                yield from self._parse_native_parallel(file_path, page_count, cancel_token)
+                return
             for index in range(doc.page_count):
                 cancel_token.wait_if_paused()
                 cancel_token.throw_if_cancelled()
                 page = doc.load_page(index)
                 text = page.get_text("text") or ""
-                has_images = bool(page.get_images(full=True))
-                scanned_like = len(text.strip()) < 20 and has_images
+                # Native-only indexing never enumerates page images.
+                has_images = bool(page.get_images(full=True)) if self.enable_scanned_ocr else False
+                scanned_like = self.enable_scanned_ocr and len(text.strip()) < 20 and has_images
                 yield self.make_block(
                     file_path,
                     index,
@@ -55,14 +85,18 @@ class PdfParser(BaseParser):
                     source_type="native_text",
                     extra={"has_images": has_images, "is_scanned_like": scanned_like},
                 )
-                if scanned_like and self.enable_scanned_ocr and self.ocr is not None:
+                if scanned_like and self.ocr is not None:
                     cancel_token.wait_if_paused()
                     cancel_token.throw_if_cancelled()
                     try:
                         image_path = render_pdf_page_for_ocr(page, file_path, index)
                         result = self.ocr.recognize(image_path)
                     except Exception as exc:
-                        self.set_status("partial_success", "PDF_OCR_FAILED", f"第 {index + 1} 页 OCR 失败：{exc}")
+                        self.set_status(
+                            "partial_success",
+                            "PDF_OCR_FAILED",
+                            f"第 {index + 1} 页 OCR 失败：{exc}",
+                        )
                         continue
                     yield self.make_block(
                         file_path,
@@ -76,15 +110,69 @@ class PdfParser(BaseParser):
                         extra=result.extra,
                     )
         finally:
-            doc.close()
+            if doc is not None:
+                doc.close()
+
+    def _parse_native_parallel(
+        self,
+        file_path: Path,
+        page_count: int,
+        cancel_token: CancelToken,
+    ) -> Iterable[ContentBlock]:
+        workers = min(self.parallel_workers, page_count, max(1, os.cpu_count() or 1))
+        chunk_size = max(1, min(64, (page_count + workers * 4 - 1) // (workers * 4)))
+        ranges = [
+            (start, min(page_count, start + chunk_size))
+            for start in range(0, page_count, chunk_size)
+        ]
+        results: list[tuple[int, str]] = []
+        executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="lfts-pdf-page")
+        futures = [
+            executor.submit(_extract_pdf_page_range, file_path, start, end)
+            for start, end in ranges
+        ]
+        try:
+            for future in as_completed(futures):
+                cancel_token.wait_if_paused()
+                cancel_token.throw_if_cancelled()
+                results.extend(future.result())
+        finally:
+            executor.shutdown(wait=not cancel_token.cancelled, cancel_futures=True)
+        for page_index, text in sorted(results):
+            cancel_token.throw_if_cancelled()
+            yield self.make_block(
+                file_path,
+                page_index,
+                "pdf_page",
+                f"第 {page_index + 1} 页",
+                text,
+                page_number=page_index + 1,
+                source_type="native_text",
+                extra={"has_images": False, "is_scanned_like": False, "parallel": True},
+            )
 
 
 def render_pdf_page_for_ocr(page: object, file_path: Path, page_index: int) -> Path:
     TEMP_DIR.mkdir(parents=True, exist_ok=True)
-    digest = hashlib.sha256(f"{file_path}:{file_path.stat().st_mtime_ns}:{page_index}".encode("utf-8")).hexdigest()[:16]
+    digest = hashlib.sha256(
+        f"{file_path}:{file_path.stat().st_mtime_ns}:{page_index}".encode("utf-8")
+    ).hexdigest()[:16]
     target = TEMP_DIR / f"pdf_ocr_{digest}_{page_index + 1}.png"
     if target.exists():
         return target
     pixmap = page.get_pixmap(dpi=200)
     pixmap.save(str(target))
     return target
+
+
+def _extract_pdf_page_range(file_path: Path, start: int, end: int) -> list[tuple[int, str]]:
+    import fitz
+
+    document = fitz.open(file_path)
+    try:
+        return [
+            (page_index, document.load_page(page_index).get_text("text") or "")
+            for page_index in range(start, end)
+        ]
+    finally:
+        document.close()

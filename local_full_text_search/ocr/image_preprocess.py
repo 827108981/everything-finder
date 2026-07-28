@@ -18,14 +18,16 @@ def image_dimensions(image_path: Path) -> tuple[int, int] | None:
         return None
 
 
-def preprocess_image(image_path: Path, *, max_side: int = 2400) -> Path:
+def preprocess_image(image_path: Path, *, max_side: int = 960) -> Path:
     """Downscale huge images before OCR while keeping the original file untouched."""
 
     dimensions = image_dimensions(image_path)
     if dimensions is None:
         return image_path
     width, height = dimensions
-    if max(width, height) <= max_side:
+    needs_resize = max(width, height) > max_side
+    needs_ascii_staging = not str(image_path).isascii()
+    if not needs_resize and not needs_ascii_staging:
         return image_path
 
     TEMP_DIR.mkdir(parents=True, exist_ok=True)
@@ -39,6 +41,7 @@ def preprocess_image(image_path: Path, *, max_side: int = 2400) -> Path:
 
     with Image.open(image_path) as image:
         image = image.convert("RGB")
-        image.thumbnail((max_side, max_side))
+        if needs_resize:
+            image.thumbnail((max_side, max_side))
         image.save(target, "PNG", optimize=True)
     return target

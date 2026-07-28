@@ -1,14 +1,15 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+import os
 from pathlib import Path
-from PyInstaller.utils.hooks import collect_all
+from PyInstaller.utils.hooks import collect_all, copy_metadata
 
 project_dir = Path.cwd()
+skip_ocr = os.environ.get("SKIP_OCR") == "1"
 
 datas = [
     ("local_full_text_search/ui/resources", "local_full_text_search/ui/resources"),
     ("local_full_text_search/ui/styles", "local_full_text_search/ui/styles"),
-    ("ocr_models", "ocr_models"),
     ("README.md", "."),
     ("使用说明.md", "."),
     ("配置说明.md", "."),
@@ -28,22 +29,47 @@ hiddenimports = [
     "watchdog",
     "win32com",
     "pythoncom",
-    "paddleocr",
-    "paddle",
-    "paddlex",
-    "cv2",
-    "numpy",
-    "pandas",
-    "yaml",
-    "shapely",
-    "pyclipper",
+    "win32api",
+    "win32job",
+    "win32process",
+    "lxml",
+    "lxml.etree",
+    "psutil",
 ]
 
-for package_name in ("paddleocr", "paddlex", "paddle"):
-    package_datas, package_binaries, package_hiddenimports = collect_all(package_name)
-    datas += package_datas
-    binaries += package_binaries
-    hiddenimports += package_hiddenimports
+if not skip_ocr:
+    datas += [
+        ("ocr_models/PP-OCRv4_mobile_det", "ocr_models/PP-OCRv4_mobile_det"),
+        ("ocr_models/PP-OCRv4_mobile_rec", "ocr_models/PP-OCRv4_mobile_rec"),
+    ]
+    hiddenimports += [
+        "paddleocr",
+        "paddle",
+        "paddlex",
+        "cv2",
+        "numpy",
+        "pandas",
+        "yaml",
+        "shapely",
+        "pyclipper",
+    ]
+    for package_name in ("paddleocr", "paddlex", "paddle"):
+        package_datas, package_binaries, package_hiddenimports = collect_all(package_name)
+        datas += package_datas
+        binaries += package_binaries
+        hiddenimports += package_hiddenimports
+    # PaddleX checks OCR extras through importlib.metadata at runtime. The
+    # modules alone are insufficient in a frozen app; their dist-info folders
+    # must be present for is_extra_available("ocr-core") to succeed.
+    for distribution_name in (
+        "imagesize",
+        "opencv-contrib-python",
+        "pyclipper",
+        "pypdfium2",
+        "python-bidi",
+        "shapely",
+    ):
+        datas += copy_metadata(distribution_name)
 
 a = Analysis(
     ["app.py"],

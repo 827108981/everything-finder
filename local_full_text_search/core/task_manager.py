@@ -11,9 +11,12 @@ class CancelToken:
 
     def __init__(self) -> None:
         self._cancelled = threading.Event()
+        self._force_cancelled = threading.Event()
         self._paused = threading.Event()
 
-    def cancel(self) -> None:
+    def cancel(self, *, force: bool = False) -> None:
+        if force:
+            self._force_cancelled.set()
         self._cancelled.set()
 
     def pause(self) -> None:
@@ -25,6 +28,10 @@ class CancelToken:
     @property
     def cancelled(self) -> bool:
         return self._cancelled.is_set()
+
+    @property
+    def force_cancelled(self) -> bool:
+        return self._force_cancelled.is_set()
 
     @property
     def paused(self) -> bool:

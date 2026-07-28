@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+from functools import lru_cache
 from pathlib import Path
 
-from local_full_text_search.config.constants import OCR_CACHE_DIR
-from local_full_text_search.ocr.ocr_engine import OcrResult
+from local_full_text_search.config.constants import OCR_CACHE_DIR, OCR_MODELS_DIR
+from local_full_text_search.ocr.ocr_engine import OCR_MODEL_FILES, OCR_MODEL_NAMES, OcrResult
 
 
 class OcrCache:
@@ -13,8 +14,10 @@ class OcrCache:
         self.cache_dir = cache_dir
         self.cache_dir.mkdir(parents=True, exist_ok=True)
 
-    def key_for_file(self, path: Path) -> str:
+    def key_for_file(self, path: Path, *, namespace: str = "") -> str:
         digest = hashlib.sha256()
+        digest.update(namespace.encode("utf-8"))
+        digest.update(b"\0")
         with path.open("rb") as handle:
             for chunk in iter(lambda: handle.read(1024 * 1024), b""):
                 digest.update(chunk)
@@ -40,3 +43,21 @@ class OcrCache:
             ),
             encoding="utf-8",
         )
+
+
+@lru_cache(maxsize=1)
+def ocr_models_fingerprint() -> str:
+    digest = hashlib.sha256()
+    if not OCR_MODELS_DIR.exists():
+        return "models-missing"
+    for model_name in OCR_MODEL_NAMES:
+        for file_name in OCR_MODEL_FILES:
+            path = OCR_MODELS_DIR / model_name / file_name
+            try:
+                stat = path.stat()
+            except OSError:
+                return "models-incomplete"
+            digest.update(f"{model_name}/{file_name}".encode("ascii"))
+            digest.update(f":{stat.st_size}:".encode("ascii"))
+            digest.update(path.read_bytes())
+    return digest.hexdigest()

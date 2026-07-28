@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import csv
+import os
 from collections.abc import Callable
 from pathlib import Path
 
 from PySide6.QtCore import QTimer, QThread, Qt, Signal
-from PySide6.QtGui import QAction, QKeySequence, QShortcut
+from PySide6.QtGui import QAction, QCloseEvent, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QDoubleSpinBox,
     QFileDialog,
     QFrame,
     QGridLayout,
@@ -36,7 +38,9 @@ from PySide6.QtWidgets import (
 from local_full_text_search.config.constants import APP_DISPLAY_NAME, FILE_TYPE_GROUPS, LOG_DIR
 from local_full_text_search.config.defaults import AppSettings
 from local_full_text_search.core.database import DatabaseManager
+from local_full_text_search.core.file_monitor import FileMonitor
 from local_full_text_search.core.open_location import open_file, open_parent_folder
+from local_full_text_search.core.search_time_estimator import SearchEstimateContext, SearchTimeEstimator
 from local_full_text_search.models.search_query import SearchQuery
 from local_full_text_search.services.settings_service import SettingsService
 from local_full_text_search.ui.preview_panel import PreviewPanel
@@ -45,12 +49,13 @@ from local_full_text_search.workers.scan_worker import ScanWorker
 from local_full_text_search.workers.search_worker import SearchWorker
 
 
-SEARCH_NAV_ITEMS = ("全部文件", "PDF", "Word", "Excel", "PowerPoint", "图片", "文本/日志")
 PAGE_INDEX = {"search": 0, "index": 1, "failed": 2, "settings": 3}
 
 
 class MainWindow(QMainWindow):
     """Product-style shell: navigation first, search central, management behind pages."""
+
+    file_change_detected = Signal(str)
 
     def __init__(self, db: DatabaseManager, settings: AppSettings, settings_service: SettingsService) -> None:
         super().__init__()
@@ -62,14 +67,22 @@ class MainWindow(QMainWindow):
         self.scan_thread: QThread | None = None
         self.scan_worker: ScanWorker | None = None
         self.pending_search = False
+        self.pending_monitor_scan = False
+        self.closing = False
         self.page = 1
         self.total_confirmed = 0
+        self.file_monitor = FileMonitor(lambda path: self.file_change_detected.emit(str(path)))
+        self.force_close_timer = QTimer(self)
+        self.force_close_timer.setSingleShot(True)
+        self.force_close_timer.setInterval(2_500)
+        self.force_close_timer.timeout.connect(self._force_exit)
 
         self.setWindowTitle(APP_DISPLAY_NAME)
         self.resize(1440, 900)
         self.setMinimumSize(1100, 700)
         self._build_shell()
         self._install_shortcuts()
+        self.file_change_detected.connect(self.on_monitored_file_changed)
         self.refresh_all()
 
     def _build_shell(self) -> None:
@@ -80,16 +93,8 @@ class MainWindow(QMainWindow):
         root_layout.setSpacing(0)
 
         self.top_bar = TopBar()
-        self.top_bar.settings_requested.connect(lambda: self.switch_page("settings"))
-        self.top_bar.task_panel_requested.connect(self.toggle_task_panel)
+        self.top_bar.index_requested.connect(lambda: self.switch_page("index"))
         root_layout.addWidget(self.top_bar)
-
-        self.task_panel = TaskPanel()
-        self.task_panel.setVisible(False)
-        self.task_panel.pause_resume_requested.connect(self.toggle_scan_pause)
-        self.task_panel.cancel_requested.connect(self.cancel_scan)
-        self.task_panel.failed_requested.connect(lambda: self.switch_page("failed"))
-        root_layout.addWidget(self.task_panel)
 
         body = QFrame()
         body.setObjectName("Body")
@@ -102,7 +107,7 @@ class MainWindow(QMainWindow):
         body_layout.addWidget(self.sidebar)
 
         self.stack = QStackedWidget()
-        self.search_page = SearchPage()
+        self.search_page = SearchPage(self.settings)
         self.index_page = IndexPage()
         self.failed_page = FailedPage()
         self.settings_page = SettingsPage(self.settings)
@@ -135,6 +140,7 @@ class MainWindow(QMainWindow):
         self.search_page.open_folder_requested.connect(self.open_folder_path)
         self.search_page.reindex_requested.connect(self.reindex_file)
         self.search_page.result_selected.connect(self.show_preview)
+        self.search_page.clear_history_requested.connect(self.clear_search_history)
 
         self.index_page.add_root_requested.connect(self.add_root)
         self.index_page.scan_requested.connect(self.start_scan)
@@ -164,12 +170,7 @@ class MainWindow(QMainWindow):
             self.search_page.clear_search()
 
     def on_nav_requested(self, key: str) -> None:
-        if key in SEARCH_NAV_ITEMS:
-            self.switch_page("search")
-            self.search_page.set_file_type_from_nav(key)
-            self.sidebar.set_active(key)
-        else:
-            self.switch_page(key)
+        self.switch_page(key)
 
     def switch_page(self, key: str) -> None:
         self.stack.setCurrentIndex(PAGE_INDEX[key])
@@ -186,12 +187,9 @@ class MainWindow(QMainWindow):
             "settings": "调整搜索、索引和 OCR 默认行为",
         }
         self.top_bar.set_title(title_map[key], subtitle_map[key])
-        self.sidebar.set_active("全部文件" if key == "search" else key)
+        self.sidebar.set_active(key)
         if key == "failed":
             self.refresh_failed_page()
-
-    def toggle_task_panel(self) -> None:
-        self.task_panel.setVisible(not self.task_panel.isVisible())
 
     def refresh_all(self) -> None:
         roots = self.db.list_roots()
@@ -201,17 +199,44 @@ class MainWindow(QMainWindow):
         self.index_page.set_roots(roots, self.root_stats_by_id())
         self.refresh_failed_page()
         self.update_index_status()
+        self.search_page.set_history(self.db.search_history())
+        self.refresh_file_monitor()
+
+    def refresh_file_monitor(self) -> None:
+        self.file_monitor.stop()
+        if self.closing or not self.settings.monitor_file_changes:
+            return
+        roots = [
+            Path(str(row["path"]))
+            for row in self.db.list_roots(enabled_only=True)
+            if Path(str(row["path"])).exists()
+        ]
+        if roots:
+            self.file_monitor.start(roots)
+
+    def on_monitored_file_changed(self, _path: str) -> None:
+        if self.closing:
+            return
+        self.pending_monitor_scan = True
+        if self.scan_thread is None:
+            self.top_bar.set_index_status("检测到文件变化，点击更新", is_pending=True)
+
+    def clear_search_history(self) -> None:
+        self.db.clear_search_history()
+        self.search_page.set_history([])
 
     def refresh_failed_page(self) -> None:
         self.failed_page.set_rows(self.db.failed_files(limit=2000))
 
     def update_index_status(self) -> None:
         stats = self.db.stats()
+        if self.pending_monitor_scan and self.scan_thread is None:
+            self.top_bar.set_index_status("检测到文件变化，点击更新", is_pending=True)
+            return
         self.top_bar.set_index_status(
             f"已索引 {stats['files']} 个文件",
             is_running=self.scan_thread is not None,
         )
-        self.task_panel.set_idle(stats)
 
     def root_stats_by_id(self) -> dict[int, dict[str, int]]:
         data: dict[int, dict[str, int]] = {}
@@ -252,8 +277,9 @@ class MainWindow(QMainWindow):
 
     def start_scan(self) -> None:
         if self.scan_thread is not None:
-            self.task_panel.setVisible(True)
+            self.switch_page("index")
             return
+        self.pending_monitor_scan = False
         self.scan_thread = QThread()
         self.scan_worker = ScanWorker(self.db.db_path, self.settings)
         self.scan_worker.moveToThread(self.scan_thread)
@@ -265,46 +291,56 @@ class MainWindow(QMainWindow):
         self.scan_worker.failed.connect(self.scan_thread.quit)
         self.scan_thread.finished.connect(self.cleanup_scan_thread)
         self.top_bar.set_index_status("正在索引...", is_running=True)
-        self.task_panel.set_running("准备索引", 0, 0)
-        self.task_panel.setVisible(True)
         self.index_page.set_task_running(True)
         self.scan_thread.start()
 
-    def toggle_scan_pause(self) -> None:
-        if self.scan_worker is None:
-            return
-        if self.task_panel.paused:
-            self.scan_worker.resume()
-            self.task_panel.set_paused(False)
-        else:
-            self.scan_worker.pause()
-            self.task_panel.set_paused(True)
-
-    def cancel_scan(self) -> None:
+    def cancel_scan(self, *, force: bool = False) -> None:
         if self.scan_worker is not None:
-            self.scan_worker.cancel()
+            self.scan_worker.cancel(force=force)
 
     def on_scan_progress(self, payload: object) -> None:
         if not isinstance(payload, dict):
             return
         indexed = int(payload.get("indexed") or 0)
         scanned = int(payload.get("scanned") or 0)
+        total = int(payload.get("total_files") or scanned)
+        completed = int(payload.get("completed_files") or indexed)
         failed = int(payload.get("failed") or 0)
         current = str(payload.get("current_file") or "")
-        text = f"正在索引 {indexed:,} / {scanned:,}"
+        stage = str(payload.get("stage") or "indexing")
+        phase_label = str(payload.get("phase_label") or "正在索引")
+        eta_lower = int(payload.get("eta_lower_seconds") or 0)
+        eta_upper = int(payload.get("eta_upper_seconds") or 0)
+        eta_text = format_remaining_range(eta_lower, eta_upper)
+        active_elapsed = int(payload.get("active_elapsed_seconds") or 0)
+        active_queue = str(payload.get("queue") or "")
+        active_count = int(payload.get("active_file_count") or 0)
+        text = f"{phase_label} {completed:,} / {max(total, completed):,}"
         self.top_bar.set_index_status(text, is_running=True)
-        self.task_panel.set_running(current or text, indexed, scanned, failed)
-        self.index_page.set_scan_progress(indexed, scanned, failed, current)
+        self.index_page.set_scan_progress(
+            completed,
+            total,
+            failed,
+            current,
+            phase_label=phase_label,
+            eta_text=eta_text,
+            active_elapsed_seconds=active_elapsed,
+            active_queue=active_queue,
+            active_file_count=active_count,
+            indeterminate=stage in {"discovering", "planning", "fts"},
+        )
 
     def on_scan_finished(self, summary: object) -> None:
         self.index_page.set_task_running(False)
-        self.task_panel.set_finished(str(summary))
+        if self.closing:
+            return
         self.refresh_all()
 
     def on_scan_failed(self, message: str) -> None:
         self.index_page.set_task_running(False)
+        if self.closing:
+            return
         self.top_bar.set_index_status("索引任务失败", is_error=True)
-        self.task_panel.set_error("索引任务失败，详细信息已写入日志")
         QMessageBox.critical(self, "索引任务失败", message)
 
     def cleanup_scan_thread(self) -> None:
@@ -312,6 +348,7 @@ class MainWindow(QMainWindow):
         self.scan_worker = None
         self.index_page.set_task_running(False)
         self.update_index_status()
+        self._finish_close_if_idle()
 
     def request_search(self) -> None:
         if not self.search_page.text():
@@ -339,8 +376,11 @@ class MainWindow(QMainWindow):
             search_path=self.search_page.search_path(),
             search_content=self.search_page.search_content(),
             include_ocr=self.search_page.include_ocr(),
+            include_ocr_fuzzy=self.search_page.include_ocr_fuzzy(),
+            ocr_min_confidence=self.settings.ocr_min_confidence,
             case_sensitive=self.search_page.case_sensitive(),
-            page_size=min(max(self.settings.page_size, 50), 100),
+            page_size=min(max(self.settings.page_size, 10), 100),
+            max_results=self.settings.max_results,
             page=self.page,
         )
         self.search_thread = QThread()
@@ -362,28 +402,37 @@ class MainWindow(QMainWindow):
             self.search_worker.cancel()
 
     def on_search_finished(self, page: object) -> None:
-        self.total_confirmed = page.total_confirmed
+        self.total_confirmed = page.available_results
         self.search_page.set_results(page)
+        if self.settings.save_search_history and self.search_worker is not None:
+            self.db.add_search_history(self.search_worker.query.text)
+            self.search_page.set_history(self.db.search_history())
         if page.total_confirmed <= 0:
             self.hide_preview()
 
     def on_search_cancelled(self) -> None:
+        self.search_page.clear_timing()
         if self.pending_search:
             self.search_page.set_status("正在准备新搜索...")
         else:
             self.search_page.set_status("搜索已取消")
+            self.search_page.show_interrupted_state("搜索已取消")
 
     def on_search_failed(self, message: str) -> None:
-        self.search_page.set_status("搜索失败，详细信息已写入日志")
-        QMessageBox.critical(self, "搜索失败", message)
+        self.search_page.clear_timing()
+        self.search_page.set_status(f"搜索失败：{message}")
+        self.search_page.show_interrupted_state("搜索未完成")
 
     def cleanup_search_thread(self) -> None:
         self.search_page.set_running(False)
         self.search_thread = None
         self.search_worker = None
-        if self.pending_search:
+        if self.pending_search and not self.closing:
             self.pending_search = False
             self._run_search()
+        else:
+            self.pending_search = False
+        self._finish_close_if_idle()
 
     def previous_page(self) -> None:
         if self.page <= 1:
@@ -392,7 +441,7 @@ class MainWindow(QMainWindow):
         self._run_search()
 
     def next_page_search(self) -> None:
-        if self.page * min(max(self.settings.page_size, 50), 100) >= self.total_confirmed:
+        if self.page * min(max(self.settings.page_size, 10), 100) >= self.total_confirmed:
             return
         self.page += 1
         self._run_search()
@@ -422,7 +471,8 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self.search_page.set_status(f"打开文件夹失败：{exc}")
 
-    def reindex_file(self, _path: str) -> None:
+    def reindex_file(self, path: str) -> None:
+        self.db.invalidate_file(path)
         self.start_scan()
 
     def export_failed_rows(self, rows: list[object]) -> None:
@@ -457,12 +507,38 @@ class MainWindow(QMainWindow):
     def save_settings(self, settings: AppSettings) -> None:
         self.settings = settings
         self.settings_service.save(settings)
+        self.search_page.apply_settings(settings)
+        self.refresh_file_monitor()
         self.search_page.set_status("设置已保存")
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        self.file_monitor.stop()
+        if self.scan_thread is None and self.search_thread is None:
+            event.accept()
+            return
+        if self.closing:
+            event.ignore()
+            return
+        self.closing = True
+        self.pending_search = False
+        self.pending_monitor_scan = False
+        self.cancel_scan(force=True)
+        self.cancel_search()
+        self.hide()
+        self.force_close_timer.start()
+        event.ignore()
+
+    def _finish_close_if_idle(self) -> None:
+        if self.closing and self.scan_thread is None and self.search_thread is None:
+            self._force_exit()
+
+    def _force_exit(self) -> None:
+        if self.closing:
+            os._exit(0)
 
 
 class TopBar(QFrame):
-    settings_requested = Signal()
-    task_panel_requested = Signal()
+    index_requested = Signal()
 
     def __init__(self) -> None:
         super().__init__()
@@ -479,26 +555,30 @@ class TopBar(QFrame):
 
         self.index_button = QPushButton("已索引 0 个文件")
         self.index_button.setObjectName("IndexStatusButton")
-        self.index_button.clicked.connect(self.task_panel_requested.emit)
-        self.settings_button = QPushButton("设置")
-        self.settings_button.setObjectName("TextButton")
-        self.settings_button.setToolTip("打开设置")
-        self.settings_button.clicked.connect(self.settings_requested.emit)
+        self.index_button.setToolTip("打开索引管理")
+        self.index_button.clicked.connect(self.index_requested.emit)
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(24, 14, 24, 14)
         layout.addLayout(title_layout)
         layout.addStretch(1)
         layout.addWidget(self.index_button)
-        layout.addWidget(self.settings_button)
 
     def set_title(self, title: str, subtitle: str) -> None:
         self.title.setText(title)
         self.subtitle.setText(subtitle)
 
-    def set_index_status(self, text: str, *, is_running: bool = False, is_error: bool = False) -> None:
+    def set_index_status(
+        self,
+        text: str,
+        *,
+        is_running: bool = False,
+        is_error: bool = False,
+        is_pending: bool = False,
+    ) -> None:
         self.index_button.setText(text)
-        self.index_button.setProperty("state", "error" if is_error else "running" if is_running else "ready")
+        state = "error" if is_error else "running" if is_running else "pending" if is_pending else "ready"
+        self.index_button.setProperty("state", state)
         self.index_button.style().unpolish(self.index_button)
         self.index_button.style().polish(self.index_button)
 
@@ -509,23 +589,18 @@ class Sidebar(QFrame):
     def __init__(self) -> None:
         super().__init__()
         self.setObjectName("Sidebar")
-        self.setFixedWidth(220)
+        self.setFixedWidth(184)
         self.buttons: dict[str, QPushButton] = {}
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 18, 12, 18)
+        layout.setContentsMargins(10, 16, 10, 16)
         layout.setSpacing(6)
-        layout.addWidget(section_label("搜索"))
-        for label in SEARCH_NAV_ITEMS:
-            self._add_button(layout, label, label)
-        layout.addSpacing(12)
-        layout.addWidget(separator())
-        layout.addSpacing(12)
-        layout.addWidget(section_label("管理"))
+        self._add_button(layout, "搜索", "search")
         self._add_button(layout, "索引管理", "index")
         self._add_button(layout, "未成功索引", "failed")
-        self._add_button(layout, "设置", "settings")
         layout.addStretch(1)
-        self.set_active("全部文件")
+        layout.addWidget(separator())
+        self._add_button(layout, "设置", "settings")
+        self.set_active("search")
 
     def _add_button(self, layout: QVBoxLayout, text: str, key: str) -> None:
         button = QPushButton(text)
@@ -553,34 +628,33 @@ class SearchPage(QWidget):
     open_folder_requested = Signal(str)
     reindex_requested = Signal(str)
     result_selected = Signal(object)
+    clear_history_requested = Signal()
 
-    def __init__(self) -> None:
+    def __init__(self, settings: AppSettings) -> None:
         super().__init__()
         self.setObjectName("Page")
         self._stats: dict[str, int] = {}
         self._has_roots = False
         self.debounce = QTimer(self)
         self.debounce.setSingleShot(True)
-        self.debounce.setInterval(300)
         self.debounce.timeout.connect(self.search_requested.emit)
+        self.auto_search_enabled = False
+        self._history: list[str] = []
+        self._estimator = SearchTimeEstimator()
+        self._active_estimate_context: SearchEstimateContext | None = None
         self._build()
+        self.apply_settings(settings)
 
     def _build(self) -> None:
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 22, 24, 22)
-        layout.setSpacing(16)
-
-        title = QLabel("本地全文搜索")
-        title.setObjectName("PageTitle")
-        subtitle = QLabel("搜索文件名、正文、表格、幻灯片和图片文字")
-        subtitle.setObjectName("PageSubtitle")
-        layout.addWidget(title)
-        layout.addWidget(subtitle)
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setSpacing(14)
 
         self.search_box = SearchBox()
         self.search_box.input.textChanged.connect(self._on_text_changed)
         self.search_box.search_requested.connect(self.search_requested.emit)
         self.search_box.stop_requested.connect(self.stop_requested.emit)
+        self.search_box.history_requested.connect(self._show_history)
         layout.addWidget(self.search_box)
 
         filters = QHBoxLayout()
@@ -592,12 +666,12 @@ class SearchPage(QWidget):
         self.mode_combo.addItem("任意关键词", "any")
         self.mode_combo.addItem("正则表达式", "regex")
         self.file_type_combo = chip_combo()
-        for label in ("全部", "PDF", "Word", "Excel", "PowerPoint", "图片", "文本/日志"):
+        for label in ("全部", "PDF", "Word", "Excel", "PowerPoint", "图片", "文本/日志", "压缩包"):
             self.file_type_combo.addItem("全部格式" if label == "全部" else label, label)
         self.scope_combo = chip_combo()
         self.scope_combo.addItem("全部范围", None)
-        self.more_button = QPushButton("更多筛选")
-        self.more_button.setObjectName("ChipButton")
+        self.more_button = QPushButton("筛选")
+        self.more_button.setObjectName("FilterButton")
         self.more_button.setCheckable(True)
         self.more_button.clicked.connect(self._toggle_advanced)
         filters.addWidget(self.mode_combo)
@@ -613,7 +687,14 @@ class SearchPage(QWidget):
 
         self.status_label = QLabel("输入关键词开始搜索")
         self.status_label.setObjectName("InlineStatus")
-        layout.addWidget(self.status_label)
+        self.timing_label = QLabel("")
+        self.timing_label.setObjectName("TimingLabel")
+        self.timing_label.setVisible(False)
+        status_row = QHBoxLayout()
+        status_row.setContentsMargins(0, 0, 0, 0)
+        status_row.addWidget(self.status_label, 1)
+        status_row.addWidget(self.timing_label)
+        layout.addLayout(status_row)
 
         self.content_stack = QStackedWidget()
         self.empty_state = EmptyState()
@@ -646,6 +727,16 @@ class SearchPage(QWidget):
         self.file_type_combo.currentIndexChanged.connect(self._filter_changed)
         self.mode_combo.currentIndexChanged.connect(self._filter_changed)
         self.scope_combo.currentIndexChanged.connect(self._filter_changed)
+        for checkbox in (
+            self.advanced.search_filename,
+            self.advanced.search_path,
+            self.advanced.search_content,
+            self.advanced.include_ocr,
+            self.advanced.ocr_fuzzy,
+            self.advanced.case_sensitive,
+        ):
+            checkbox.toggled.connect(self._update_filter_button)
+        self._update_filter_button()
         self.show_idle_state()
 
     def _on_text_changed(self, text: str) -> None:
@@ -654,7 +745,8 @@ class SearchPage(QWidget):
             self.debounce.stop()
             self.show_idle_state()
             return
-        self.debounce.start()
+        if self.auto_search_enabled:
+            self.debounce.start()
 
     def _filter_changed(self) -> None:
         if self.text():
@@ -662,6 +754,24 @@ class SearchPage(QWidget):
 
     def _toggle_advanced(self) -> None:
         self.advanced.setVisible(self.more_button.isChecked())
+        self._update_filter_button()
+
+    def _update_filter_button(self) -> None:
+        active_count = sum(
+            (
+                not self.advanced.search_filename.isChecked(),
+                not self.advanced.search_path.isChecked(),
+                not self.advanced.search_content.isChecked(),
+                not self.advanced.include_ocr.isChecked(),
+                self.advanced.ocr_fuzzy.isChecked(),
+                self.advanced.case_sensitive.isChecked(),
+            )
+        )
+        label = "收起筛选" if self.more_button.isChecked() else "筛选"
+        self.more_button.setText(f"{label} · {active_count}" if active_count else label)
+        self.more_button.setProperty("active", bool(active_count or self.more_button.isChecked()))
+        self.more_button.style().unpolish(self.more_button)
+        self.more_button.style().polish(self.more_button)
 
     def set_roots(self, roots: list[object]) -> None:
         current = self.scope_combo.currentData()
@@ -680,12 +790,6 @@ class SearchPage(QWidget):
         self._has_roots = has_roots
         if not self.text():
             self.show_idle_state()
-
-    def set_file_type_from_nav(self, label: str) -> None:
-        data = "全部" if label == "全部文件" else label
-        index = self.file_type_combo.findData(data)
-        if index >= 0:
-            self.file_type_combo.setCurrentIndex(index)
 
     def focus_search(self) -> None:
         self.search_box.input.setFocus()
@@ -721,23 +825,91 @@ class SearchPage(QWidget):
     def include_ocr(self) -> bool:
         return self.advanced.include_ocr.isChecked()
 
+    def include_ocr_fuzzy(self) -> bool:
+        return self.advanced.ocr_fuzzy.isChecked()
+
     def case_sensitive(self) -> bool:
         return self.advanced.case_sensitive.isChecked()
 
     def set_running(self, running: bool) -> None:
         self.search_box.set_running(running)
         if running:
-            self.set_status("正在搜索...")
+            self._active_estimate_context = self._estimate_context()
+            estimate = self._estimator.estimate(self._active_estimate_context)
+            self.set_status("正在检索索引...")
+            self.timing_label.setText(estimate.display_text())
+            self.timing_label.setVisible(True)
+            if self.content_stack.currentWidget() is self.empty_state:
+                self.empty_state.set_content(
+                    "正在检索",
+                    "正在匹配已建立的全文索引",
+                    "",
+                    None,
+                )
 
     def set_results(self, page: object) -> None:
+        if self._active_estimate_context is not None:
+            self._estimator.observe(self._active_estimate_context, int(page.elapsed_ms))
+            self._active_estimate_context = None
         self.page_label.setText(f"第 {page.page} 页")
-        self.set_status(f"找到 {page.total_confirmed} 条结果 · 用时 {page.elapsed_ms / 1000:.2f} 秒 · 候选 {page.total_candidates}")
+        if page.truncated:
+            count_text = f"找到 {page.total_confirmed} 条结果，仅显示前 {page.available_results} 条"
+        else:
+            count_text = f"找到 {page.total_confirmed} 条结果"
+        self.set_status(f"{count_text} · 候选 {page.total_candidates}")
+        self.timing_label.setText(f"实际用时 {format_elapsed(int(page.elapsed_ms))}")
+        self.timing_label.setVisible(True)
         if page.total_confirmed <= 0:
             self.show_no_results()
             return
         self.content_stack.setCurrentWidget(self.result_view)
         self.result_view.set_results(page.results, self.text())
-        self.pager.setVisible(page.total_confirmed > page.page_size)
+        self.pager.setVisible(page.available_results > page.page_size)
+
+    def apply_settings(self, settings: AppSettings) -> None:
+        self.auto_search_enabled = bool(settings.auto_search)
+        self.debounce.setInterval(max(100, int(settings.search_debounce_ms)))
+        mode_index = self.mode_combo.findData(settings.default_search_mode)
+        if mode_index >= 0:
+            self.mode_combo.setCurrentIndex(mode_index)
+        self.advanced.include_ocr.setChecked(settings.enable_ocr)
+
+    def _estimate_context(self) -> SearchEstimateContext:
+        return SearchEstimateContext(
+            mode=self.mode_value(),
+            file_count=int(self._stats.get("files", 0)),
+            scoped=bool(self.root_ids()),
+            extension_filtered=bool(self.extensions()),
+            searches_content=self.search_content(),
+            ocr_fuzzy=self.include_ocr_fuzzy(),
+            case_sensitive=self.case_sensitive(),
+        )
+
+    def clear_timing(self) -> None:
+        self._active_estimate_context = None
+        self.timing_label.clear()
+        self.timing_label.setVisible(False)
+
+    def set_history(self, items: list[str]) -> None:
+        self._history = items
+        self.search_box.history_button.setEnabled(bool(items))
+
+    def _show_history(self) -> None:
+        if not self._history:
+            return
+        menu = QMenu(self)
+        for text in self._history:
+            action = menu.addAction(text)
+            action.triggered.connect(lambda _checked=False, value=text: self._select_history(value))
+        menu.addSeparator()
+        clear_action = menu.addAction("清空搜索历史")
+        clear_action.triggered.connect(self.clear_history_requested.emit)
+        button = self.search_box.history_button
+        menu.exec(button.mapToGlobal(button.rect().bottomLeft()))
+
+    def _select_history(self, text: str) -> None:
+        self.search_box.input.setText(text)
+        self.search_requested.emit()
 
     def show_idle_state(self) -> None:
         if not self._has_roots:
@@ -758,6 +930,7 @@ class SearchPage(QWidget):
         self.content_stack.setCurrentWidget(self.empty_state)
         self.pager.setVisible(False)
         self.set_status("输入关键词开始搜索")
+        self.clear_timing()
 
     def show_no_results(self) -> None:
         self.empty_state.set_content(
@@ -769,6 +942,10 @@ class SearchPage(QWidget):
         self.content_stack.setCurrentWidget(self.empty_state)
         self.pager.setVisible(False)
 
+    def show_interrupted_state(self, title: str) -> None:
+        if self.content_stack.currentWidget() is self.empty_state:
+            self.empty_state.set_content(title, "检索条件已保留", "", None)
+
     def set_status(self, text: str) -> None:
         self.status_label.setText(text)
 
@@ -776,6 +953,7 @@ class SearchPage(QWidget):
 class SearchBox(QFrame):
     search_requested = Signal()
     stop_requested = Signal()
+    history_requested = Signal()
 
     def __init__(self) -> None:
         super().__init__()
@@ -790,6 +968,12 @@ class SearchBox(QFrame):
         self.clear_button.setObjectName("IconButton")
         self.clear_button.setFixedSize(30, 30)
         self.clear_button.clicked.connect(self.input.clear)
+        self.history_button = QPushButton("◷")
+        self.history_button.setObjectName("IconButton")
+        self.history_button.setFixedSize(30, 30)
+        self.history_button.setToolTip("搜索历史")
+        self.history_button.setEnabled(False)
+        self.history_button.clicked.connect(self.history_requested.emit)
         self.stop_button = QPushButton("停止")
         self.stop_button.setObjectName("StopButton")
         self.stop_button.clicked.connect(self.stop_requested.emit)
@@ -799,6 +983,7 @@ class SearchBox(QFrame):
         layout.setSpacing(8)
         layout.addWidget(icon)
         layout.addWidget(self.input, 1)
+        layout.addWidget(self.history_button)
         layout.addWidget(self.clear_button)
         layout.addWidget(self.stop_button)
         self.update_clear_button()
@@ -819,7 +1004,6 @@ class AdvancedFilters(QFrame):
         self.search_content = QCheckBox("搜索正文")
         self.include_ocr = QCheckBox("包含 OCR")
         self.case_sensitive = QCheckBox("大小写敏感")
-        self.exact_only = QCheckBox("仅精确命中")
         self.ocr_fuzzy = QCheckBox("显示 OCR 疑似命中")
         for checkbox in (self.search_filename, self.search_path, self.search_content, self.include_ocr):
             checkbox.setChecked(True)
@@ -833,7 +1017,6 @@ class AdvancedFilters(QFrame):
                 self.search_path,
                 self.search_content,
                 self.include_ocr,
-                self.exact_only,
                 self.ocr_fuzzy,
                 self.case_sensitive,
             )
@@ -897,20 +1080,15 @@ class IndexPage(QWidget):
         self.setObjectName("Page")
         self.running = False
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 22, 24, 22)
-        layout.setSpacing(16)
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setSpacing(14)
         header = QHBoxLayout()
-        title_box = QVBoxLayout()
-        title = QLabel("索引管理")
-        title.setObjectName("PageTitle")
-        subtitle = QLabel("管理需要搜索的本地文件夹和索引状态")
-        subtitle.setObjectName("PageSubtitle")
-        title_box.addWidget(title)
-        title_box.addWidget(subtitle)
+        section_title = QLabel("搜索范围")
+        section_title.setObjectName("ContentHeading")
         self.add_button = QPushButton("添加搜索范围")
         self.add_button.setObjectName("PrimaryButton")
         self.add_button.clicked.connect(self.add_root_requested.emit)
-        header.addLayout(title_box)
+        header.addWidget(section_title)
         header.addStretch(1)
         header.addWidget(self.add_button)
         layout.addLayout(header)
@@ -919,8 +1097,10 @@ class IndexPage(QWidget):
         self.task_strip.setObjectName("TaskStrip")
         task_layout = QHBoxLayout(self.task_strip)
         task_layout.setContentsMargins(14, 10, 14, 10)
-        self.task_label = QLabel("当前没有索引任务")
+        self.task_label = QLabel("索引已就绪")
         self.task_label.setObjectName("MutedText")
+        self.task_eta = QLabel("")
+        self.task_eta.setObjectName("IndexEta")
         self.task_progress = QProgressBar()
         self.task_progress.setTextVisible(False)
         self.task_progress.setFixedWidth(180)
@@ -928,9 +1108,10 @@ class IndexPage(QWidget):
         self.pause_button = QPushButton("暂停")
         self.cancel_button = QPushButton("取消")
         self.start_button.clicked.connect(self.scan_requested.emit)
-        self.pause_button.clicked.connect(self.pause_requested.emit)
+        self.pause_button.clicked.connect(self._toggle_pause)
         self.cancel_button.clicked.connect(self.cancel_requested.emit)
         task_layout.addWidget(self.task_label, 1)
+        task_layout.addWidget(self.task_eta)
         task_layout.addWidget(self.task_progress)
         task_layout.addWidget(self.start_button)
         task_layout.addWidget(self.pause_button)
@@ -943,7 +1124,7 @@ class IndexPage(QWidget):
         self.list_host = QWidget()
         self.list_layout = QVBoxLayout(self.list_host)
         self.list_layout.setContentsMargins(0, 0, 0, 0)
-        self.list_layout.setSpacing(10)
+        self.list_layout.setSpacing(0)
         self.scroll.setWidget(self.list_host)
         layout.addWidget(self.scroll, 1)
         self.set_task_running(False)
@@ -966,19 +1147,73 @@ class IndexPage(QWidget):
         self.list_layout.addStretch(1)
 
     def set_task_running(self, running: bool) -> None:
+        was_running = self.running
         self.running = running
+        self.task_progress.setVisible(running)
         self.pause_button.setVisible(running)
         self.cancel_button.setVisible(running)
         self.start_button.setEnabled(not running)
         if not running:
             self.task_progress.setValue(0)
-            self.task_label.setText("当前没有索引任务")
+            self.task_label.setText("索引已就绪")
+            self.task_eta.clear()
+            self.pause_button.setText("暂停")
+            self.paused = False
+        elif not was_running:
+            self.paused = False
+            self.pause_button.setText("暂停")
 
-    def set_scan_progress(self, indexed: int, scanned: int, failed: int, current: str) -> None:
+    def _toggle_pause(self) -> None:
+        if not self.running:
+            return
+        self.paused = not getattr(self, "paused", False)
+        self.pause_button.setText("继续" if self.paused else "暂停")
+        if self.paused:
+            self.pause_requested.emit()
+        else:
+            self.resume_requested.emit()
+
+    def set_scan_progress(
+        self,
+        completed: int,
+        total: int,
+        failed: int,
+        current: str,
+        *,
+        phase_label: str = "正在索引",
+        eta_text: str = "",
+        active_elapsed_seconds: int = 0,
+        active_queue: str = "",
+        active_file_count: int = 0,
+        indeterminate: bool = False,
+    ) -> None:
         self.set_task_running(True)
-        self.task_label.setText(f"正在索引 {indexed:,} / {scanned:,} · 失败 {failed} · {Path(current).name if current else ''}")
-        self.task_progress.setRange(0, max(scanned, indexed, 1))
-        self.task_progress.setValue(indexed)
+        current_name = Path(current).name if current else ""
+        current_display = compact_text(current_name, 52)
+        suffix = f" · {current_display}" if current_display else ""
+        self.task_label.setToolTip(current)
+        if active_elapsed_seconds > 0:
+            queue_labels = {
+                "normal": "普通",
+                "ocr": "OCR",
+                "zip": "ZIP",
+                "office_process": "Office",
+                "legacy_office": "旧版 Office",
+            }
+            queue_label = queue_labels.get(active_queue, active_queue)
+            suffix += f"（{queue_label} 已运行 {format_active_duration(active_elapsed_seconds)}"
+            if active_file_count > 1:
+                suffix += f"，活动任务 {active_file_count} 个"
+            suffix += "）"
+        self.task_label.setText(
+            f"{phase_label} {completed:,} / {max(total, completed):,} · 失败 {failed}{suffix}"
+        )
+        self.task_eta.setText(eta_text)
+        if indeterminate:
+            self.task_progress.setRange(0, 0)
+        else:
+            self.task_progress.setRange(0, max(total, completed, 1))
+            self.task_progress.setValue(completed)
 
 
 class RootCard(QFrame):
@@ -1017,17 +1252,18 @@ class RootCard(QFrame):
         top.setContentsMargins(0, 0, 0, 0)
         top.addWidget(title, 1)
         top.addWidget(status)
-        actions = QHBoxLayout()
-        actions.addStretch(1)
-        actions.addWidget(update_button)
-        actions.addWidget(more_button)
+        top.addWidget(update_button)
+        top.addWidget(more_button)
+        secondary = QHBoxLayout()
+        secondary.setContentsMargins(0, 0, 0, 0)
+        secondary.addWidget(meta)
+        secondary.addSpacing(16)
+        secondary.addWidget(detail, 1)
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 14, 16, 14)
-        layout.setSpacing(8)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(6)
         layout.addLayout(top)
-        layout.addWidget(meta)
-        layout.addWidget(detail)
-        layout.addLayout(actions)
+        layout.addLayout(secondary)
 
     def _show_menu(self, button: QPushButton, enabled: bool) -> None:
         menu = QMenu(self)
@@ -1055,14 +1291,10 @@ class FailedPage(QWidget):
         self.setObjectName("Page")
         self.rows: list[object] = []
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 22, 24, 22)
+        layout.setContentsMargins(24, 20, 24, 20)
         layout.setSpacing(14)
-        title = QLabel("未成功索引")
-        title.setObjectName("PageTitle")
         self.subtitle = QLabel("0 个文件需要处理")
-        self.subtitle.setObjectName("PageSubtitle")
-        layout.addWidget(title)
-        layout.addWidget(self.subtitle)
+        self.subtitle.setObjectName("ContentHeading")
 
         filters = QHBoxLayout()
         self.status_filter = chip_combo()
@@ -1074,6 +1306,8 @@ class FailedPage(QWidget):
         self.retry_button.clicked.connect(self.retry_requested.emit)
         self.export_button.clicked.connect(lambda: self.export_requested.emit(self.visible_rows()))
         self.open_log_button.clicked.connect(self.open_log_dir)
+        filters.addWidget(self.subtitle)
+        filters.addSpacing(12)
         filters.addWidget(self.status_filter)
         filters.addWidget(self.extension_filter)
         filters.addStretch(1)
@@ -1163,14 +1397,8 @@ class SettingsPage(QWidget):
         self.setObjectName("Page")
         self.settings = settings
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 22, 24, 22)
-        layout.setSpacing(16)
-        title = QLabel("设置")
-        title.setObjectName("PageTitle")
-        subtitle = QLabel("调整搜索、索引和 OCR 默认行为")
-        subtitle.setObjectName("PageSubtitle")
-        layout.addWidget(title)
-        layout.addWidget(subtitle)
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setSpacing(14)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -1181,13 +1409,31 @@ class SettingsPage(QWidget):
         host_layout.setSpacing(12)
 
         self.page_size = QSpinBox()
-        self.page_size.setRange(50, 1000)
+        self.page_size.setRange(10, 100)
         self.page_size.setValue(settings.page_size)
         self.auto_search = QCheckBox("输入后自动搜索")
-        self.auto_search.setChecked(True)
+        self.auto_search.setChecked(settings.auto_search)
+        self.search_delay = QSpinBox()
+        self.search_delay.setRange(100, 2000)
+        self.search_delay.setSuffix(" ms")
+        self.search_delay.setValue(settings.search_debounce_ms)
+        self.max_results = QSpinBox()
+        self.max_results.setRange(100, 100_000)
+        self.max_results.setValue(settings.max_results)
         self.search_history = QCheckBox("保存搜索历史")
         self.search_history.setChecked(settings.save_search_history)
-        host_layout.addWidget(settings_card("搜索", [("默认结果数量", self.page_size), ("", self.auto_search), ("", self.search_history)]))
+        host_layout.addWidget(
+            settings_card(
+                "搜索体验",
+                [
+                    ("", self.auto_search),
+                    ("自动搜索延迟", self.search_delay),
+                    ("", self.search_history),
+                    ("每页结果数量", self.page_size),
+                    ("最大展示结果", self.max_results),
+                ],
+            )
+        )
 
         self.enable_ocr = QCheckBox("启用 OCR")
         self.enable_ocr.setChecked(settings.enable_ocr)
@@ -1198,12 +1444,25 @@ class SettingsPage(QWidget):
         self.ocr_workers = QSpinBox()
         self.ocr_workers.setRange(1, 4)
         self.ocr_workers.setValue(settings.ocr_workers)
+        self.ocr_min_confidence = QDoubleSpinBox()
+        self.ocr_min_confidence.setRange(0.0, 1.0)
+        self.ocr_min_confidence.setSingleStep(0.05)
+        self.ocr_min_confidence.setDecimals(2)
+        self.ocr_min_confidence.setValue(settings.ocr_min_confidence)
         self.parser_workers = QSpinBox()
         self.parser_workers.setRange(1, 16)
         self.parser_workers.setValue(settings.parser_workers)
         self.slow_file_workers = QSpinBox()
         self.slow_file_workers.setRange(1, 4)
         self.slow_file_workers.setValue(settings.slow_file_workers)
+        self.process_parser_workers = QSpinBox()
+        self.process_parser_workers.setRange(1, 4)
+        self.process_parser_workers.setValue(settings.process_parser_workers)
+        self.large_office_threshold_mb = QSpinBox()
+        self.large_office_threshold_mb.setRange(1, 1024)
+        self.large_office_threshold_mb.setValue(
+            max(1, settings.large_office_process_min_bytes // (1024 * 1024))
+        )
         self.write_batch_size = QSpinBox()
         self.write_batch_size.setRange(1, 200)
         self.write_batch_size.setValue(settings.index_write_batch_size)
@@ -1215,28 +1474,66 @@ class SettingsPage(QWidget):
         self.max_ocr_side.setValue(settings.max_ocr_image_side)
         host_layout.addWidget(
             settings_card(
-                "索引与 OCR",
+                "OCR",
                 [
                     ("", self.enable_ocr),
                     ("", self.ocr_images),
                     ("", self.ocr_pdf),
+                ],
+            )
+        )
+
+        self.monitor_changes = QCheckBox("检测文件变化并提示更新")
+        self.monitor_changes.setChecked(settings.monitor_file_changes)
+        self.hidden_files = QCheckBox("索引隐藏文件")
+        self.hidden_files.setChecked(settings.include_hidden_files)
+        self.exclude_dirs = QTextEdit("\n".join(settings.excluded_dirs))
+        self.exclude_dirs.setMinimumHeight(90)
+        self.performance_preset = QComboBox()
+        self.performance_preset.addItem("平衡（推荐）", "balanced")
+        self.performance_preset.addItem("低资源", "low_resource")
+        self.performance_preset.addItem("最快完成", "fastest")
+        preset_index = self.performance_preset.findData(settings.index_performance_preset)
+        self.performance_preset.setCurrentIndex(preset_index if preset_index >= 0 else 0)
+        host_layout.addWidget(
+            settings_card(
+                "索引",
+                [
+                    ("性能模式", self.performance_preset),
+                    ("", self.monitor_changes),
+                    ("", self.hidden_files),
+                ],
+            )
+        )
+
+        self.advanced_toggle = QPushButton("显示高级性能设置")
+        self.advanced_toggle.setObjectName("DisclosureButton")
+        self.advanced_toggle.setCheckable(True)
+        host_layout.addWidget(self.advanced_toggle)
+
+        self.advanced_content = QWidget()
+        advanced_layout = QVBoxLayout(self.advanced_content)
+        advanced_layout.setContentsMargins(0, 0, 0, 0)
+        advanced_layout.setSpacing(12)
+        advanced_layout.addWidget(
+            settings_card(
+                "性能与资源",
+                [
                     ("普通解析线程数", self.parser_workers),
                     ("OCR 工作线程数", self.ocr_workers),
+                    ("OCR 最低置信度", self.ocr_min_confidence),
                     ("ZIP/老版 Office 慢任务线程数", self.slow_file_workers),
+                    ("大型 XLSX/DOCX 进程数", self.process_parser_workers),
+                    ("进程池启用阈值（MB）", self.large_office_threshold_mb),
                     ("批量写库文件数", self.write_batch_size),
                     ("小图片 OCR 跳过像素", self.min_ocr_pixels),
                     ("图片 OCR 最大边长", self.max_ocr_side),
                 ],
             )
         )
-
-        self.monitor_changes = QCheckBox("自动监控文件变化")
-        self.monitor_changes.setChecked(settings.monitor_file_changes)
-        self.hidden_files = QCheckBox("索引隐藏文件")
-        self.hidden_files.setChecked(settings.include_hidden_files)
-        self.exclude_dirs = QTextEdit("\n".join(settings.excluded_dirs))
-        self.exclude_dirs.setMinimumHeight(90)
-        host_layout.addWidget(settings_card("高级", [("", self.monitor_changes), ("", self.hidden_files), ("默认排除目录", self.exclude_dirs)]))
+        advanced_layout.addWidget(settings_card("排除目录", [("每行一个目录名", self.exclude_dirs)]))
+        self.advanced_content.setVisible(False)
+        host_layout.addWidget(self.advanced_content)
         host_layout.addStretch(1)
         scroll.setWidget(host)
         layout.addWidget(scroll, 1)
@@ -1246,89 +1543,50 @@ class SettingsPage(QWidget):
         save.clicked.connect(self.apply)
         layout.addWidget(save, alignment=Qt.AlignmentFlag.AlignRight)
 
+        self.auto_search.toggled.connect(self.search_delay.setEnabled)
+        self.search_delay.setEnabled(self.auto_search.isChecked())
+        self.enable_ocr.toggled.connect(self._update_ocr_controls)
+        self.advanced_toggle.toggled.connect(self._toggle_advanced)
+        self._update_ocr_controls(self.enable_ocr.isChecked())
+
+    def _toggle_advanced(self, visible: bool) -> None:
+        self.advanced_content.setVisible(visible)
+        self.advanced_toggle.setText("收起高级性能设置" if visible else "显示高级性能设置")
+
+    def _update_ocr_controls(self, enabled: bool) -> None:
+        for widget in (
+            self.ocr_images,
+            self.ocr_pdf,
+            self.ocr_workers,
+            self.ocr_min_confidence,
+            self.min_ocr_pixels,
+            self.max_ocr_side,
+        ):
+            widget.setEnabled(enabled)
+
     def apply(self) -> None:
         self.settings.page_size = int(self.page_size.value())
+        self.settings.max_results = int(self.max_results.value())
+        self.settings.auto_search = self.auto_search.isChecked()
+        self.settings.search_debounce_ms = int(self.search_delay.value())
         self.settings.save_search_history = self.search_history.isChecked()
         self.settings.enable_ocr = self.enable_ocr.isChecked()
         self.settings.ocr_images = self.ocr_images.isChecked()
         self.settings.ocr_scanned_pdf = self.ocr_pdf.isChecked()
         self.settings.parser_workers = int(self.parser_workers.value())
         self.settings.ocr_workers = int(self.ocr_workers.value())
+        self.settings.ocr_min_confidence = float(self.ocr_min_confidence.value())
         self.settings.slow_file_workers = int(self.slow_file_workers.value())
+        self.settings.process_parser_workers = int(self.process_parser_workers.value())
+        self.settings.large_office_process_min_bytes = int(self.large_office_threshold_mb.value()) * 1024 * 1024
         self.settings.index_write_batch_size = int(self.write_batch_size.value())
         self.settings.min_ocr_image_pixels = int(self.min_ocr_pixels.value())
         self.settings.max_ocr_image_side = int(self.max_ocr_side.value())
+        self.settings.index_performance_preset = str(self.performance_preset.currentData())
         self.settings.monitor_file_changes = self.monitor_changes.isChecked()
         self.settings.include_hidden_files = self.hidden_files.isChecked()
         self.settings.excluded_dirs = [line.strip() for line in self.exclude_dirs.toPlainText().splitlines() if line.strip()]
         self.save_requested.emit(self.settings)
-
-
-class TaskPanel(QFrame):
-    pause_resume_requested = Signal()
-    cancel_requested = Signal()
-    failed_requested = Signal()
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.setObjectName("TaskPanel")
-        self.paused = False
-        title = QLabel("索引任务")
-        title.setObjectName("SectionTitle")
-        self.detail = QLabel("当前没有索引任务")
-        self.detail.setObjectName("MutedText")
-        self.progress = QProgressBar()
-        self.progress.setTextVisible(False)
-        self.pause_resume_button = QPushButton("暂停")
-        self.cancel_button = QPushButton("取消当前任务")
-        self.failed_button = QPushButton("查看失败文件")
-        self.pause_resume_button.clicked.connect(self.pause_resume_requested.emit)
-        self.cancel_button.clicked.connect(self.cancel_requested.emit)
-        self.failed_button.clicked.connect(self.failed_requested.emit)
-        layout = QGridLayout(self)
-        layout.setContentsMargins(24, 12, 24, 12)
-        layout.setHorizontalSpacing(12)
-        layout.addWidget(title, 0, 0)
-        layout.addWidget(self.detail, 1, 0)
-        layout.addWidget(self.progress, 2, 0, 1, 4)
-        layout.addWidget(self.pause_resume_button, 0, 2)
-        layout.addWidget(self.cancel_button, 0, 3)
-        layout.addWidget(self.failed_button, 1, 3)
-
-    def set_idle(self, stats: dict[str, int]) -> None:
-        self.detail.setText(f"索引已更新 · 文件 {stats.get('files', 0):,} · 失败 {stats.get('failed', 0):,}")
-        self.progress.setRange(0, 1)
-        self.progress.setValue(1)
-        self.pause_resume_button.setEnabled(False)
-        self.cancel_button.setEnabled(False)
-
-    def set_running(self, current: str, indexed: int, scanned: int, failed: int = 0) -> None:
-        self.detail.setText(f"{current}\n已处理 {indexed:,} / {scanned:,} · 失败 {failed}")
-        self.progress.setRange(0, max(scanned, indexed, 1))
-        self.progress.setValue(indexed)
-        self.pause_resume_button.setEnabled(True)
-        self.cancel_button.setEnabled(True)
-
-    def set_paused(self, paused: bool) -> None:
-        self.paused = paused
-        self.pause_resume_button.setText("继续" if paused else "暂停")
-
-    def set_finished(self, summary: str) -> None:
-        self.detail.setText(f"索引完成：{summary}")
-        self.pause_resume_button.setEnabled(False)
-        self.cancel_button.setEnabled(False)
-        self.set_paused(False)
-
-    def set_error(self, message: str) -> None:
-        self.detail.setText(message)
-        self.pause_resume_button.setEnabled(False)
-        self.cancel_button.setEnabled(False)
-
-
-def section_label(text: str) -> QLabel:
-    label = QLabel(text)
-    label.setObjectName("SidebarSection")
-    return label
 
 
 def separator() -> QFrame:
@@ -1340,7 +1598,7 @@ def separator() -> QFrame:
 
 def chip_combo() -> QComboBox:
     combo = QComboBox()
-    combo.setObjectName("FilterChip")
+    combo.setObjectName("FilterControl")
     combo.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
     return combo
 
@@ -1369,6 +1627,43 @@ def scope_detail(stats: dict[str, int]) -> str:
     return " · ".join(pieces) if pieces else "等待索引或仅有其他格式文件"
 
 
+def format_elapsed(elapsed_ms: int) -> str:
+    if elapsed_ms < 1_000:
+        return f"{max(1, elapsed_ms)} 毫秒"
+    if elapsed_ms < 60_000:
+        return f"{elapsed_ms / 1_000:.1f} 秒"
+    return f"{elapsed_ms / 60_000:.1f} 分钟"
+
+
+def format_remaining_range(lower_seconds: int, upper_seconds: int) -> str:
+    if upper_seconds <= 0:
+        return ""
+    if upper_seconds < 60:
+        return f"预计剩余 {max(1, lower_seconds)}-{max(1, upper_seconds)} 秒"
+    lower_minutes = max(1, lower_seconds // 60)
+    upper_minutes = max(lower_minutes, (upper_seconds + 59) // 60)
+    return f"预计剩余 {lower_minutes}-{upper_minutes} 分钟"
+
+
+def format_active_duration(seconds: int) -> str:
+    seconds = max(0, int(seconds))
+    if seconds < 60:
+        return f"{seconds} 秒"
+    minutes, remainder = divmod(seconds, 60)
+    if minutes < 60:
+        return f"{minutes} 分 {remainder:02d} 秒"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours} 小时 {minutes:02d} 分"
+
+
+def compact_text(text: str, max_chars: int) -> str:
+    if len(text) <= max_chars:
+        return text
+    left = max(1, max_chars // 2 - 1)
+    right = max(1, max_chars - left - 1)
+    return f"{text[:left]}…{text[-right:]}"
+
+
 def settings_card(title: str, rows: list[tuple[str, QWidget]]) -> QFrame:
     card = QFrame()
     card.setObjectName("SettingsCard")
@@ -1376,6 +1671,7 @@ def settings_card(title: str, rows: list[tuple[str, QWidget]]) -> QFrame:
     layout.setContentsMargins(16, 14, 16, 14)
     layout.setHorizontalSpacing(16)
     layout.setVerticalSpacing(10)
+    layout.setColumnStretch(0, 1)
     heading = QLabel(title)
     heading.setObjectName("SectionTitle")
     layout.addWidget(heading, 0, 0, 1, 2)
@@ -1383,6 +1679,9 @@ def settings_card(title: str, rows: list[tuple[str, QWidget]]) -> QFrame:
         if label:
             text = QLabel(label)
             text.setObjectName("MutedText")
+            if isinstance(widget, (QSpinBox, QDoubleSpinBox, QComboBox)):
+                widget.setMinimumWidth(180)
+                widget.setMaximumWidth(220)
             layout.addWidget(text, index, 0)
             layout.addWidget(widget, index, 1)
         else:

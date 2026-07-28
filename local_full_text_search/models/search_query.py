@@ -15,6 +15,7 @@ class SearchQuery:
     search_content: bool = True
     include_ocr: bool = True
     include_ocr_fuzzy: bool = False
+    ocr_min_confidence: float = 0.60
     case_sensitive: bool = False
     ignore_spaces: bool = False
     ignore_hyphens: bool = False
@@ -23,5 +24,6 @@ class SearchQuery:
     min_size: int | None = None
     max_size: int | None = None
     page_size: int = 100
+    max_results: int = 1000
     page: int = 1
     cursor: str | None = None
