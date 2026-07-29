@@ -1679,7 +1679,8 @@ def parser_identity_for_path(file_path: Path, settings: AppSettings) -> tuple[st
     elif name == "image_ocr":
         version += (
             f":ocr={int(settings.enable_ocr and settings.ocr_images)}:{settings.ocr_language}"
-            f":min={settings.min_ocr_image_pixels}:side={settings.max_ocr_image_side}"
+            f":min={settings.min_ocr_image_pixels}:detect={settings.max_ocr_image_side}"
+            ":adaptive=1:tile=1280:overlap=160"
         )
     elif name == "zip":
         version += (

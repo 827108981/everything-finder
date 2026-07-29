@@ -28,7 +28,6 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QSplitter,
     QStackedWidget,
-    QStyle,
     QTableWidget,
     QTableWidgetItem,
     QTextEdit,
@@ -1069,19 +1068,15 @@ class SearchBox(QFrame):
         self.input.setPlaceholderText("搜索文件名、正文、表格、幻灯片和图片文字")
         self.input.returnPressed.connect(self.search_requested.emit)
         self.clear_button = QPushButton()
-        self.clear_button.setObjectName("IconButton")
-        self.clear_button.setFixedSize(30, 30)
-        self.clear_button.setIcon(
-            self.style().standardIcon(QStyle.StandardPixmap.SP_LineEditClearButton)
-        )
+        self.clear_button.setObjectName("SearchActionButton")
+        self.clear_button.setText("清空")
+        self.clear_button.setFixedSize(48, 30)
         self.clear_button.setToolTip("清空搜索内容")
         self.clear_button.clicked.connect(self.input.clear)
         self.history_button = QPushButton()
-        self.history_button.setObjectName("IconButton")
-        self.history_button.setFixedSize(30, 30)
-        self.history_button.setIcon(
-            self.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogDetailedView)
-        )
+        self.history_button.setObjectName("SearchActionButton")
+        self.history_button.setText("历史")
+        self.history_button.setFixedSize(48, 30)
         self.history_button.setToolTip("搜索历史")
         self.history_button.setEnabled(False)
         self.history_button.setVisible(False)
@@ -1090,11 +1085,15 @@ class SearchBox(QFrame):
         self.stop_button.setObjectName("StopButton")
         self.stop_button.clicked.connect(self.stop_requested.emit)
         self.stop_button.setVisible(False)
+        self.action_separator = QFrame()
+        self.action_separator.setObjectName("SearchActionSeparator")
+        self.action_separator.setFixedSize(1, 24)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(16, 0, 10, 0)
         layout.setSpacing(8)
         layout.addWidget(icon)
         layout.addWidget(self.input, 1)
+        layout.addWidget(self.action_separator)
         layout.addWidget(self.history_button)
         layout.addWidget(self.clear_button)
         layout.addWidget(self.stop_button)
@@ -1660,7 +1659,7 @@ class SettingsPage(QWidget):
                     ("进程池启用阈值（MB）", self.large_office_threshold_mb),
                     ("批量写库文件数", self.write_batch_size),
                     ("小图片 OCR 跳过像素", self.min_ocr_pixels),
-                    ("图片 OCR 最大边长", self.max_ocr_side),
+                    ("OCR 首轮检测边长", self.max_ocr_side),
                 ],
             )
         )

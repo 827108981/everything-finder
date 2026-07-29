@@ -137,7 +137,31 @@ QLineEdit#SearchInput {
     background: transparent;
     font-size: 16px;
     padding: 0;
+    min-width: 160px;
     selection-background-color: #BFDBFE;
+}
+
+QFrame#SearchActionSeparator {
+    background: #E4E7EC;
+    border: none;
+}
+
+QPushButton#SearchActionButton {
+    min-height: 30px;
+    max-height: 30px;
+    min-width: 48px;
+    max-width: 48px;
+    padding: 0;
+    border: none;
+    border-radius: 6px;
+    background: #F9FAFB;
+    color: #475467;
+    font-size: 12px;
+}
+
+QPushButton#SearchActionButton:hover {
+    background: #EAECF0;
+    color: #182230;
 }
 
 QLineEdit {

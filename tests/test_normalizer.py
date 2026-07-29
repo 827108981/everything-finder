@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from local_full_text_search.core.normalizer import normalize_text, parse_terms
+from local_full_text_search.core.normalizer import make_context, normalize_text, parse_terms
 from local_full_text_search.ui.result_view import highlight_context
 
 
@@ -22,6 +22,16 @@ class NormalizerTests(unittest.TestCase):
         rendered = highlight_context("拔掉3 个\n传感器", "拔掉 3 个传感器")
         self.assertEqual(rendered.count("background:#FDE68A"), 3)
         self.assertIn("<br>", rendered)
+
+    def test_context_maps_space_ignored_match_back_to_raw_text(self) -> None:
+        raw = "前言" + "无关内容" * 80 + "每套单机或M2机型均应确认" + "尾注" * 80
+        context = make_context(
+            raw,
+            ["每套单机或 M2 机型"],
+            ignore_spaces=True,
+        )
+
+        self.assertIn("每套单机或M2机型", context)
 
 
 if __name__ == "__main__":

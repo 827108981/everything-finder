@@ -93,6 +93,17 @@ def run_ui_validation() -> int:
             window.search_page.set_results(page)
             window.show_preview(page.results[0])
             app.processEvents()
+            card = window.search_page.result_view._cards[0]
+            item = window.search_page.result_view.item(0)
+            if "background:#FDE68A" not in card.context.text():
+                raise RuntimeError("Search result did not highlight the space-tolerant match")
+            if "background-color:#fde68a" not in window.preview_panel.context.toHtml().lower():
+                raise RuntimeError("Preview did not highlight the selected result")
+            if item is None or card.path_label.geometry().bottom() > item.sizeHint().height():
+                raise RuntimeError("Search result card clipped the path or date")
+            search_box = window.search_page.search_box
+            if search_box.input.geometry().right() >= search_box.action_separator.geometry().left():
+                raise RuntimeError("Search actions overlap the text input")
             pixmap = window.grab()
             image = pixmap.toImage().convertToFormat(QImage.Format.Format_RGB32)
             if image.width() < 1000 or image.height() < 650:

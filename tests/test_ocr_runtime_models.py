@@ -112,6 +112,88 @@ class OcrRuntimeModelTests(unittest.TestCase):
             source.mkdir()
             self.assertEqual(prepare_runtime_models_dir(source, []), source)
 
+    def test_adaptive_ocr_recognizes_original_region_without_tiling_high_quality_result(self) -> None:
+        import numpy as np
+
+        class FakeDetector:
+            def predict(self, image: object) -> list[dict[str, object]]:
+                height, width = image.shape[:2]
+                return [
+                    {
+                        "dt_polys": np.asarray(
+                            [[[100, 100], [min(width - 1, 900), 100], [min(width - 1, 900), 240], [100, 240]]],
+                            dtype=np.float32,
+                        )
+                    }
+                ]
+
+        crop_shapes: list[tuple[int, int]] = []
+
+        class FakeRecognizer:
+            def predict(self, crops: list[object]) -> list[dict[str, object]]:
+                crop_shapes.extend((crop.shape[1], crop.shape[0]) for crop in crops)
+                return [
+                    {
+                        "rec_text": "原图文字区域识别结果足够长，不需要触发低质量分块复核。",
+                        "rec_score": 0.96,
+                    }
+                    for _ in crops
+                ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "large.png"
+            Image.new("RGB", (2400, 1200), "white").save(source)
+            engine = OcrEngine(det_limit_side_len=960)
+            engine._detector = FakeDetector()
+            engine._recognizer = FakeRecognizer()
+
+            result = engine.recognize_adaptive(source)
+
+        self.assertFalse(result.extra["fallback_used"])
+        self.assertGreater(crop_shapes[0][0], 700)
+        self.assertEqual(result.extra["detection_side"], 960)
+
+    def test_adaptive_ocr_tiles_low_confidence_large_image_and_reports_progress(self) -> None:
+        import numpy as np
+
+        class FakeDetector:
+            def predict(self, image: object) -> list[dict[str, object]]:
+                height, width = image.shape[:2]
+                return [
+                    {
+                        "dt_polys": np.asarray(
+                            [[[20, 20], [min(width - 1, 420), 20], [min(width - 1, 420), 100], [20, 100]]],
+                            dtype=np.float32,
+                        )
+                    }
+                ]
+
+        class FakeRecognizer:
+            def predict(self, crops: list[object]) -> list[dict[str, object]]:
+                return [
+                    {"rec_text": "低置信度文字", "rec_score": 0.42}
+                    for _ in crops
+                ]
+
+        progress: list[tuple[str, int, int]] = []
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "large.png"
+            Image.new("RGB", (2400, 1600), "white").save(source)
+            engine = OcrEngine(det_limit_side_len=960)
+            engine._detector = FakeDetector()
+            engine._recognizer = FakeRecognizer()
+
+            result = engine.recognize_adaptive(
+                source,
+                progress_callback=lambda phase, completed, total, _detail: progress.append(
+                    (phase, completed, total)
+                ),
+            )
+
+        self.assertTrue(result.extra["fallback_used"])
+        self.assertGreater(result.extra["tiles_processed"], 1)
+        self.assertTrue(any(phase == "tile" and completed > 0 for phase, completed, _ in progress))
+
 
 if __name__ == "__main__":
     unittest.main()

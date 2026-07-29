@@ -77,14 +77,15 @@ class ZipParser(BaseParser):
                         continue
                     cancel_token.wait_if_paused()
                     cancel_token.throw_if_cancelled()
+                    decoded_name = decoded_zip_member_name(info)
                     if info.flag_bits & 0x1:
                         skipped_members += 1
-                        self._report_member_progress(member_index, len(infos), info.filename)
+                        self._report_member_progress(member_index, len(infos), decoded_name)
                         continue
-                    safe_name = safe_zip_member_name(info.filename)
+                    safe_name = safe_zip_member_name(decoded_name)
                     if safe_name is None:
                         failed_members += 1
-                        self._report_member_progress(member_index, len(infos), info.filename)
+                        self._report_member_progress(member_index, len(infos), decoded_name)
                         continue
                     parser = self._parser_for_member(safe_name)
                     if parser is None:
@@ -115,6 +116,14 @@ class ZipParser(BaseParser):
                             cancel_token.throw_if_cancelled()
                             target.write(chunk)
                     try:
+                        parser.configure_runtime(
+                            progress_callback=lambda payload, current=member_index, total=len(infos), name=safe_name: self._report_inner_progress(
+                                payload,
+                                current,
+                                total,
+                                name,
+                            )
+                        )
                         for block in parser.parse(extracted, cancel_token):
                             block.file_path = str(file_path)
                             block.location_text = f"{file_path.name} > {safe_name} > {block.location_text}"
@@ -145,6 +154,27 @@ class ZipParser(BaseParser):
             unit_type="member",
             cursor=member_index + 1,
             detail=name,
+        )
+
+    def _report_inner_progress(
+        self,
+        payload: dict[str, object],
+        member_index: int,
+        total: int,
+        name: str,
+    ) -> None:
+        phase = str(payload.get("phase") or "parse")
+        completed = max(0, int(payload.get("completed") or 0))
+        inner_total = max(0, int(payload.get("total") or 0))
+        detail = str(payload.get("detail") or "")
+        inner = f"{completed}/{inner_total}" if inner_total else str(completed)
+        self.report_progress(
+            f"zip_{phase}",
+            completed=member_index,
+            total=total,
+            unit_type="member",
+            cursor=member_index,
+            detail=f"{name} · {inner}" + (f" · {detail}" if detail else ""),
         )
 
     def _parse_text_member(
@@ -246,6 +276,41 @@ def safe_zip_member_name(name: str) -> str | None:
         return None
     clean = str(candidate)
     return clean if clean and clean != "." else None
+
+
+def decoded_zip_member_name(info: zipfile.ZipInfo) -> str:
+    """Recover GB18030 names written by legacy ZIP tools without the UTF-8 flag."""
+
+    name = info.filename
+    if info.flag_bits & 0x800 or name.isascii():
+        return name
+    try:
+        raw_name = name.encode("cp437")
+        candidate = raw_name.decode("gb18030")
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        return name
+    if _filename_text_quality(candidate) > _filename_text_quality(name) + 2.0:
+        return candidate
+    return name
+
+
+def _filename_text_quality(value: str) -> float:
+    score = 0.0
+    for character in value:
+        codepoint = ord(character)
+        if "\u3400" <= character <= "\u9fff":
+            score += 2.0
+        elif character.isascii():
+            score += 0.1 if character.isalnum() else 0.0
+        elif 0x2500 <= codepoint <= 0x259F:
+            score -= 3.0
+        elif character == "\ufffd" or codepoint < 32:
+            score -= 5.0
+        elif character.isalnum():
+            score -= 0.25
+        else:
+            score -= 0.5
+    return score
 
 
 def _detect_bytes_encoding(sample: bytes) -> str:

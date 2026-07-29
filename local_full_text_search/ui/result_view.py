@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import html
-import math
 import re
 from datetime import datetime
 
@@ -34,6 +33,7 @@ class ResultView(QListWidget):
         self.setObjectName("ResultList")
         self.setSpacing(10)
         self.setUniformItemSizes(False)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._results: list[SearchResult] = []
@@ -170,10 +170,10 @@ class ResultCard(QFrame):
         self.expand_button.setVisible(hidden_hit_count(result) > 0)
         self._update_expand_button()
 
-        path = QLabel(f"{wrap_path(result.file_path)}\n{modified}")
-        path.setObjectName("ResultPath")
-        path.setToolTip(result.file_path)
-        path.setWordWrap(True)
+        self.path_label = QLabel(f"{wrap_path(result.file_path)}\n{modified}")
+        self.path_label.setObjectName("ResultPath")
+        self.path_label.setToolTip(result.file_path)
+        self.path_label.setWordWrap(True)
 
         badge_layout = QHBoxLayout()
         badge_layout.setContentsMargins(0, 0, 0, 0)
@@ -206,7 +206,7 @@ class ResultCard(QFrame):
         body.addWidget(location)
         body.addWidget(self.context)
         body.addWidget(self.expand_button, alignment=Qt.AlignmentFlag.AlignLeft)
-        body.addWidget(path)
+        body.addWidget(self.path_label)
         body.addLayout(badge_layout)
 
         layout = QHBoxLayout(self)
@@ -220,29 +220,15 @@ class ResultCard(QFrame):
         layout.addLayout(body, 1)
 
     def preferred_row_height(self, width: int) -> int:
-        usable_width = max(width - 150, 260)
-        chars_per_line = max(28, usable_width // 7)
-        title_lines = wrapped_line_count(self.result.filename, chars_per_line)
-        location_lines = wrapped_line_count(self.result.location_text, chars_per_line)
-        path_lines = wrapped_line_count(
-            self.result.file_path,
-            max(24, chars_per_line - 8),
-        ) + 1
-        context_lines = 0
-        for hit in visible_hits(self.result, expanded=self._expanded):
-            context_lines += 1
-            context_lines += wrapped_line_count(
-                hit.context or "文件名/路径命中",
-                chars_per_line,
-            )
-        if hidden_hit_count(self.result, expanded=self._expanded) > 0:
-            context_lines += 1
-        height = 46 + title_lines * 22 + location_lines * 18 + context_lines * 20 + path_lines * 17
-        if len(result_hits(self.result)) > 3:
-            height += 28
-        if self.result.parse_status and self.result.parse_status not in {"success", ""}:
-            height += 24
-        return max(160, height)
+        card_width = max(280, width - 8)
+        self.setFixedWidth(card_width)
+        card_layout = self.layout()
+        if card_layout is None:
+            return 180
+        card_layout.invalidate()
+        calculated = card_layout.heightForWidth(card_width)
+        hinted = card_layout.sizeHint().height()
+        return max(180, calculated, hinted) + 4
 
     def _toggle_expanded(self) -> None:
         self._expanded = not self._expanded
@@ -344,15 +330,6 @@ def hit_label(hit: SearchHit) -> str:
     if hit.source_type == "ocr":
         return f"OCR · {location}"
     return f"正文 · {location}"
-
-
-def wrapped_line_count(text: str, chars_per_line: int) -> int:
-    if not text:
-        return 1
-    total = 0
-    for line in text.splitlines() or [text]:
-        total += max(1, math.ceil(len(line) / max(1, chars_per_line)))
-    return total
 
 
 def wrap_path(path: str) -> str:

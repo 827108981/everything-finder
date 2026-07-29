@@ -11,15 +11,14 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
-    QScrollArea,
+    QSizePolicy,
     QTextEdit,
     QVBoxLayout,
-    QWidget,
 )
 
 from local_full_text_search.config.constants import IMAGE_EXTENSIONS
 from local_full_text_search.models.search_result import SearchResult
-from local_full_text_search.ui.result_view import highlight_context
+from local_full_text_search.ui.result_view import render_context_html
 
 
 class PreviewPanel(QFrame):
@@ -63,7 +62,8 @@ class PreviewPanel(QFrame):
         self.context = QTextEdit()
         self.context.setObjectName("PreviewContext")
         self.context.setReadOnly(True)
-        self.context.setMinimumHeight(180)
+        self.context.setMinimumHeight(260)
+        self.context.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.context.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
         self.context.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         option = QTextOption()
@@ -82,30 +82,18 @@ class PreviewPanel(QFrame):
         button_layout.addWidget(self.open_folder_button, 0, 1)
         button_layout.addWidget(self.copy_path_button, 1, 0, 1, 2)
 
-        inner = QWidget()
-        inner_layout = QVBoxLayout(inner)
-        inner_layout.setContentsMargins(18, 16, 18, 16)
-        inner_layout.setSpacing(12)
-        inner_layout.addLayout(title_row)
-        inner_layout.addWidget(self.title)
-        inner_layout.addWidget(self.meta)
-        inner_layout.addWidget(self.image)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 16, 18, 16)
+        layout.setSpacing(12)
+        layout.addLayout(title_row)
+        layout.addWidget(self.title)
+        layout.addWidget(self.meta)
+        layout.addWidget(self.image)
         location_label = QLabel("命中上下文")
         location_label.setObjectName("SectionTitle")
-        inner_layout.addWidget(location_label)
-        inner_layout.addWidget(self.context, 1)
-        inner_layout.addStretch(1)
-        inner_layout.addLayout(button_layout)
-
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll.setWidget(inner)
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(scroll)
+        layout.addWidget(location_label)
+        layout.addWidget(self.context, 1)
+        layout.addLayout(button_layout)
 
         self.open_button.clicked.connect(self._open_file)
         self.open_folder_button.clicked.connect(self._open_folder)
@@ -129,7 +117,7 @@ class PreviewPanel(QFrame):
             f"{type_text} · {format_size(result.size_bytes)} · {modified}{confidence}\n{result.location_text}\n{wrap_path(result.file_path)}"
         )
         self.context.setHtml(
-            highlight_context(result.context or "文件名/路径命中", query_text)
+            render_context_html(result, query_text, expanded=True)
         )
         self._load_image_preview(result.file_path, result.extension)
 

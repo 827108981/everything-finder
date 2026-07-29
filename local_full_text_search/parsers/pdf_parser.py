@@ -97,7 +97,18 @@ class PdfParser(BaseParser):
                     cancel_token.throw_if_cancelled()
                     try:
                         image_path = render_pdf_page_for_ocr(page, file_path, index)
-                        result = self.ocr.recognize(image_path)
+                        result = self.ocr.recognize_adaptive(
+                            image_path,
+                            progress_callback=lambda phase, completed, total, detail, page_index=index: self.report_progress(
+                                f"pdf_ocr_{phase}",
+                                completed=completed,
+                                total=total,
+                                unit_type="region" if "recognize" in phase else "tile",
+                                cursor=page_index,
+                                detail=f"第 {page_index + 1} 页 · {detail}",
+                            ),
+                            cancel_check=lambda: _check_cancel(cancel_token),
+                        )
                     except Exception as exc:
                         self.set_status(
                             "partial_success",
@@ -212,3 +223,8 @@ def _extract_pdf_page_range(file_path: Path, start: int, end: int) -> list[tuple
         ]
     finally:
         document.close()
+
+
+def _check_cancel(cancel_token: CancelToken) -> None:
+    cancel_token.wait_if_paused()
+    cancel_token.throw_if_cancelled()

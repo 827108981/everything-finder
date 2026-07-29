@@ -12,6 +12,7 @@ from local_full_text_search.core.index_manager import IndexManager
 from local_full_text_search.core.search_engine import SearchEngine
 from local_full_text_search.models.content_block import ContentBlock
 from local_full_text_search.models.search_query import SearchQuery
+from local_full_text_search.ui.result_view import highlight_context
 
 
 class SearchEngineTests(unittest.TestCase):
@@ -244,6 +245,11 @@ class SearchEngineTests(unittest.TestCase):
             )
 
             self.assertEqual(page.total_confirmed, 1)
+            self.assertIn("拔掉3 个传感器", page.results[0].context)
+            self.assertIn(
+                "background:#FDE68A",
+                highlight_context(page.results[0].context, "拔掉 3 个传感器"),
+            )
 
 
 if __name__ == "__main__":

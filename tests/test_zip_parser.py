@@ -14,6 +14,7 @@ from local_full_text_search.core.search_engine import SearchEngine
 from local_full_text_search.models.search_query import SearchQuery
 from local_full_text_search.core.task_manager import CancelToken
 from local_full_text_search.parsers.zip_parser import ZipParser
+from local_full_text_search.parsers.zip_parser import decoded_zip_member_name
 
 
 class ZipParserTests(unittest.TestCase):
@@ -67,6 +68,14 @@ class ZipParserTests(unittest.TestCase):
 
             self.assertTrue(blocks)
             self.assertFalse(list(temp_root.glob("zip_index_*")))
+
+    def test_legacy_gb18030_member_name_is_recovered(self) -> None:
+        expected = "故障处理指引/余量检测光耦组件.pdf"
+        info = zipfile.ZipInfo()
+        info.filename = expected.encode("gb18030").decode("cp437")
+        info.flag_bits = 0
+
+        self.assertEqual(decoded_zip_member_name(info), expected)
 
 
 if __name__ == "__main__":

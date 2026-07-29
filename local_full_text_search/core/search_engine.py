@@ -318,7 +318,13 @@ class SearchEngine:
         )
         if regex_pattern is None:
             hits = count_hits(normalized_text, normalized_terms)
-            context = make_context(raw_text, raw_terms)
+            context = make_context(
+                raw_text,
+                raw_terms,
+                case_sensitive=query.case_sensitive,
+                ignore_spaces=query.ignore_spaces,
+                ignore_hyphens=query.ignore_hyphens,
+            )
         else:
             first_match: re.Match[str] | None = None
             hits = 0

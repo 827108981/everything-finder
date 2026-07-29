@@ -31,7 +31,11 @@ class ParserRegistry:
             pptx_parser = PptxStreamParser(fallback=pptx_parser, defer_normalization=True)
             xlsx_parser = XlsxStreamParser(fallback=xlsx_parser, defer_normalization=True)
         shared_ocr = (
-            OcrEngine(settings.ocr_language, settings.ocr_cpu_threads)
+            OcrEngine(
+                settings.ocr_language,
+                settings.ocr_cpu_threads,
+                det_limit_side_len=settings.max_ocr_image_side,
+            )
             if settings.enable_ocr and (settings.ocr_images or settings.ocr_scanned_pdf)
             else None
         )

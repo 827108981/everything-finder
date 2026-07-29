@@ -7,9 +7,14 @@ from typing import Iterable
 from local_full_text_search.config.constants import IMAGE_EXTENSIONS
 from local_full_text_search.core.task_manager import CancelToken
 from local_full_text_search.models.content_block import ContentBlock
-from local_full_text_search.ocr.image_preprocess import image_dimensions, preprocess_image
+from local_full_text_search.ocr.image_preprocess import image_dimensions
 from local_full_text_search.ocr.ocr_cache import OcrCache, ocr_models_fingerprint
-from local_full_text_search.ocr.ocr_engine import OcrEngine
+from local_full_text_search.ocr.ocr_engine import (
+    ADAPTIVE_OCR_VERSION,
+    DEFAULT_OCR_TILE_OVERLAP,
+    DEFAULT_OCR_TILE_SIDE,
+    OcrEngine,
+)
 from local_full_text_search.parsers.base_parser import BaseParser
 
 logger = logging.getLogger(__name__)
@@ -39,7 +44,11 @@ class ImageParser(BaseParser):
         self.enabled = enabled
         self.min_pixels = min_pixels
         self.max_side = max_side
-        self.ocr = ocr_engine or OcrEngine(language=language, cpu_threads=ocr_cpu_threads)
+        self.ocr = ocr_engine or OcrEngine(
+            language=language,
+            cpu_threads=ocr_cpu_threads,
+            det_limit_side_len=max_side,
+        )
         self.cache = OcrCache()
 
     def supports(self, file_path: Path) -> bool:
@@ -65,11 +74,28 @@ class ImageParser(BaseParser):
         cancel_token.wait_if_paused()
         cancel_token.throw_if_cancelled()
         try:
-            namespace = f"image-ocr-v4-mobile:{self.language}:{self.max_side}:{ocr_models_fingerprint()}"
+            namespace = (
+                f"image-ocr-adaptive-{ADAPTIVE_OCR_VERSION}:{self.language}:"
+                f"detect={self.max_side}:tile={DEFAULT_OCR_TILE_SIDE}:"
+                f"overlap={DEFAULT_OCR_TILE_OVERLAP}:{ocr_models_fingerprint()}"
+            )
             key = self.cache.key_for_file(file_path, namespace=namespace)
             result = self.cache.load(key)
             if result is None:
-                result = self.ocr.recognize(preprocess_image(file_path, max_side=self.max_side))
+                result = self.ocr.recognize_adaptive(
+                    file_path,
+                    tile_side=DEFAULT_OCR_TILE_SIDE,
+                    tile_overlap=DEFAULT_OCR_TILE_OVERLAP,
+                    progress_callback=lambda phase, completed, total, detail: self.report_progress(
+                        f"ocr_{phase}",
+                        completed=completed,
+                        total=total,
+                        unit_type="region" if "recognize" in phase else "tile",
+                        cursor=0,
+                        detail=detail,
+                    ),
+                    cancel_check=lambda: _check_cancel(cancel_token),
+                )
                 self.cache.save(key, result)
         except Exception as exc:
             logger.exception("OCR failed for %s", file_path)
@@ -93,3 +119,8 @@ class ImageParser(BaseParser):
             cursor=1,
             detail=file_path.name,
         )
+
+
+def _check_cancel(cancel_token: CancelToken) -> None:
+    cancel_token.wait_if_paused()
+    cancel_token.throw_if_cancelled()
