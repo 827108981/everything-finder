@@ -356,9 +356,15 @@ class SearchEngine:
             str(row["source_type"]) == "ocr"
             and (confidence is None or confidence < float(query.ocr_min_confidence))
         )
+        file_path = str(row["path"])
+        location_text = str(row["location_text"] or "")
+        if " > " in file_path and str(row["source_type"] or "") != "metadata":
+            archive_path, internal_path = file_path.split(" > ", 1)
+            archive_name = archive_path.replace("\\", "/").rsplit("/", 1)[-1]
+            location_text = f"{archive_name} > {internal_path} > {location_text}"
         hit = SearchHit(
             block_id=int(row["block_id"]) if row["block_id"] is not None else None,
-            location_text=str(row["location_text"] or ""),
+            location_text=location_text,
             context=context,
             hit_count=max(hits, 1),
             source_type=str(row["source_type"] or "native_text"),
@@ -368,7 +374,7 @@ class SearchEngine:
         return SearchResult(
             file_id=int(row["file_id"]),
             block_id=int(row["block_id"]) if row["block_id"] is not None else None,
-            file_path=str(row["path"]),
+            file_path=file_path,
             filename=str(row["filename"]),
             extension=str(row["extension"] or ""),
             size_bytes=int(row["size_bytes"] or 0),

@@ -19,7 +19,7 @@ if not "%SKIP_OCR%"=="1" (
 )
 
 echo [build] Running tests...
-python -m unittest discover -s tests || goto :error
+python -m pytest -q || goto :error
 
 echo [build] Cleaning old build output...
 if exist build rmdir /s /q build
@@ -27,6 +27,17 @@ if exist dist rmdir /s /q dist
 
 echo [build] Running PyInstaller...
 pyinstaller LocalFullTextSearch.spec || goto :error
+
+set "PACKAGE_DIR=dist\本地多格式全文搜索工具"
+set "PACKAGE_EXE=%PACKAGE_DIR%\本地多格式全文搜索工具.exe"
+
+echo [build] Generating and verifying distribution manifest...
+python tools\verify_distribution.py "%PACKAGE_DIR%" --stage-release-files --write-manifest --verify || goto :error
+
+echo [build] Running frozen package smoke tests...
+set "QT_QPA_PLATFORM=offscreen"
+"%PACKAGE_EXE%" --self-test || goto :error
+"%PACKAGE_EXE%" --validate-core || goto :error
 
 echo [build] Done. Output: dist\本地多格式全文搜索工具
 pause

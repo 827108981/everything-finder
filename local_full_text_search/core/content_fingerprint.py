@@ -74,6 +74,12 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def sha256_file(path: Path) -> str:
+    """Return a full raw-byte digest for exact cross-source deduplication."""
+
+    return _sha256_file(path)
+
+
 def _sampled_sha256(path: Path, size: int) -> str:
     digest = hashlib.sha256()
     digest.update(size.to_bytes(8, "little", signed=False))

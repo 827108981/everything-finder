@@ -11,6 +11,7 @@ datas = [
     ("local_full_text_search/ui/resources", "local_full_text_search/ui/resources"),
     ("local_full_text_search/ui/styles", "local_full_text_search/ui/styles"),
     ("README.md", "."),
+    ("docs/启动与分发说明.md", "."),
     ("使用说明.md", "."),
     ("配置说明.md", "."),
     ("数据库结构说明.md", "."),

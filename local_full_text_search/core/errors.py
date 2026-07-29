@@ -21,6 +21,18 @@ class PasswordProtectedError(AppError):
     """Raised for encrypted documents without a password."""
 
 
+class ZipMemberDirectoryChangedError(OSError):
+    """Raised when a ZIP central-directory member no longer matches planning."""
+
+
+class ZipMemberSizeChangedError(OSError):
+    """Raised when a ZIP member size changes between planning and extraction."""
+
+
+class ZipMemberContentChangedError(OSError):
+    """Raised when a ZIP member's exact bytes change between planning and extraction."""
+
+
 class PartialParseError(AppError):
     """Raised when a parser can keep metadata but not extract body text."""
 

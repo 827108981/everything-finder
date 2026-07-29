@@ -75,6 +75,29 @@ class StreamingOoxmlTests(unittest.TestCase):
             self.assertIn("E5==1+2", text)
             self.assertEqual(blocks[0].sheet_name, "Data")
 
+    def test_xlsx_stream_reports_workbook_sheet_and_row_progress(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "progress.xlsx"
+            workbook = Workbook()
+            sheet = workbook.active
+            sheet.title = "Large"
+            for row in range(1, 301):
+                sheet.cell(row=row, column=1).value = f"ROW_PROGRESS_{row:03d}"
+            workbook.save(path)
+
+            progress: list[dict[str, object]] = []
+            parser = XlsxStreamParser()
+            parser.configure_runtime(progress_callback=progress.append)
+            blocks = list(parser.parse(path, CancelToken()))
+
+            phases = {str(item.get("phase")) for item in progress}
+            row_events = [item for item in progress if item.get("phase") == "sheet_row"]
+            self.assertIn("workbook_scan", phases)
+            self.assertIn("sheet_scan", phases)
+            self.assertTrue(row_events)
+            self.assertGreaterEqual(int(row_events[-1]["completed"]), 300)
+            self.assertIn("ROW_PROGRESS_300", "\n".join(block.raw_text for block in blocks))
+
     def test_registry_selects_streaming_parsers_by_default(self) -> None:
         registry = ParserRegistry(AppSettings(fast_ooxml_enabled=True))
 

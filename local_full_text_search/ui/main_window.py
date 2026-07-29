@@ -144,6 +144,9 @@ class MainWindow(QMainWindow):
 
         self.index_page.add_root_requested.connect(self.add_root)
         self.index_page.scan_requested.connect(self.start_scan)
+        self.index_page.performance_scan_requested.connect(
+            lambda: self.start_scan(performance_mode=True)
+        )
         self.index_page.pause_requested.connect(lambda: self.scan_worker.pause() if self.scan_worker else None)
         self.index_page.resume_requested.connect(lambda: self.scan_worker.resume() if self.scan_worker else None)
         self.index_page.cancel_requested.connect(self.cancel_scan)
@@ -273,9 +276,8 @@ class MainWindow(QMainWindow):
             return
         self.db.add_root(Path(directory))
         self.refresh_all()
-        answer = QMessageBox.question(self, "建立索引", "已添加搜索范围，是否立即开始建立完整索引？")
-        if answer == QMessageBox.StandardButton.Yes:
-            self.start_scan()
+        self.switch_page("index")
+        self.index_page.task_label.setText("已添加搜索范围，请选择更新方式")
 
     def remove_root(self, root_id: int) -> None:
         if QMessageBox.question(self, "删除搜索范围", "只删除索引和配置，不会删除原文件。确认继续？") != QMessageBox.StandardButton.Yes:
@@ -287,7 +289,7 @@ class MainWindow(QMainWindow):
         self.db.set_root_enabled(root_id, enabled)
         self.refresh_all()
 
-    def start_scan(self) -> None:
+    def start_scan(self, *, performance_mode: bool = False) -> None:
         if self.scan_thread is not None:
             self.switch_page("index")
             return
@@ -305,7 +307,11 @@ class MainWindow(QMainWindow):
         )
         self.hide_preview()
         self.scan_thread = QThread()
-        self.scan_worker = ScanWorker(self.db.db_path, self.settings)
+        self.scan_worker = ScanWorker(
+            self.db.db_path,
+            self.settings,
+            performance_mode=performance_mode,
+        )
         self.scan_worker.moveToThread(self.scan_thread)
         self.scan_thread.started.connect(self.scan_worker.run)
         self.scan_worker.progress.connect(self.on_scan_progress)
@@ -314,7 +320,11 @@ class MainWindow(QMainWindow):
         self.scan_worker.finished.connect(self.scan_thread.quit)
         self.scan_worker.failed.connect(self.scan_thread.quit)
         self.scan_thread.finished.connect(self.cleanup_scan_thread)
-        self.top_bar.set_index_status("正在索引...", is_running=True)
+        self.index_page.set_performance_mode(performance_mode)
+        self.top_bar.set_index_status(
+            "正在准备性能模式..." if performance_mode else "正在索引...",
+            is_running=True,
+        )
         self.index_page.set_task_running(True)
         self.scan_thread.start()
 
@@ -324,6 +334,12 @@ class MainWindow(QMainWindow):
 
     def on_scan_progress(self, payload: object) -> None:
         if not isinstance(payload, dict):
+            return
+        if payload.get("stage") == "performance_profile":
+            profile = payload.get("performance_profile")
+            if isinstance(profile, dict):
+                self.index_page.set_performance_profile(profile)
+                self.top_bar.set_index_status("性能模式正在索引...", is_running=True)
             return
         indexed = int(payload.get("indexed") or 0)
         scanned = int(payload.get("scanned") or 0)
@@ -367,10 +383,14 @@ class MainWindow(QMainWindow):
         )
 
     def on_scan_finished(self, summary: object) -> None:
+        payload = summary if isinstance(summary, dict) else {"summary": summary}
         self.index_page.set_task_running(False)
         if self.closing:
             return
         self.refresh_all()
+        summary_text, summary_tooltip = format_index_run_summary(payload)
+        if summary_text:
+            self.index_page.show_run_summary(summary_text, summary_tooltip)
 
     def on_scan_failed(self, message: str) -> None:
         self.index_page.set_task_running(False)
@@ -1178,6 +1198,7 @@ class EmptyState(QFrame):
 class IndexPage(QWidget):
     add_root_requested = Signal()
     scan_requested = Signal()
+    performance_scan_requested = Signal()
     pause_requested = Signal()
     resume_requested = Signal()
     cancel_requested = Signal()
@@ -1216,15 +1237,18 @@ class IndexPage(QWidget):
         self.task_progress.setTextVisible(False)
         self.task_progress.setFixedWidth(180)
         self.start_button = QPushButton("更新全部")
+        self.performance_button = QPushButton("性能模式更新")
         self.pause_button = QPushButton("暂停")
         self.cancel_button = QPushButton("取消")
         self.start_button.clicked.connect(self.scan_requested.emit)
+        self.performance_button.clicked.connect(self.performance_scan_requested.emit)
         self.pause_button.clicked.connect(self._toggle_pause)
         self.cancel_button.clicked.connect(self.cancel_requested.emit)
         task_layout.addWidget(self.task_label, 1)
         task_layout.addWidget(self.task_eta)
         task_layout.addWidget(self.task_progress)
         task_layout.addWidget(self.start_button)
+        task_layout.addWidget(self.performance_button)
         task_layout.addWidget(self.pause_button)
         task_layout.addWidget(self.cancel_button)
         layout.addWidget(self.task_strip)
@@ -1238,7 +1262,29 @@ class IndexPage(QWidget):
         self.list_layout.setSpacing(0)
         self.scroll.setWidget(self.list_host)
         layout.addWidget(self.scroll, 1)
+        self.last_run_summary = ""
         self.set_task_running(False)
+
+    def set_performance_mode(self, enabled: bool) -> None:
+        self.performance_mode = enabled
+        if enabled:
+            self.task_label.setText("正在探测本机硬件并生成性能模式配置...")
+        else:
+            self.task_label.setText("索引已就绪")
+
+    def set_performance_profile(self, profile: dict[str, object]) -> None:
+        normal = int(profile.get("normal_workers") or 0)
+        office = int(profile.get("office_workers") or 0)
+        zip_workers = int(profile.get("zip_member_workers") or 0)
+        ocr = int(profile.get("ocr_workers") or 0)
+        memory = int(profile.get("memory_budget_mb") or 0)
+        disk = str(profile.get("disk_class") or "unknown")
+        self.task_label.setText(
+            "性能模式已应用 · "
+            f"普通 {normal} / Office {office} / ZIP {zip_workers} / OCR {ocr} "
+            f"· 内存 {memory} MB · {disk}"
+        )
+        self.task_label.setToolTip(str(profile))
 
     def set_roots(self, roots: list[object], stats: dict[int, dict[str, int]]) -> None:
         clear_layout(self.list_layout)
@@ -1260,19 +1306,30 @@ class IndexPage(QWidget):
     def set_task_running(self, running: bool) -> None:
         was_running = self.running
         self.running = running
+        if running:
+            self.last_run_summary = ""
         self.task_progress.setVisible(running)
         self.pause_button.setVisible(running)
         self.cancel_button.setVisible(running)
         self.start_button.setEnabled(not running)
+        self.performance_button.setEnabled(not running)
         if not running:
             self.task_progress.setValue(0)
             self.task_label.setText("索引已就绪")
             self.task_eta.clear()
+            if self.last_run_summary:
+                self.task_label.setText(self.last_run_summary)
             self.pause_button.setText("暂停")
             self.paused = False
+            self.performance_mode = False
         elif not was_running:
             self.paused = False
             self.pause_button.setText("暂停")
+
+    def show_run_summary(self, text: str, tooltip: str = "") -> None:
+        self.last_run_summary = text
+        self.task_label.setText(text)
+        self.task_label.setToolTip(tooltip or text)
 
     def _toggle_pause(self) -> None:
         if not self.running:
@@ -1338,6 +1395,7 @@ class IndexPage(QWidget):
         if excluded_video > 0:
             suffix += f" · 排除视频 {excluded_video}"
         self.task_label.setText(
+            f"{'性能模式 · ' if getattr(self, 'performance_mode', False) else ''}"
             f"{phase_label} {completed:,} / {max(total, completed):,} · 失败 {failed}{suffix}"
         )
         self.task_eta.setText(eta_text)
@@ -1786,6 +1844,114 @@ def format_active_duration(seconds: int) -> str:
         return f"{minutes} 分 {remainder:02d} 秒"
     hours, minutes = divmod(minutes, 60)
     return f"{hours} 小时 {minutes:02d} 分"
+
+
+def format_bytes(value: int) -> str:
+    value = max(0, int(value))
+    units = ["B", "KB", "MB", "GB", "TB"]
+    size = float(value)
+    for unit in units:
+        if size < 1024.0 or unit == units[-1]:
+            if unit == "B":
+                return f"{int(size)} {unit}"
+            return f"{size:.1f} {unit}"
+        size /= 1024.0
+    return f"{value} B"
+
+
+def format_index_run_summary(payload: dict[str, object]) -> tuple[str, str]:
+    summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+    run_metrics = payload.get("run_metrics") if isinstance(payload.get("run_metrics"), dict) else {}
+    performance_profile = (
+        payload.get("performance_profile")
+        if isinstance(payload.get("performance_profile"), dict)
+        else {}
+    )
+    performance_mode = bool(payload.get("performance_mode"))
+    if not isinstance(summary, dict):
+        summary = {}
+    if not isinstance(run_metrics, dict):
+        run_metrics = {}
+    if not isinstance(performance_profile, dict):
+        performance_profile = {}
+
+    def _int(source: dict[str, object], key: str) -> int:
+        try:
+            return int(source.get(key) or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    indexed = _int(summary, "indexed")
+    skipped = _int(summary, "skipped")
+    failed = _int(summary, "failed")
+    metadata_only = _int(summary, "metadata_only")
+    partial_success = _int(summary, "partial_success")
+    excluded_video = _int(summary, "excluded_video")
+    deleted = _int(summary, "deleted")
+    cancelled = bool(summary.get("cancelled"))
+
+    dedup_candidate_count = _int(run_metrics, "dedup_candidate_count")
+    dedup_full_hash_count = _int(run_metrics, "dedup_full_hash_count")
+    dedup_verified_source_count = _int(run_metrics, "dedup_verified_source_count")
+    dedup_parse_avoided_count = _int(run_metrics, "dedup_parse_avoided_count")
+    dedup_bytes_avoided = _int(run_metrics, "dedup_bytes_avoided")
+    discovered_files = _int(run_metrics, "discovered_files")
+    discovered_bytes = _int(run_metrics, "discovered_bytes")
+    scan_ms = _int(run_metrics, "scan_ms")
+    parse_ms = _int(run_metrics, "parse_ms")
+    write_ms = _int(run_metrics, "write_ms")
+    fts_ms = _int(run_metrics, "fts_ms")
+    total_ms = _int(run_metrics, "total_ms")
+    process_spawn_count = _int(run_metrics, "process_spawn_count")
+    cache_hits = _int(run_metrics, "cache_hits")
+    cache_misses = _int(run_metrics, "cache_misses")
+
+    label_prefix = "性能模式" if performance_mode else "索引"
+    label_bits = [f"{label_prefix}完成"]
+    if dedup_parse_avoided_count or dedup_bytes_avoided:
+        label_bits.append(f"省略解析 {dedup_parse_avoided_count:,}")
+        if dedup_bytes_avoided:
+            label_bits.append(f"省略 {format_bytes(dedup_bytes_avoided)}")
+    elif indexed:
+        label_bits.append(f"已索引 {indexed:,}")
+
+    tooltip_lines = [
+        f"本次：已索引 {indexed:,}，跳过 {skipped:,}，失败 {failed:,}"
+        f"{'，元数据 ' + format_count(metadata_only) if metadata_only else ''}"
+        f"{'，部分成功 ' + format_count(partial_success) if partial_success else ''}"
+        f"{'，排除视频 ' + format_count(excluded_video) if excluded_video else ''}"
+        f"{'，删除 ' + format_count(deleted) if deleted else ''}"
+        f"{'，已取消' if cancelled else ''}",
+        f"总量：发现 {discovered_files:,} 个文件，{format_bytes(discovered_bytes)}",
+        f"耗时：扫描 {format_elapsed(scan_ms)} · 解析 {format_elapsed(parse_ms)} · 写库 {format_elapsed(write_ms)} · FTS {format_elapsed(fts_ms)} · 总计 {format_elapsed(total_ms)}",
+    ]
+    if dedup_candidate_count or dedup_full_hash_count or dedup_verified_source_count:
+        tooltip_lines.append(
+            f"去重：候选 {dedup_candidate_count:,} · 完整哈希 {dedup_full_hash_count:,} · 已验证来源 {dedup_verified_source_count:,}"
+        )
+    if dedup_parse_avoided_count or dedup_bytes_avoided:
+        tooltip_lines.append(
+            f"节省：省略解析 {dedup_parse_avoided_count:,} · 省略 {format_bytes(dedup_bytes_avoided)}"
+        )
+    if process_spawn_count or cache_hits or cache_misses:
+        tooltip_lines.append(
+            f"运行：进程 {process_spawn_count:,} · 命中 {cache_hits:,} · 未命中 {cache_misses:,}"
+        )
+    if performance_profile:
+        tooltip_lines.append(
+            "性能配置："
+            f"普通 {performance_profile.get('normal_workers', 0)} · "
+            f"Office {performance_profile.get('office_workers', 0)} · "
+            f"ZIP {performance_profile.get('zip_member_workers', 0)} · "
+            f"OCR {performance_profile.get('ocr_workers', 0)} · "
+            f"内存 {performance_profile.get('memory_budget_mb', 0)} MB · "
+            f"磁盘 {performance_profile.get('disk_class', 'unknown')}"
+        )
+    return " · ".join(label_bits), "\n".join(tooltip_lines)
+
+
+def format_count(value: int) -> str:
+    return f"{max(0, int(value)):,}"
 
 
 def compact_text(text: str, max_chars: int) -> str:

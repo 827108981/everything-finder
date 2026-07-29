@@ -71,7 +71,7 @@ class SchemaV3DedupTests(unittest.TestCase):
                         (block_id,),
                     )
                 )
-                self.assertEqual(con.execute("PRAGMA user_version").fetchone()[0], 4)
+                self.assertEqual(con.execute("PRAGMA user_version").fetchone()[0], 5)
                 self.assertEqual(con.execute("SELECT COUNT(*) FROM short_tokens").fetchone()[0], 0)
             self.assertEqual(file_row["parse_status"], "success")
             self.assertTrue(file_row["parser_version"])

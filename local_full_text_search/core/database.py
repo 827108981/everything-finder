@@ -15,11 +15,12 @@ from local_full_text_search.config.constants import DB_PATH, PARSER_VERSION, VID
 from local_full_text_search.models.content_block import ContentBlock
 from local_full_text_search.models.index_metrics import FileTiming, IndexRunMetrics
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 SUCCESSFUL_DOCUMENT_STATUSES = {
     "success",
     "metadata_only",
 }
+INDEX_RUN_RETENTION = 50
 
 
 def utc_now() -> str:
@@ -81,6 +82,7 @@ class DatabaseManager:
             self._create_schema(con)
             self._migrate_schema_v3(con, previous_version)
             self._migrate_schema_v4(con, previous_version)
+            self._migrate_schema_v5(con)
             self._ensure_fts(con)
             self._recover_interrupted_tasks(con)
             con.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
@@ -175,8 +177,16 @@ class DatabaseManager:
                 indexed_at TEXT,
                 last_seen_at TEXT,
                 is_deleted INTEGER NOT NULL DEFAULT 0,
+                source_kind TEXT NOT NULL DEFAULT 'file',
+                container_file_id INTEGER,
+                internal_path TEXT,
+                member_order INTEGER,
+                member_crc32 INTEGER,
+                member_uncompressed_size INTEGER,
+                content_hash_full TEXT,
                 FOREIGN KEY(root_id) REFERENCES roots(id),
-                FOREIGN KEY(document_id) REFERENCES documents(id)
+                FOREIGN KEY(document_id) REFERENCES documents(id),
+                FOREIGN KEY(container_file_id) REFERENCES files(id)
             );
 
             CREATE TABLE IF NOT EXISTS content_blocks (
@@ -281,6 +291,7 @@ class DatabaseManager:
             CREATE INDEX IF NOT EXISTS idx_files_ext ON files(extension);
             CREATE INDEX IF NOT EXISTS idx_files_status ON files(parse_status);
             CREATE INDEX IF NOT EXISTS idx_files_deleted ON files(is_deleted);
+            CREATE INDEX IF NOT EXISTS idx_files_container ON files(container_file_id);
             CREATE INDEX IF NOT EXISTS idx_blocks_file ON content_blocks(file_id);
             """
         )
@@ -353,6 +364,26 @@ class DatabaseManager:
                 FOREIGN KEY(block_id) REFERENCES content_blocks(id) ON DELETE CASCADE
             );
             CREATE INDEX idx_short_tokens_block ON short_tokens(block_id);
+            """
+        )
+
+    def _migrate_schema_v5(self, con: sqlite3.Connection) -> None:
+        for name, declaration in (
+            ("source_kind", "TEXT NOT NULL DEFAULT 'file'"),
+            ("container_file_id", "INTEGER REFERENCES files(id)"),
+            ("internal_path", "TEXT"),
+            ("member_order", "INTEGER"),
+            ("member_crc32", "INTEGER"),
+            ("member_uncompressed_size", "INTEGER"),
+            ("content_hash_full", "TEXT"),
+        ):
+            self._ensure_column(con, "files", name, declaration)
+        con.executescript(
+            """
+            CREATE INDEX IF NOT EXISTS idx_files_container ON files(container_file_id);
+            CREATE INDEX IF NOT EXISTS idx_files_source_kind ON files(source_kind);
+            CREATE INDEX IF NOT EXISTS idx_files_exact_content
+                ON files(extension, member_uncompressed_size, content_hash_full);
             """
         )
 
@@ -669,6 +700,199 @@ class DatabaseManager:
         self._upsert_file_fts(con, file_id, file_path.name, path_text)
         return file_id, bool(changed)
 
+    def sync_zip_members(
+        self,
+        root_id: int,
+        container_file_id: int,
+        archive_path: Path,
+        members: Sequence[Any],
+        parser_versions: dict[str, str],
+        *,
+        retry_failed_files: bool = False,
+    ) -> list[tuple[Any, int, bool, str]]:
+        """Upsert independently searchable sources for a validated ZIP manifest."""
+
+        now = utc_now()
+        archive_stat = archive_path.stat()
+        results: list[tuple[Any, int, bool, str]] = []
+        active_paths: set[str] = set()
+        with self.connect() as con:
+            for member in members:
+                internal_path = str(member.internal_path)
+                display_path = f"{archive_path} > {internal_path}"
+                active_paths.add(display_path)
+                filename = Path(internal_path).name
+                extension = Path(internal_path).suffix.lower()
+                expected_version = parser_versions[display_path]
+                member_sha = str(member.sha256) if member.sha256 else None
+                fingerprint = f"zip:{int(member.size_bytes)}:{int(member.crc32)}"
+                existing = con.execute(
+                    """
+                    SELECT id, quick_fingerprint, parser_version, parse_status,
+                        content_hash, content_hash_full
+                    FROM files WHERE path = ?
+                    """,
+                    (display_path,),
+                ).fetchone()
+                if existing is None:
+                    cursor = con.execute(
+                        """
+                        INSERT INTO files(
+                            root_id, path, filename, extension, size_bytes, modified_time,
+                            created_time, quick_fingerprint, content_hash, content_hash_full,
+                            parse_status, parser_version, last_seen_at, is_deleted, source_kind,
+                            container_file_id, internal_path, member_order, member_crc32,
+                            member_uncompressed_size
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, 0,
+                                  'zip_member', ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            root_id,
+                            display_path,
+                            filename,
+                            extension,
+                            int(member.size_bytes),
+                            archive_stat.st_mtime,
+                            archive_stat.st_ctime,
+                            fingerprint,
+                            member_sha,
+                            member_sha,
+                            expected_version,
+                            now,
+                            container_file_id,
+                            internal_path,
+                            int(member.member_index),
+                            int(member.crc32),
+                            int(member.size_bytes),
+                        ),
+                    )
+                    file_id = int(cursor.lastrowid)
+                    changed = True
+                else:
+                    retry_incomplete = retry_failed_files and str(existing["parse_status"]) != "success"
+                    stored_hash = member_sha or str(existing["content_hash_full"] or existing["content_hash"] or "") or None
+                    changed = (
+                        str(existing["quick_fingerprint"] or "") != fingerprint
+                        or str(existing["parser_version"] or "") != expected_version
+                        or str(existing["parse_status"] or "")
+                        in {"pending", "processing", "cancelled", "deleted"}
+                        or retry_incomplete
+                    )
+                    file_id = int(existing["id"])
+                    con.execute(
+                        """
+                        UPDATE files SET root_id = ?, filename = ?, extension = ?, size_bytes = ?,
+                            modified_time = ?, created_time = ?, quick_fingerprint = ?,
+                            content_hash = ?, content_hash_full = ?, parser_version = ?,
+                            last_seen_at = ?, is_deleted = 0, source_kind = 'zip_member',
+                            container_file_id = ?, internal_path = ?, member_order = ?,
+                            member_crc32 = ?, member_uncompressed_size = ?,
+                            parse_status = CASE WHEN ? THEN 'pending' ELSE parse_status END
+                        WHERE id = ?
+                        """,
+                        (
+                            root_id,
+                            filename,
+                            extension,
+                            int(member.size_bytes),
+                            archive_stat.st_mtime,
+                            archive_stat.st_ctime,
+                            fingerprint,
+                            stored_hash,
+                            stored_hash,
+                            expected_version,
+                            now,
+                            container_file_id,
+                            internal_path,
+                            int(member.member_index),
+                            int(member.crc32),
+                            int(member.size_bytes),
+                            int(changed),
+                            file_id,
+                        ),
+                    )
+                self._upsert_file_fts(con, file_id, filename, display_path)
+                results.append((member, file_id, bool(changed), display_path))
+
+            stale_rows = con.execute(
+                "SELECT id, path FROM files WHERE container_file_id = ? AND is_deleted = 0",
+                (container_file_id,),
+            ).fetchall()
+            stale_ids = [
+                int(row["id"])
+                for row in stale_rows
+                if str(row["path"]) not in active_paths
+            ]
+            self._mark_deleted_file_ids(con, stale_ids)
+
+            old_document_ids = self._document_ids_for_files(con, [container_file_id])
+            con.execute(
+                """
+                UPDATE files SET document_id = NULL, content_key = NULL,
+                    parse_status = 'success', parse_error_code = NULL,
+                    parse_error_message = NULL, parser_name = 'zip_manifest', indexed_at = ?
+                WHERE id = ?
+                """,
+                (now, container_file_id),
+            )
+            self._garbage_collect_documents(con, old_document_ids)
+        return results
+
+    def zip_container_requires_sync(self, container_file_id: int) -> bool:
+        """Return whether interrupted or failed virtual members need manifest recovery."""
+
+        with self.connect() as con:
+            row = con.execute(
+                """
+                SELECT 1 FROM files
+                WHERE container_file_id = ? AND is_deleted = 0
+                  AND parse_status NOT IN ('success', 'metadata_only')
+                LIMIT 1
+                """,
+                (container_file_id,),
+            ).fetchone()
+            return row is not None
+
+    def active_zip_member_candidate_keys(self) -> set[tuple[str, int]]:
+        with self.connect() as con:
+            rows = con.execute(
+                """
+                SELECT DISTINCT extension, member_uncompressed_size
+                FROM files
+                WHERE source_kind = 'zip_member' AND is_deleted = 0
+                  AND content_hash_full IS NOT NULL
+                """
+            ).fetchall()
+        return {
+            (str(row["extension"] or ""), int(row["member_uncompressed_size"] or 0))
+            for row in rows
+        }
+
+    def file_content_states(self, file_ids: Sequence[int]) -> dict[int, tuple[str | None, str | None]]:
+        ids = list(dict.fromkeys(int(file_id) for file_id in file_ids))
+        if not ids:
+            return {}
+        placeholders = ",".join("?" for _ in ids)
+        with self.connect() as con:
+            rows = con.execute(
+                f"SELECT id, content_hash_full, content_key FROM files WHERE id IN ({placeholders})",
+                tuple(ids),
+            ).fetchall()
+        return {
+            int(row["id"]): (
+                str(row["content_hash_full"]) if row["content_hash_full"] else None,
+                str(row["content_key"]) if row["content_key"] else None,
+            )
+            for row in rows
+        }
+
+    def set_content_hash_full(self, file_id: int, content_hash_full: str) -> None:
+        with self.connect() as con:
+            con.execute(
+                "UPDATE files SET content_hash = ?, content_hash_full = ? WHERE id = ?",
+                (content_hash_full, content_hash_full, int(file_id)),
+            )
+
     @staticmethod
     def _upsert_file_fts(
         con: sqlite3.Connection,
@@ -720,9 +944,16 @@ class DatabaseManager:
 
     def invalidate_file(self, path: str | Path) -> bool:
         with self.connect() as con:
-            cursor = con.execute(
-                "UPDATE files SET parse_status = 'pending' WHERE path = ? AND is_deleted = 0",
+            row = con.execute(
+                "SELECT id, container_file_id FROM files WHERE path = ? AND is_deleted = 0",
                 (str(path),),
+            ).fetchone()
+            if row is None:
+                return False
+            target_id = int(row["container_file_id"] or row["id"])
+            cursor = con.execute(
+                "UPDATE files SET parse_status = 'pending' WHERE id = ? AND is_deleted = 0",
+                (target_id,),
             )
             return cursor.rowcount > 0
 
@@ -921,6 +1152,8 @@ class DatabaseManager:
         error_code = item.get("error_code")
         error_message = item.get("error_message")
         content_key = str(item.get("content_key") or f"file:{primary_file_id}:{parser_name}")
+        content_hash_full_value = item.get("content_hash_full")
+        content_hash_full = str(content_hash_full_value) if content_hash_full_value else None
         old_document_ids = self._document_ids_for_files(con, file_ids)
         document_id: int | None = None
         placeholders = ",".join("?" for _ in file_ids)
@@ -1013,6 +1246,8 @@ class DatabaseManager:
             UPDATE files SET
                 document_id = ?, content_key = ?, parse_status = ?, parse_error_code = ?,
                 parse_error_message = ?, parser_name = ?, parser_version = ?, indexed_at = ?,
+                content_hash = COALESCE(?, content_hash),
+                content_hash_full = COALESCE(?, content_hash_full),
                 is_deleted = 0
             WHERE id IN ({placeholders})
             """,
@@ -1025,6 +1260,8 @@ class DatabaseManager:
                 parser_name,
                 parser_version,
                 now,
+                content_hash_full,
+                content_hash_full,
                 *file_ids,
             ),
         )
@@ -1207,7 +1444,10 @@ class DatabaseManager:
     def active_paths_for_root(self, root_id: int) -> set[str]:
         with self.connect() as con:
             rows = con.execute(
-                "SELECT path FROM files WHERE root_id = ? AND is_deleted = 0",
+                """
+                SELECT path FROM files
+                WHERE root_id = ? AND is_deleted = 0 AND source_kind = 'file'
+                """,
                 (root_id,),
             ).fetchall()
             return {str(row["path"]) for row in rows}
@@ -1221,42 +1461,63 @@ class DatabaseManager:
                 f"SELECT id, document_id FROM files WHERE path IN ({placeholders})",
                 tuple(paths),
             ).fetchall()
-            file_ids = [int(row["id"]) for row in rows]
-            document_ids = {
-                int(row["document_id"])
-                for row in rows
-                if row["document_id"] is not None
-            }
+            container_ids = [int(row["id"]) for row in rows]
+            file_ids = list(container_ids)
+            if container_ids:
+                container_placeholders = ",".join("?" for _ in container_ids)
+                child_rows = con.execute(
+                    f"SELECT id FROM files WHERE container_file_id IN ({container_placeholders})",
+                    tuple(container_ids),
+                ).fetchall()
+                file_ids.extend(int(row["id"]) for row in child_rows)
             if not file_ids:
                 return 0
-            id_placeholders = ",".join("?" for _ in file_ids)
-            for document_id in document_ids:
-                replacement = con.execute(
-                    f"""
-                    SELECT id FROM files
-                    WHERE document_id = ? AND id NOT IN ({id_placeholders}) AND is_deleted = 0
-                    LIMIT 1
-                    """,
-                    (document_id, *file_ids),
-                ).fetchone()
-                if replacement is not None:
-                    con.execute(
-                        f"""
-                        UPDATE content_blocks SET file_id = ?
-                        WHERE document_id = ? AND file_id IN ({id_placeholders})
-                        """,
-                        (int(replacement["id"]), document_id, *file_ids),
-                    )
-            con.execute(
-                f"DELETE FROM content_fts WHERE file_id IN ({id_placeholders}) AND block_id IN (SELECT id FROM content_blocks WHERE document_id IS NULL)",
-                tuple(file_ids),
-            )
-            con.execute(
-                f"UPDATE files SET document_id = NULL, is_deleted = 1, parse_status = 'deleted' WHERE id IN ({id_placeholders})",
-                tuple(file_ids),
-            )
-            self._garbage_collect_documents(con, document_ids)
+            self._mark_deleted_file_ids(con, file_ids)
             return len(file_ids)
+
+    def _mark_deleted_file_ids(
+        self,
+        con: sqlite3.Connection,
+        file_ids: Sequence[int],
+    ) -> None:
+        ids = list(dict.fromkeys(int(value) for value in file_ids))
+        if not ids:
+            return
+        placeholders = ",".join("?" for _ in ids)
+        document_ids = self._document_ids_for_files(con, ids)
+        for document_id in document_ids:
+            replacement = con.execute(
+                f"""
+                SELECT id FROM files
+                WHERE document_id = ? AND id NOT IN ({placeholders}) AND is_deleted = 0
+                LIMIT 1
+                """,
+                (document_id, *ids),
+            ).fetchone()
+            if replacement is not None:
+                con.execute(
+                    f"""
+                    UPDATE content_blocks SET file_id = ?
+                    WHERE document_id = ? AND file_id IN ({placeholders})
+                    """,
+                    (int(replacement["id"]), document_id, *ids),
+                )
+        con.execute(
+            f"""
+            DELETE FROM content_fts
+            WHERE file_id IN ({placeholders})
+              AND block_id IN (SELECT id FROM content_blocks WHERE document_id IS NULL)
+            """,
+            tuple(ids),
+        )
+        con.execute(
+            f"""
+            UPDATE files SET document_id = NULL, is_deleted = 1, parse_status = 'deleted'
+            WHERE id IN ({placeholders})
+            """,
+            tuple(ids),
+        )
+        self._garbage_collect_documents(con, document_ids)
 
     def update_root_scan_time(self, root_id: int, status: str = "ready") -> None:
         with self.connect() as con:
@@ -1473,21 +1734,61 @@ class DatabaseManager:
                 ),
             )
             con.execute(
-                """
+                f"""
                 DELETE FROM index_file_metrics
                 WHERE run_id IN (
-                    SELECT id FROM index_runs ORDER BY started_at DESC LIMIT -1 OFFSET 3
+                    SELECT id FROM index_runs ORDER BY started_at DESC LIMIT -1 OFFSET {INDEX_RUN_RETENTION}
                 )
                 """
             )
             con.execute(
-                """
+                f"""
                 DELETE FROM index_runs
                 WHERE id IN (
-                    SELECT id FROM index_runs ORDER BY started_at DESC LIMIT -1 OFFSET 3
+                    SELECT id FROM index_runs ORDER BY started_at DESC LIMIT -1 OFFSET {INDEX_RUN_RETENTION}
                 )
                 """
             )
+
+    def recent_index_runs_since(self, started_at: str) -> list[dict[str, object]]:
+        with self.connect() as con:
+            rows = con.execute(
+                """
+                SELECT id, started_at, finished_at, mode, status, discovered_files,
+                    discovered_bytes, scan_ms, parse_ms, write_ms, fts_ms, total_ms,
+                    peak_rss_bytes, summary_json
+                FROM index_runs
+                WHERE started_at >= ?
+                ORDER BY started_at ASC
+                """,
+                (started_at,),
+            ).fetchall()
+        results: list[dict[str, object]] = []
+        for row in rows:
+            summary_json = str(row["summary_json"] or "")
+            try:
+                parsed_summary = json.loads(summary_json) if summary_json else {}
+            except json.JSONDecodeError:
+                parsed_summary = {}
+            results.append(
+                {
+                    "id": str(row["id"]),
+                    "started_at": str(row["started_at"]),
+                    "finished_at": str(row["finished_at"] or ""),
+                    "mode": str(row["mode"]),
+                    "status": str(row["status"]),
+                    "discovered_files": int(row["discovered_files"] or 0),
+                    "discovered_bytes": int(row["discovered_bytes"] or 0),
+                    "scan_ms": int(row["scan_ms"] or 0),
+                    "parse_ms": int(row["parse_ms"] or 0),
+                    "write_ms": int(row["write_ms"] or 0),
+                    "fts_ms": int(row["fts_ms"] or 0),
+                    "total_ms": int(row["total_ms"] or 0),
+                    "peak_rss_bytes": int(row["peak_rss_bytes"] or 0),
+                    "summary": parsed_summary,
+                }
+            )
+        return results
 
     def record_file_metrics(self, run_id: str, timings: Sequence[FileTiming]) -> None:
         if not timings:

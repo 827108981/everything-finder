@@ -12,16 +12,24 @@ import time
 from importlib import resources
 from pathlib import Path
 
-from local_full_text_search.config.defaults import AppSettings
-from local_full_text_search.config.constants import APP_DISPLAY_NAME
-from local_full_text_search.config.constants import TEMP_DIR
-from local_full_text_search.core.database import DatabaseManager
-from local_full_text_search.core.index_manager import IndexManager
-from local_full_text_search.core.search_engine import SearchEngine
-from local_full_text_search.core.task_manager import CancelToken
-from local_full_text_search.models.search_query import SearchQuery
-from local_full_text_search.services.logging_service import configure_logging
-from local_full_text_search.services.settings_service import SettingsService
+from local_full_text_search.services.startup_diagnostics import StartupDiagnostics
+
+
+def load_application_dependencies() -> None:
+    """Load optional/heavy application modules after startup diagnostics is active."""
+
+    global APP_DISPLAY_NAME, AppSettings, CancelToken, DatabaseManager, IndexManager
+    global SearchEngine, SearchQuery, SettingsService, TEMP_DIR, configure_logging
+
+    from local_full_text_search.config.constants import APP_DISPLAY_NAME, TEMP_DIR
+    from local_full_text_search.config.defaults import AppSettings
+    from local_full_text_search.core.database import DatabaseManager
+    from local_full_text_search.core.index_manager import IndexManager
+    from local_full_text_search.core.search_engine import SearchEngine
+    from local_full_text_search.core.task_manager import CancelToken
+    from local_full_text_search.models.search_query import SearchQuery
+    from local_full_text_search.services.logging_service import configure_logging
+    from local_full_text_search.services.settings_service import SettingsService
 
 
 def run_self_test() -> int:
@@ -990,61 +998,92 @@ def apply_light_theme(app: object) -> None:
 
 
 def main() -> int:
-    configure_logging()
-    if "--self-test" in sys.argv:
-        return run_self_test()
-    if "--validate-core" in sys.argv:
-        return run_core_validation()
-    if "--validate-process-pool" in sys.argv:
-        return run_process_pool_validation()
-    if "--validate-schema-v3" in sys.argv:
-        return run_schema_v3_validation()
-    if "--validate-schema-v4" in sys.argv:
-        return run_schema_v4_validation()
-    if "--validate-field-reindex" in sys.argv:
-        index = sys.argv.index("--validate-field-reindex")
-        if index + 2 >= len(sys.argv):
-            print("--validate-field-reindex 需要数据库副本和设置文件路径")
-            return 2
-        return run_field_reindex_validation(
-            Path(sys.argv[index + 1]),
-            Path(sys.argv[index + 2]),
-        )
-    if "--validate-database-lock" in sys.argv:
-        return run_database_lock_validation()
-    if "--validate-shutdown" in sys.argv:
-        return run_shutdown_validation()
-    if "--validate-checkpoint-timeout" in sys.argv:
-        return run_checkpoint_timeout_validation()
-    if "--validate-legacy-shutdown" in sys.argv:
-        index = sys.argv.index("--validate-legacy-shutdown")
-        if index + 1 >= len(sys.argv):
-            print("--validate-legacy-shutdown 需要一个 .doc/.xls/.ppt 路径")
-            return 2
-        return run_legacy_shutdown_validation(Path(sys.argv[index + 1]))
-    if "--validate-ui" in sys.argv:
-        return run_ui_validation()
+    diagnostics = StartupDiagnostics()
+    diagnostics.begin()
+
+    def finish_command(result: int) -> int:
+        diagnostics.mark_completed()
+        return result
+
     try:
+        diagnostics.stage_started("加载应用模块")
+        load_application_dependencies()
+        diagnostics.stage_completed()
+        diagnostics.stage_started("配置日志")
+        configure_logging()
+        diagnostics.stage_completed()
+        if "--self-test" in sys.argv:
+            return finish_command(run_self_test())
+        if "--validate-core" in sys.argv:
+            return finish_command(run_core_validation())
+        if "--validate-process-pool" in sys.argv:
+            return finish_command(run_process_pool_validation())
+        if "--validate-schema-v3" in sys.argv:
+            return finish_command(run_schema_v3_validation())
+        if "--validate-schema-v4" in sys.argv:
+            return finish_command(run_schema_v4_validation())
+        if "--validate-field-reindex" in sys.argv:
+            index = sys.argv.index("--validate-field-reindex")
+            if index + 2 >= len(sys.argv):
+                print("--validate-field-reindex 需要数据库副本和设置文件路径")
+                return finish_command(2)
+            return finish_command(
+                run_field_reindex_validation(
+                    Path(sys.argv[index + 1]),
+                    Path(sys.argv[index + 2]),
+                )
+            )
+        if "--validate-database-lock" in sys.argv:
+            return finish_command(run_database_lock_validation())
+        if "--validate-shutdown" in sys.argv:
+            return finish_command(run_shutdown_validation())
+        if "--validate-checkpoint-timeout" in sys.argv:
+            return finish_command(run_checkpoint_timeout_validation())
+        if "--validate-legacy-shutdown" in sys.argv:
+            index = sys.argv.index("--validate-legacy-shutdown")
+            if index + 1 >= len(sys.argv):
+                print("--validate-legacy-shutdown 需要一个 .doc/.xls/.ppt 路径")
+                return finish_command(2)
+            return finish_command(run_legacy_shutdown_validation(Path(sys.argv[index + 1])))
+        if "--validate-ui" in sys.argv:
+            return finish_command(run_ui_validation())
+        diagnostics.stage_started("加载图形界面")
         from PySide6.QtWidgets import QApplication, QMessageBox
         from local_full_text_search.ui.main_window import MainWindow
-    except ImportError as exc:
-        print("缺少 PySide6，无法启动图形界面。请先运行: python -m pip install -r requirements.txt")
-        print(exc)
+        diagnostics.stage_completed()
+    except Exception as exc:
+        diagnostics.stage_failed(diagnostics.current_stage, exc)
+        diagnostics.show_native_error("本地全文搜索启动失败", diagnostics.format_error_message(exc))
         return 2
-
-    settings_service = SettingsService()
-    settings = settings_service.load()
-    db = DatabaseManager()
-    db.initialize()
-    app = QApplication(sys.argv)
-    app.setApplicationName(APP_DISPLAY_NAME)
-    apply_light_theme(app)
     try:
+        diagnostics.stage_started("读取设置")
+        settings_service = SettingsService()
+        settings = settings_service.load()
+        diagnostics.stage_completed()
+        diagnostics.stage_started("初始化索引数据库")
+        db = DatabaseManager()
+        db.initialize()
+        diagnostics.stage_completed()
+        diagnostics.stage_started("创建图形界面")
+        app = QApplication(sys.argv)
+        app.setApplicationName(APP_DISPLAY_NAME)
+        apply_light_theme(app)
         window = MainWindow(db, settings, settings_service)
         window.show()
+        diagnostics.stage_completed()
+        diagnostics.mark_window_visible()
+        if diagnostics.previous_failure:
+            QMessageBox.warning(
+                window,
+                "检测到上次启动未完成",
+                "上次启动没有正常显示主窗口。\n\n"
+                f"上次阶段：{diagnostics.previous_failure.get('stage', '未知')}\n"
+                f"诊断日志：{diagnostics.log_path}",
+            )
         return app.exec()
     except Exception as exc:
-        QMessageBox.critical(None, "启动失败", str(exc))
+        diagnostics.stage_failed(diagnostics.current_stage, exc)
+        diagnostics.show_native_error("本地全文搜索启动失败", diagnostics.format_error_message(exc))
         return 1
 
 

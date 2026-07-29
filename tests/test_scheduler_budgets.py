@@ -67,3 +67,19 @@ def test_process_lanes_sharing_executor_do_not_prefetch_behind_each_other() -> N
     assert executor.calls == 1
     assert len(zip_lane.futures) == 1
     assert len(ocr_lane.futures) == 0
+
+
+def test_cpu_token_budget_accounts_for_ocr_threads() -> None:
+    normal_executor = RecordingExecutor()
+    ocr_executor = RecordingExecutor()
+    normal = ParseLane("normal", normal_executor, 1, 200 * 1024 * 1024)
+    ocr = ParseLane("ocr", ocr_executor, 1, 200 * 1024 * 1024, process_based=True)
+    normal.pending.append(job(1, 10, "normal"))
+    ocr.pending.append(job(2, 10, "ocr"))
+    settings = AppSettings(index_cpu_token_budget=2, ocr_cpu_threads=2)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        schedule_parse_lanes([normal, ocr], settings, CancelToken(), Path(tmp))
+
+    assert normal_executor.calls == 1
+    assert ocr_executor.calls == 0

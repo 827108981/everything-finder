@@ -197,6 +197,7 @@ class IndexWriter:
             "error_code": artifact.error_code,
             "error_message": artifact.error_message,
             "content_key": getattr(artifact, "content_key", None),
+            "content_hash_full": getattr(artifact, "content_hash_full", None),
             "task_id": getattr(artifact, "task_id", None),
         }
 

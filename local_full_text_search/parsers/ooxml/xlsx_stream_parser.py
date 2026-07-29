@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import zipfile
 from collections.abc import Iterable
 from pathlib import Path
@@ -28,6 +29,7 @@ FORMULA = f"{{{S_NS}}}f"
 TEXT = f"{{{S_NS}}}t"
 SHARED_ITEM = f"{{{S_NS}}}si"
 COMMENT = f"{{{S_NS}}}comment"
+ROW_REF_RE = re.compile(r"(\d+)$")
 
 
 class XlsxStreamParser(BaseParser):
@@ -68,15 +70,43 @@ class XlsxStreamParser(BaseParser):
             available = set(archive.namelist())
             if "xl/workbook.xml" not in available or "xl/_rels/workbook.xml.rels" not in available:
                 raise ValueError("XLSX is missing workbook parts")
-            shared_strings = _shared_strings(archive, cancel_token) if "xl/sharedStrings.xml" in available else []
             sheets = _sheet_parts(archive)
+            max_sheet_bytes = max((sheet_bytes for _, _, _, sheet_bytes in sheets), default=0)
+            self.report_progress(
+                "workbook_scan",
+                completed=0,
+                total=len(sheets),
+                unit_type="sheet",
+                detail=f"{len(sheets)} 个工作表 · 最大 {max_sheet_bytes // 1024 // 1024} MB",
+            )
+            shared_strings = _shared_strings(archive, cancel_token) if "xl/sharedStrings.xml" in available else []
+            if shared_strings:
+                self.report_progress(
+                    "shared_strings",
+                    completed=len(shared_strings),
+                    total=len(shared_strings),
+                    unit_type="string",
+                    detail=f"共享字符串 {len(shared_strings):,}",
+                )
             block_index = 0
-            for sheet_name, sheet_part in sheets:
+            for sheet_index, (sheet_name, sheet_part, row_estimate, sheet_bytes) in enumerate(sheets, start=1):
                 if sheet_part not in available:
                     continue
+                self.report_progress(
+                    "sheet_scan",
+                    completed=sheet_index,
+                    total=len(sheets),
+                    unit_type="sheet",
+                    cursor=sheet_index,
+                    detail=f"{sheet_name} · {sheet_bytes // 1024} KB",
+                )
                 comments = _comments_for_sheet(archive, sheet_part, available, cancel_token)
+                row_reported = 0
+                last_row_number = 0
                 for row in iterparse_end(archive, sheet_part, ROW, cancel_token):
                     row_number = int(row.get("r") or 0)
+                    if row_number:
+                        last_row_number = row_number
                     parts: list[str] = []
                     first_cell: str | None = None
                     last_cell: str | None = None
@@ -104,7 +134,26 @@ class XlsxStreamParser(BaseParser):
                             extra={"row_start": row_number, "row_end": row_number},
                         )
                         block_index += 1
+                    if row_number and (row_number - row_reported >= 250 or row_number == row_estimate):
+                        self.report_progress(
+                            "sheet_row",
+                            completed=row_number,
+                            total=row_estimate or row_number,
+                            unit_type="row",
+                            cursor=row_number,
+                            detail=sheet_name,
+                        )
+                        row_reported = row_number
                     clear_element(row)
+                final_row = last_row_number or row_reported or row_estimate
+                self.report_progress(
+                    "sheet_row",
+                    completed=final_row,
+                    total=row_estimate or max(final_row, 1),
+                    unit_type="row",
+                    cursor=final_row,
+                    detail=f"{sheet_name} 完成",
+                )
 
 
 def _shared_strings(archive: zipfile.ZipFile, cancel_token: CancelToken) -> list[str]:
@@ -115,7 +164,7 @@ def _shared_strings(archive: zipfile.ZipFile, cancel_token: CancelToken) -> list
     return strings
 
 
-def _sheet_parts(archive: zipfile.ZipFile) -> list[tuple[str, str]]:
+def _sheet_parts(archive: zipfile.ZipFile) -> list[tuple[str, str, int, int]]:
     rels_root = xml_root(archive, "xl/_rels/workbook.xml.rels")
     targets: dict[str, str] = {}
     for relation in rels_root.iter(f"{{{REL_NS}}}Relationship"):
@@ -125,14 +174,49 @@ def _sheet_parts(archive: zipfile.ZipFile) -> list[tuple[str, str]]:
             if target:
                 targets[relation_id] = target
     workbook_root = xml_root(archive, "xl/workbook.xml")
-    result: list[tuple[str, str]] = []
+    result: list[tuple[str, str, int, int]] = []
     for sheet in workbook_root.iter(SHEET):
         name = str(sheet.get("name") or "Sheet")
         relation_id = str(sheet.get(f"{{{R_NS}}}id") or "")
         target = targets.get(relation_id)
         if target:
-            result.append((name, target))
+            row_estimate = _sheet_row_estimate(archive, target)
+            try:
+                sheet_bytes = int(archive.getinfo(target).file_size)
+            except KeyError:
+                sheet_bytes = 0
+            result.append((name, target, row_estimate, sheet_bytes))
     return result
+
+
+def _sheet_row_estimate(archive: zipfile.ZipFile, sheet_part: str) -> int:
+    try:
+        with archive.open(sheet_part) as source:
+            context = etree.iterparse(
+                source,
+                events=("start",),
+                tag=f"{{{S_NS}}}dimension",
+                resolve_entities=False,
+                no_network=True,
+                recover=False,
+                huge_tree=True,
+            )
+            for _, element in context:
+                ref = str(element.get("ref") or "")
+                if ref:
+                    return _row_count_from_dimension(ref)
+                break
+    except Exception:
+        return 0
+    return 0
+
+
+def _row_count_from_dimension(ref: str) -> int:
+    if ":" not in ref:
+        return 1 if ref else 0
+    tail = ref.rsplit(":", 1)[-1]
+    match = ROW_REF_RE.search(tail)
+    return int(match.group(1)) if match else 0
 
 
 def _comments_for_sheet(

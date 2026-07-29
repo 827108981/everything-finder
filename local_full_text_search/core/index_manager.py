@@ -10,7 +10,9 @@ import shutil
 import threading
 import time
 import traceback
+import tempfile
 import uuid
+import zipfile
 from collections import deque
 from collections.abc import Iterable
 from concurrent.futures import FIRST_COMPLETED, Executor, Future, ProcessPoolExecutor, ThreadPoolExecutor, wait
@@ -30,13 +32,16 @@ from local_full_text_search.config.constants import (
 )
 from local_full_text_search.config.defaults import AppSettings
 from local_full_text_search.core.block_coalescer import BlockCoalescer
-from local_full_text_search.core.content_fingerprint import ContentFingerprint, fingerprint_file
+from local_full_text_search.core.content_fingerprint import ContentFingerprint, fingerprint_file, sha256_file
 from local_full_text_search.core.database import DatabaseManager
 from local_full_text_search.core.errors import (
     CancelledError,
     ParserDependencyError,
     PasswordProtectedError,
     UnsupportedFormatError,
+    ZipMemberContentChangedError,
+    ZipMemberDirectoryChangedError,
+    ZipMemberSizeChangedError,
 )
 from local_full_text_search.core.index_scheduler import estimate_parse_cost
 from local_full_text_search.core.index_time_estimator import IndexTimeEstimator
@@ -47,6 +52,13 @@ from local_full_text_search.models.content_block import ContentBlock
 from local_full_text_search.models.index_metrics import FileTiming, IndexRunMetrics
 from local_full_text_search.parsers.parser_registry import ParserRegistry
 from local_full_text_search.parsers.legacy_office_parser import cleanup_registered_office_processes
+from local_full_text_search.parsers.zip_parser import (
+    ZipMemberDescriptor,
+    decoded_zip_member_name,
+    hash_zip_member,
+    safe_zip_member_name,
+    scan_zip_manifest,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +77,22 @@ class IndexSummary:
     excluded_video: int = 0
     deleted: int = 0
     cancelled: bool = False
+
+    def to_dict(self) -> dict[str, object]:
+        return asdict(self)
+
+
+@dataclass(slots=True)
+class PreparedSource:
+    file_path: Path
+    file_id: int
+    size_bytes: int | None = None
+    exact_sha256: str | None = None
+    archive_path: Path | None = None
+    archive_member_index: int | None = None
+    archive_member_name: str = ""
+    archive_member_crc32: int | None = None
+    archive_internal_path: str = ""
 
 
 @dataclass(slots=True)
@@ -92,6 +120,13 @@ class ParseJob:
     progress_detail: str = ""
     last_progress_monotonic: float = 0.0
     timeout_seconds: int = 0
+    archive_path: Path | None = None
+    archive_member_index: int | None = None
+    archive_member_name: str = ""
+    archive_member_crc32: int | None = None
+    archive_internal_path: str = ""
+    exact_sha256: str = ""
+    content_hash_full: str | None = None
 
 
 @dataclass(slots=True)
@@ -122,6 +157,7 @@ class ParseOutcome:
     progress_phase: str = ""
     progress_completed: int = 0
     progress_total: int = 0
+    content_hash_full: str | None = None
 
 
 @dataclass(slots=True)
@@ -658,7 +694,8 @@ class IndexManager:
         metrics: IndexRunMetrics,
         token: CancelToken,
     ) -> list[ParseJob]:
-        prepared_rows: list[tuple[Path, int]] = []
+        prepared_rows: list[PreparedSource] = []
+        physical_rows: dict[str, tuple[Path, int, bool]] = {}
         batch_size = max(64, min(1024, int(self.settings.index_write_batch_size or 32) * 8))
         for offset in range(0, len(file_paths), batch_size):
             token.throw_if_cancelled()
@@ -679,27 +716,186 @@ class IndexManager:
                 logger.error("Failed to read metadata for %s: %s", file_path, exc)
                 summary.failed += 1
             for file_path, file_id, changed in prepared:
+                physical_rows[str(file_path)] = (file_path, file_id, changed)
                 if file_path.suffix.lower() in VIDEO_EXTENSIONS:
                     if changed:
                         self.db.mark_video_excluded([file_id])
                     summary.excluded_video += 1
+                elif file_path.suffix.lower() == ".zip" and (
+                    changed or self.db.zip_container_requires_sync(file_id)
+                ):
+                    try:
+                        manifest = scan_zip_manifest(file_path, self.settings, token)
+                    except (OSError, ValueError, zipfile.BadZipFile):
+                        logger.info(
+                            "ZIP manifest planning fell back to the container parser: %s",
+                            file_path,
+                            exc_info=True,
+                        )
+                        prepared_rows.append(PreparedSource(file_path, file_id))
+                        continue
+                    # Unsafe or encrypted members retain the existing container-level
+                    # partial-failure semantics instead of being silently discarded.
+                    if manifest.unsafe_members or manifest.encrypted_members:
+                        prepared_rows.append(PreparedSource(file_path, file_id))
+                        continue
+                    versions = {
+                        f"{file_path} > {member.internal_path}": parser_identity_for_path(
+                            Path(member.internal_path), self.settings
+                        )[1]
+                        for member in manifest.members
+                    }
+                    member_rows = self.db.sync_zip_members(
+                        root_id,
+                        file_id,
+                        file_path,
+                        manifest.members,
+                        versions,
+                        retry_failed_files=self.settings.retry_failed_files,
+                    )
+                    for member, member_file_id, member_changed, display_path in member_rows:
+                        if member_changed:
+                            prepared_rows.append(
+                                PreparedSource(
+                                    file_path=Path(display_path),
+                                    file_id=member_file_id,
+                                    size_bytes=int(member.size_bytes),
+                                    archive_path=file_path,
+                                    archive_member_index=int(member.member_index),
+                                    archive_member_name=str(member.member_name),
+                                    archive_member_crc32=int(member.crc32),
+                                    archive_internal_path=str(member.internal_path),
+                                )
+                            )
+                        else:
+                            summary.skipped += 1
                 elif changed:
-                    prepared_rows.append((file_path, file_id))
+                    prepared_rows.append(PreparedSource(file_path, file_id))
                 else:
                     summary.skipped += 1
 
+        # A newly added directory file may match a ZIP member indexed during a
+        # previous run. Only those extension/size candidates are promoted back
+        # into planning and fully hashed; ordinary unchanged files stay cheap.
+        known_zip_candidates = self.db.active_zip_member_candidate_keys()
+        prepared_file_ids = {source.file_id for source in prepared_rows}
+        physical_states = self.db.file_content_states(
+            [file_id for _path, file_id, _changed in physical_rows.values()]
+        )
+        for file_path, file_id, _changed in physical_rows.values():
+            candidate = (file_path.suffix.lower(), _safe_file_size(file_path))
+            if candidate not in known_zip_candidates or file_id in prepared_file_ids:
+                continue
+            content_hash_full, content_key = physical_states.get(file_id, (None, None))
+            if content_hash_full and content_key == f"sha256:{content_hash_full}":
+                continue
+            prepared_rows.append(PreparedSource(file_path, file_id))
+            prepared_file_ids.add(file_id)
+
+        physical_candidate_keys = {
+            (file_path.suffix.lower(), int(_safe_file_size(file_path)))
+            for file_path, _file_id, _changed in physical_rows.values()
+        }
+        zip_group_counts: dict[tuple[str, int, int], int] = {}
+        for source in prepared_rows:
+            if source.archive_path is None or source.archive_member_crc32 is None:
+                continue
+            key = (
+                source.file_path.suffix.lower(),
+                int(source.size_bytes) if source.size_bytes is not None else _safe_file_size(source.file_path),
+                int(source.archive_member_crc32),
+            )
+            zip_group_counts[key] = zip_group_counts.get(key, 0) + 1
+        candidate_hash_keys = known_zip_candidates | physical_candidate_keys
+        for source in prepared_rows:
+            if source.archive_path is None or source.archive_member_index is None or source.archive_member_crc32 is None:
+                continue
+            if source.exact_sha256 is not None:
+                continue
+            size_bytes = int(source.size_bytes) if source.size_bytes is not None else _safe_file_size(source.file_path)
+            ext_key = (source.file_path.suffix.lower(), size_bytes)
+            triple_key = (source.file_path.suffix.lower(), size_bytes, int(source.archive_member_crc32))
+            if ext_key not in candidate_hash_keys and zip_group_counts.get(triple_key, 0) <= 1:
+                continue
+            if source.archive_path is None:
+                continue
+            try:
+                source.exact_sha256 = hash_zip_member(
+                    source.archive_path,
+                    ZipMemberDescriptor(
+                        member_index=int(source.archive_member_index),
+                        member_name=source.archive_member_name or source.file_path.name,
+                        internal_path=source.archive_internal_path,
+                        size_bytes=size_bytes,
+                        compressed_bytes=0,
+                        crc32=int(source.archive_member_crc32),
+                    ),
+                    token,
+                )
+                self.db.set_content_hash_full(source.file_id, source.exact_sha256)
+            except Exception:
+                logger.info(
+                    "ZIP member candidate hash skipped during planning: %s",
+                    source.file_path,
+                    exc_info=True,
+                )
+
+        candidate_sizes: dict[tuple[str, int], int] = {}
+        for source in prepared_rows:
+            key = (
+                source.file_path.suffix.lower(),
+                int(source.size_bytes) if source.size_bytes is not None else _safe_file_size(source.file_path),
+            )
+            candidate_sizes[key] = candidate_sizes.get(key, 0) + 1
+        metrics.dedup_candidate_count += sum(
+            count for count in candidate_sizes.values() if count > 1
+        )
+        metrics.dedup_full_hash_count += sum(
+            1 for source in prepared_rows if source.exact_sha256 is not None
+        )
+        exact_member_candidates = known_zip_candidates | {
+            (source.file_path.suffix.lower(), int(source.size_bytes or 0))
+            for source in prepared_rows
+            if source.exact_sha256 is not None
+        }
         fingerprinted: list[ParseJob] = []
-        for file_path, file_id in prepared_rows:
+        for source in prepared_rows:
             token.wait_if_paused()
             token.throw_if_cancelled()
+            file_path = source.file_path
+            file_id = source.file_id
             parser_name, parser_version = parser_identity_for_path(file_path, self.settings)
-            fingerprint = self._fingerprint_for(file_path)
+            if source.exact_sha256 is not None:
+                fingerprint = ContentFingerprint(
+                    f"sha256:{source.exact_sha256}",
+                    int(source.size_bytes or 0),
+                    "sha256",
+                )
+            elif source.archive_path is not None:
+                size_bytes = int(source.size_bytes) if source.size_bytes is not None else _safe_file_size(file_path)
+                fingerprint = ContentFingerprint(
+                    f"zip:{source.archive_path}:{source.archive_member_index}:{source.archive_member_crc32}:{size_bytes}",
+                    size_bytes,
+                    "zip_member",
+                )
+            else:
+                fingerprint = self._fingerprint_for(file_path)
+                candidate = (file_path.suffix.lower(), _safe_file_size(file_path))
+                if candidate in exact_member_candidates:
+                    full_hash = sha256_file(file_path)
+                    fingerprint = ContentFingerprint(
+                        f"sha256:{full_hash}",
+                        candidate[1],
+                        "sha256",
+                    )
+                    self.db.set_content_hash_full(file_id, full_hash)
+                    metrics.dedup_full_hash_count += 1
             if not self.settings.enable_parse_cache:
                 content_key = f"path:{file_path}:{fingerprint.key}"
             else:
                 content_key = fingerprint.key
-            size_bytes = _safe_file_size(file_path)
-            lane = lane_for(file_path, self.settings)
+            size_bytes = int(source.size_bytes) if source.size_bytes is not None else _safe_file_size(file_path)
+            lane = "zip" if source.archive_path is not None else lane_for(file_path, self.settings)
             fingerprinted.append(
                 ParseJob(
                     file_id=file_id,
@@ -712,6 +908,13 @@ class IndexManager:
                     relevant_bytes=fingerprint.relevant_bytes,
                     estimated_cost=estimate_parse_cost(file_path, size_bytes, fingerprint.relevant_bytes),
                     queued_monotonic=time.perf_counter(),
+                    archive_path=source.archive_path,
+                    archive_member_index=source.archive_member_index,
+                    archive_member_name=source.archive_member_name,
+                    archive_member_crc32=source.archive_member_crc32,
+                    archive_internal_path=source.archive_internal_path,
+                    exact_sha256=source.exact_sha256 or "",
+                    content_hash_full=source.exact_sha256,
                 )
             )
 
@@ -730,6 +933,8 @@ class IndexManager:
         for identity, group in groups.items():
             cached = cache.get(identity)
             file_ids = [job.file_id for job in group]
+            if len(group) > 1:
+                metrics.dedup_verified_source_count += len(group)
             if cached is not None:
                 document_id, status = cached
                 self.db.link_cached_document(
@@ -741,6 +946,8 @@ class IndexManager:
                     status,
                 )
                 metrics.cache_hits += len(group)
+                metrics.dedup_parse_avoided_count += len(group)
+                metrics.dedup_bytes_avoided += sum(job.size_bytes for job in group)
                 if group[0].file_path.suffix.lower() in VIDEO_EXTENSIONS:
                     summary.excluded_video += len(group)
                 else:
@@ -748,6 +955,8 @@ class IndexManager:
                 continue
             primary = group[0]
             primary.alias_file_ids = tuple(job.file_id for job in group[1:])
+            metrics.dedup_parse_avoided_count += max(0, len(group) - 1)
+            metrics.dedup_bytes_avoided += sum(job.size_bytes for job in group[1:])
             jobs.append(primary)
             metrics.cache_misses += 1
             priority = max(1, min(1_000_000, int(primary.estimated_cost * 100)))
@@ -779,14 +988,14 @@ class IndexManager:
             max_workers=max(1, int(self.settings.parser_workers or 1)),
             thread_name_prefix="lfts-parser",
         )
-        zip_executor = _new_process_executor(self.settings, 1, spool_dir)
-        ocr_executor = _new_process_executor(self.settings, 1, spool_dir)
+        zip_executor = _new_process_executor(self.settings, self.settings.slow_file_workers, spool_dir)
+        ocr_executor = _new_process_executor(self.settings, self.settings.ocr_workers, spool_dir)
         office_executor = _new_process_executor(
             self.settings,
             self.settings.process_parser_workers,
             spool_dir,
         )
-        legacy_executor = _new_process_executor(self.settings, 1, spool_dir)
+        legacy_executor = _new_process_executor(self.settings, self.settings.slow_file_workers, spool_dir)
         lanes = {
             "normal": ParseLane(
                 "normal",
@@ -801,18 +1010,18 @@ class IndexManager:
             "zip": ParseLane(
                 "zip",
                 zip_executor,
-                1,
+                submission_window(self.settings.slow_pending_tasks, self.settings.slow_file_workers),
                 effective_lane_budget(self.settings, "zip"),
                 process_based=True,
-                worker_count=1,
+                worker_count=max(1, int(self.settings.slow_file_workers or 1)),
             ),
             "ocr": ParseLane(
                 "ocr",
                 ocr_executor,
-                1,
+                submission_window(self.settings.ocr_pending_tasks, self.settings.ocr_workers),
                 effective_lane_budget(self.settings, "ocr"),
                 process_based=True,
-                worker_count=1,
+                worker_count=max(1, int(self.settings.ocr_workers or 1)),
             ),
             "office_process": ParseLane(
                 "office_process",
@@ -831,10 +1040,10 @@ class IndexManager:
             "legacy_office": ParseLane(
                 "legacy_office",
                 legacy_executor,
-                1,
+                submission_window(self.settings.slow_pending_tasks, self.settings.slow_file_workers),
                 effective_lane_budget(self.settings, "legacy_office"),
                 process_based=True,
-                worker_count=1,
+                worker_count=max(1, int(self.settings.slow_file_workers or 1)),
             ),
         }
         by_lane: dict[str, list[ParseJob]] = {name: [] for name in lanes}
@@ -1245,7 +1454,13 @@ def schedule_parse_lanes(
     submitted_task_ids: list[int | None] = []
     lane_list = list(lanes)
     global_budget = max(128, int(settings.index_memory_budget_mb)) * 1024 * 1024
+    cpu_budget = max(1, int(settings.index_cpu_token_budget or os.cpu_count() or 1))
     global_inflight = sum(lane.inflight_bytes for lane in lane_list)
+    global_cpu_tokens = sum(
+        cpu_tokens_for_job(job, settings)
+        for lane in lane_list
+        for job in lane.jobs.values()
+    )
     for lane in lane_list:
         while lane.pending and len(lane.futures) < lane.max_in_flight:
             if lane.process_based:
@@ -1260,9 +1475,12 @@ def schedule_parse_lanes(
             token.throw_if_cancelled()
             job = lane.pending[0]
             job_bytes = max(1, job.size_bytes)
+            job_cpu_tokens = cpu_tokens_for_job(job, settings)
             if lane.futures and lane.inflight_bytes + job_bytes > lane.max_inflight_bytes:
                 break
             if global_inflight and global_inflight + job_bytes > global_budget:
+                break
+            if global_cpu_tokens and global_cpu_tokens + job_cpu_tokens > cpu_budget:
                 break
             lane.pending.popleft()
             job.started_monotonic = time.perf_counter()
@@ -1282,8 +1500,15 @@ def schedule_parse_lanes(
             lane.jobs[future] = job
             lane.inflight_bytes += job_bytes
             global_inflight += job_bytes
+            global_cpu_tokens += job_cpu_tokens
             submitted_task_ids.append(job.task_id)
     return submitted_task_ids
+
+
+def cpu_tokens_for_job(job: ParseJob, settings: AppSettings) -> int:
+    if job.lane == "ocr":
+        return max(1, int(settings.ocr_cpu_threads or 1))
+    return 1
 
 
 def drain_completed_lanes(
@@ -1386,6 +1611,43 @@ def parse_file_process_worker(job: ParseJob, settings: AppSettings, spool_dir: P
     )
 
 
+def materialize_zip_member(job: ParseJob, cancel_token: CancelToken) -> tuple[Path, Path, str]:
+    if job.archive_path is None or job.archive_member_index is None:
+        raise ValueError("ZIP member descriptor is incomplete")
+    TEMP_DIR.mkdir(parents=True, exist_ok=True)
+    extracted_root = Path(tempfile.mkdtemp(prefix="zip_member_", dir=TEMP_DIR))
+    extracted = extracted_root / f"member{job.file_path.suffix.lower()}"
+    digest = hashlib.sha256()
+    try:
+        with zipfile.ZipFile(job.archive_path) as archive:
+            infos = archive.infolist()
+            if job.archive_member_index < 0 or job.archive_member_index >= len(infos):
+                raise ZipMemberDirectoryChangedError("ZIP member directory changed during indexing")
+            info = infos[job.archive_member_index]
+            if info.is_dir():
+                raise ZipMemberDirectoryChangedError("ZIP member directory changed during indexing")
+            decoded_name = decoded_zip_member_name(info)
+            safe_name = safe_zip_member_name(decoded_name)
+            if safe_name != job.archive_internal_path:
+                raise ZipMemberDirectoryChangedError("ZIP member directory changed during indexing")
+            if int(info.file_size) != int(job.size_bytes):
+                raise ZipMemberSizeChangedError("ZIP member size changed during indexing")
+            if job.archive_member_crc32 is not None and int(info.CRC) != int(job.archive_member_crc32):
+                raise ZipMemberContentChangedError("ZIP member content changed during indexing")
+            with archive.open(info) as source, extracted.open("wb") as target:
+                for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                    cancel_token.throw_if_cancelled()
+                    digest.update(chunk)
+                    target.write(chunk)
+        content_hash = digest.hexdigest()
+        if job.exact_sha256 and content_hash != job.exact_sha256:
+            raise ZipMemberContentChangedError("ZIP member content changed during indexing")
+        return extracted_root, extracted, content_hash
+    except Exception:
+        shutil.rmtree(extracted_root, ignore_errors=True)
+        raise
+
+
 def parse_file_with_registry(
     job: ParseJob,
     registry: ParserRegistry,
@@ -1396,9 +1658,14 @@ def parse_file_with_registry(
     progress_path: Path | None = None,
 ) -> ParseOutcome:
     started = time.perf_counter()
+    materialized_root: Path | None = None
+    materialized_sha256: str | None = None
     try:
         cancel_token.wait_if_paused()
         cancel_token.throw_if_cancelled()
+        parse_path = job.file_path
+        if job.archive_path is not None:
+            materialized_root, parse_path, materialized_sha256 = materialize_zip_member(job, cancel_token)
         parser = registry.parser_for(job.file_path)
         parser.reset_status()
         logical_blocks: list[ContentBlock] = []
@@ -1487,10 +1754,14 @@ def parse_file_with_registry(
                 "detail": job.file_path.name,
             }
         )
-        for block in parser.parse(job.file_path, cancel_token):
+        for block in parser.parse(parse_path, cancel_token):
             cancel_token.wait_if_paused()
             cancel_token.throw_if_cancelled()
             if block.raw_text.strip():
+                if job.archive_path is not None:
+                    block.file_path = str(job.file_path)
+                    block.extra["zip_internal_path"] = job.archive_internal_path
+                    block.extra["zip_archive_path"] = str(job.archive_path)
                 logical_blocks.append(block)
                 if not parser.supports_resume:
                     report_parser_progress(
@@ -1510,6 +1781,11 @@ def parse_file_with_registry(
         ).coalesce(logical_blocks)
         normalize_ms = int((time.perf_counter() - normalize_started) * 1000)
         status = parser.last_status or "success"
+        content_hash_full = materialized_sha256 or (job.exact_sha256 or None)
+        if job.archive_path is not None and content_hash_full:
+            content_key = f"sha256:{content_hash_full}"
+        else:
+            content_key = job.content_key
         return ParseOutcome(
             file_id=job.file_id,
             file_path=job.file_path,
@@ -1520,7 +1796,7 @@ def parse_file_with_registry(
             error_message=(parser.last_error_message if status != "success" else None),
             task_id=job.task_id,
             alias_file_ids=job.alias_file_ids,
-            content_key=job.content_key,
+            content_key=content_key,
             parser_version=job.parser_version,
             lane=job.lane,
             size_bytes=job.size_bytes,
@@ -1532,6 +1808,7 @@ def parse_file_with_registry(
             resume_cursor=0,
             progress_phase="complete",
             progress_completed=progress_sequence,
+            content_hash_full=content_hash_full,
         )
     except UnsupportedFormatError as exc:
         return _diagnostic_outcome(job, "metadata", "unsupported", "UNSUPPORTED_FORMAT", str(exc), started)
@@ -1551,6 +1828,9 @@ def parse_file_with_registry(
             user_message_for_exception(exc),
             started,
         )
+    finally:
+        if materialized_root is not None:
+            shutil.rmtree(materialized_root, ignore_errors=True)
 
 
 def _diagnostic_outcome(
@@ -1603,11 +1883,16 @@ def materialize_parse_result(result: ParseResult, spool_dir: Path) -> ParseOutco
 def hydrate_outcome(outcome: ParseOutcome, job: ParseJob) -> None:
     outcome.task_id = job.task_id
     outcome.alias_file_ids = job.alias_file_ids
-    outcome.content_key = job.content_key
     outcome.parser_version = job.parser_version
     outcome.lane = job.lane
     outcome.size_bytes = job.size_bytes
     outcome.estimated_cost = job.estimated_cost
+    if not outcome.content_hash_full:
+        outcome.content_hash_full = job.content_hash_full or (job.exact_sha256 or None)
+    if job.archive_path is not None and outcome.content_hash_full:
+        outcome.content_key = f"sha256:{outcome.content_hash_full}"
+    else:
+        outcome.content_key = job.content_key
     if not outcome.queue_wait_ms and job.started_monotonic and job.queued_monotonic:
         outcome.queue_wait_ms = max(0, int((job.started_monotonic - job.queued_monotonic) * 1000))
 
@@ -1790,11 +2075,21 @@ def error_code_for_exception(exc: Exception) -> str:
         return "PARSER_DEPENDENCY_MISSING"
     if isinstance(exc, PasswordProtectedError):
         return "PASSWORD_PROTECTED"
+    if isinstance(exc, ZipMemberDirectoryChangedError):
+        return "ZIP_MEMBER_DIRECTORY_CHANGED"
+    if isinstance(exc, ZipMemberSizeChangedError):
+        return "ZIP_MEMBER_SIZE_CHANGED"
+    if isinstance(exc, ZipMemberContentChangedError):
+        return "ZIP_MEMBER_CONTENT_CHANGED"
     if isinstance(exc, PermissionError):
         return "PERMISSION_DENIED"
     if isinstance(exc, FileNotFoundError):
         return "FILE_NOT_FOUND"
     if isinstance(exc, OSError):
+        if getattr(exc, "winerror", None) in {32, 33}:
+            return "FILE_IN_USE"
+        if getattr(exc, "errno", None) in {13}:
+            return "PERMISSION_DENIED"
         return "FILE_IN_USE"
     return "PARSER_ERROR"
 
@@ -1804,10 +2099,21 @@ def user_message_for_exception(exc: Exception) -> str:
         return str(exc)
     if isinstance(exc, PasswordProtectedError):
         return "文件已加密，需要密码"
+    if isinstance(exc, ZipMemberDirectoryChangedError):
+        return "ZIP 内部目录结构发生变化"
+    if isinstance(exc, ZipMemberSizeChangedError):
+        return "ZIP 成员大小发生变化，请重新索引"
+    if isinstance(exc, ZipMemberContentChangedError):
+        return "ZIP 成员内容发生变化，请重新索引"
     if isinstance(exc, PermissionError):
         return "没有权限读取该文件"
     if isinstance(exc, FileNotFoundError):
         return "文件不存在或已被移动"
+    if isinstance(exc, OSError):
+        if getattr(exc, "winerror", None) in {32, 33}:
+            return "文件正被其他程序占用"
+        if getattr(exc, "errno", None) in {13}:
+            return "没有权限读取该文件"
     return str(exc) or exc.__class__.__name__
 
 

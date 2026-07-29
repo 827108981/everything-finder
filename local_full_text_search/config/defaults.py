@@ -29,6 +29,7 @@ class AppSettings:
     process_recycle_min_tasks: int = 16
     process_recycle_max_tasks: int = 64
     index_performance_preset: str = "balanced"
+    index_cpu_token_budget: int = 0
     index_memory_budget_mb: int = 2048
     process_memory_budget_mb: int = 768
     normal_inflight_bytes: int = 256 * 1024 * 1024

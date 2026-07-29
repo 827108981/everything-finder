@@ -38,6 +38,11 @@ class IndexRunMetrics:
     process_spawn_count: int = 0
     cache_hits: int = 0
     cache_misses: int = 0
+    dedup_candidate_count: int = 0
+    dedup_full_hash_count: int = 0
+    dedup_verified_source_count: int = 0
+    dedup_parse_avoided_count: int = 0
+    dedup_bytes_avoided: int = 0
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)

@@ -6,6 +6,7 @@ import io
 import shutil
 import tempfile
 import zipfile
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Iterable
 
@@ -25,6 +26,115 @@ from local_full_text_search.parsers.pptx_parser import PptxParser
 from local_full_text_search.parsers.text_parser import TextParser
 from local_full_text_search.parsers.xlsx_parser import XlsxParser
 from local_full_text_search.ocr.ocr_engine import OcrEngine
+
+
+ZIP_MEMBER_EXTENSIONS = {
+    ".txt", ".log", ".csv", ".md", ".json", ".xml", ".ini",
+    ".pdf", ".docx", ".xlsx", ".xlsm", ".pptx",
+    ".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".zip",
+}
+
+
+@dataclass(frozen=True, slots=True)
+class ZipMemberDescriptor:
+    member_index: int
+    member_name: str
+    internal_path: str
+    size_bytes: int
+    compressed_bytes: int
+    crc32: int
+    sha256: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ZipManifest:
+    members: tuple[ZipMemberDescriptor, ...]
+    total_members: int
+    skipped_members: int
+    unsafe_members: int
+    encrypted_members: int
+
+
+def scan_zip_manifest(
+    file_path: Path,
+    settings: AppSettings,
+    cancel_token: CancelToken,
+) -> ZipManifest:
+    """Validate an archive and collect stable member metadata.
+
+    Exact hashing is intentionally deferred to the index planner so only
+    deduplication candidates pay for a full SHA-256 read.
+    """
+
+    members: list[ZipMemberDescriptor] = []
+    skipped = 0
+    unsafe = 0
+    encrypted = 0
+    with zipfile.ZipFile(file_path) as archive:
+        infos = archive.infolist()
+        file_infos = [info for info in infos if not info.is_dir()]
+        if len(file_infos) > settings.max_zip_file_count:
+            raise ValueError("ZIP_FILE_COUNT_LIMIT")
+        if sum(int(info.file_size) for info in file_infos) > settings.max_zip_uncompressed_bytes:
+            raise ValueError("ZIP_SIZE_LIMIT")
+        for member_index, info in enumerate(infos):
+            cancel_token.wait_if_paused()
+            cancel_token.throw_if_cancelled()
+            if info.is_dir():
+                skipped += 1
+                continue
+            decoded_name = decoded_zip_member_name(info)
+            safe_name = safe_zip_member_name(decoded_name)
+            if safe_name is None:
+                unsafe += 1
+                continue
+            if info.flag_bits & 0x1:
+                encrypted += 1
+                continue
+            if Path(safe_name).suffix.lower() not in ZIP_MEMBER_EXTENSIONS:
+                skipped += 1
+                continue
+            members.append(
+                ZipMemberDescriptor(
+                    member_index=member_index,
+                    member_name=info.filename,
+                    internal_path=safe_name,
+                    size_bytes=int(info.file_size),
+                    compressed_bytes=int(info.compress_size),
+                    crc32=int(info.CRC),
+                )
+            )
+    return ZipManifest(tuple(members), len(infos), skipped, unsafe, encrypted)
+
+
+def hash_zip_member(
+    file_path: Path,
+    descriptor: ZipMemberDescriptor,
+    cancel_token: CancelToken,
+) -> str:
+    """Return the exact SHA-256 for one validated ZIP member."""
+
+    digest = hashlib.sha256()
+    with zipfile.ZipFile(file_path) as archive:
+        infos = archive.infolist()
+        if descriptor.member_index < 0 or descriptor.member_index >= len(infos):
+            raise OSError("ZIP member directory changed during indexing")
+        info = infos[descriptor.member_index]
+        if info.is_dir():
+            raise OSError("ZIP member directory changed during indexing")
+        decoded_name = decoded_zip_member_name(info)
+        safe_name = safe_zip_member_name(decoded_name)
+        if safe_name != descriptor.internal_path:
+            raise OSError("ZIP member directory changed during indexing")
+        if int(info.file_size) != int(descriptor.size_bytes):
+            raise OSError("ZIP member size changed during indexing")
+        if int(info.CRC) != int(descriptor.crc32):
+            raise OSError("ZIP member content changed during indexing")
+        with archive.open(info) as source:
+            for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                cancel_token.throw_if_cancelled()
+                digest.update(chunk)
+    return digest.hexdigest()
 
 
 class ZipParser(BaseParser):
@@ -63,11 +173,12 @@ class ZipParser(BaseParser):
         skipped_members = 0
         try:
             with zipfile.ZipFile(file_path) as archive:
-                infos = [info for info in archive.infolist() if not info.is_dir()]
-                if len(infos) > self.settings.max_zip_file_count:
+                infos = archive.infolist()
+                file_infos = [info for info in infos if not info.is_dir()]
+                if len(file_infos) > self.settings.max_zip_file_count:
                     self.set_status("skipped", "ZIP_FILE_COUNT_LIMIT", "压缩包内文件数量超过安全限制")
                     return
-                total_size = sum(info.file_size for info in infos)
+                total_size = sum(info.file_size for info in file_infos)
                 if total_size > self.settings.max_zip_uncompressed_bytes:
                     self.set_status("skipped", "ZIP_SIZE_LIMIT", "压缩包解压后体积超过安全限制")
                     return
@@ -77,6 +188,10 @@ class ZipParser(BaseParser):
                         continue
                     cancel_token.wait_if_paused()
                     cancel_token.throw_if_cancelled()
+                    if info.is_dir():
+                        skipped_members += 1
+                        self._report_member_progress(member_index, len(infos), Path(info.filename).name or info.filename)
+                        continue
                     decoded_name = decoded_zip_member_name(info)
                     if info.flag_bits & 0x1:
                         skipped_members += 1
@@ -111,11 +226,11 @@ class ZipParser(BaseParser):
                         continue
                     extracted = extracted_root / hashlib.sha256(info.filename.encode("utf-8")).hexdigest()
                     extracted = extracted.with_suffix(Path(safe_name).suffix)
-                    with archive.open(info) as source, extracted.open("wb") as target:
-                        for chunk in iter(lambda: source.read(1024 * 1024), b""):
-                            cancel_token.throw_if_cancelled()
-                            target.write(chunk)
                     try:
+                        with archive.open(info) as source, extracted.open("wb") as target:
+                            for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                                cancel_token.throw_if_cancelled()
+                                target.write(chunk)
                         parser.configure_runtime(
                             progress_callback=lambda payload, current=member_index, total=len(infos), name=safe_name: self._report_inner_progress(
                                 payload,
