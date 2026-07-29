@@ -71,13 +71,27 @@ def run_ui_validation() -> int:
             db.initialize()
             sample_root = base / "files"
             sample_root.mkdir()
-            (sample_root / "sample.txt").write_text("UI_VALIDATION_HIT", encoding="utf-8")
-            db.add_root(sample_root)
+            sample_file = sample_root / (
+                "CL8000i-301140100~301140400-第一抓杯手手指组件拆卸方法测试文档.txt"
+            )
+            sample_file.write_text(
+                "第 6 页\n操作前请拔掉3 个传感器，并标记插头。\n"
+                "完整路径、日期和右侧命中内容都必须可见。",
+                encoding="utf-8",
+            )
+            root_id = db.add_root(sample_root)
+            IndexManager(db, settings).index_root(root_id)
             app = QApplication.instance() or QApplication(["LocalFullTextSearch", "--validate-ui"])
             apply_light_theme(app)
             window = MainWindow(db, settings, settings_service)
             window.resize(1280, 800)
             window.show()
+            window.search_page.search_box.input.setText("拔掉 3 个传感器")
+            page = SearchEngine(db).search(
+                SearchQuery(text="拔掉 3 个传感器", mode="exact")
+            )
+            window.search_page.set_results(page)
+            window.show_preview(page.results[0])
             app.processEvents()
             pixmap = window.grab()
             image = pixmap.toImage().convertToFormat(QImage.Format.Format_RGB32)
@@ -105,6 +119,12 @@ def run_ui_validation() -> int:
                     "current_file": str(sample_root / "large-document.docx"),
                     "eta_lower_seconds": 420,
                     "eta_upper_seconds": 660,
+                    "active_phase": "docx_paragraph",
+                    "active_completed_units": 128,
+                    "active_total_units": 640,
+                    "no_progress_seconds": 7,
+                    "retry_count": 1,
+                    "excluded_video": 9,
                 }
             )
             app.processEvents()
@@ -703,7 +723,7 @@ def run_shutdown_validation() -> int:
 
 
 def run_checkpoint_timeout_validation() -> int:
-    """Force an OCR timeout and verify that completed native PDF text survives."""
+    """Force an OCR no-progress timeout and verify incomplete text is not published."""
 
     result_path = Path("checkpoint_timeout_validation_result.txt")
     try:
@@ -750,16 +770,21 @@ def run_checkpoint_timeout_validation() -> int:
                 ocr_images=True,
                 ocr_scanned_pdf=True,
                 ocr_cpu_threads=1,
-                single_file_timeout_seconds=10,
+                ocr_no_progress_timeout_seconds=1,
+                no_progress_max_retries=0,
                 process_parser_workers=1,
                 process_pending_tasks=1,
             )
             started = time.perf_counter()
             summary = IndexManager(db, settings).index_root(root_id)
             elapsed = time.perf_counter() - started
-            hits = SearchEngine(db).search(
-                SearchQuery(text="NATIVE_CHECKPOINT_SURVIVES_TIMEOUT", mode="exact")
-            ).total_confirmed
+            search_blocked = False
+            try:
+                SearchEngine(db).search(
+                    SearchQuery(text="NATIVE_CHECKPOINT_SURVIVES_TIMEOUT", mode="exact")
+                )
+            except Exception as exc:
+                search_blocked = exc.__class__.__name__ == "IndexNotReadyError"
             with db.connect() as con:
                 row = con.execute(
                     "SELECT parse_status, parse_error_code FROM files WHERE path = ?",
@@ -768,17 +793,17 @@ def run_checkpoint_timeout_validation() -> int:
                 block_count = int(con.execute("SELECT COUNT(*) FROM content_blocks").fetchone()[0])
             if row is None:
                 raise RuntimeError("Checkpoint PDF was not recorded")
-            if row["parse_status"] != "partial_success" or row["parse_error_code"] != "PARSE_TIMEOUT":
+            if row["parse_status"] != "failed_retryable" or row["parse_error_code"] != "PARSE_NO_PROGRESS":
                 raise RuntimeError(f"Unexpected timeout status: {dict(row)}")
-            if summary.partial_success != 1 or summary.failed != 0 or hits != 1 or block_count < 1:
+            if summary.failed != 1 or not search_blocked or block_count != 0:
                 raise RuntimeError(
-                    f"Checkpoint content was not retained: summary={summary}; "
-                    f"hits={hits}; blocks={block_count}"
+                    f"Incomplete content publication was not blocked: summary={summary}; "
+                    f"search_blocked={search_blocked}; blocks={block_count}"
                 )
             message = (
                 "CHECKPOINT_TIMEOUT_VALIDATION_OK\n"
-                f"elapsed_seconds={elapsed:.3f}; partial_success={summary.partial_success}; "
-                f"failed={summary.failed}; retained_hits={hits}; blocks={block_count}\n"
+                f"elapsed_seconds={elapsed:.3f}; failed={summary.failed}; "
+                f"search_blocked={search_blocked}; published_blocks={block_count}\n"
             )
             result_path.write_text(message, encoding="utf-8")
             print(message, end="")
@@ -820,7 +845,7 @@ def run_legacy_shutdown_validation(source: Path) -> int:
                 enable_ocr=False,
                 process_parser_workers=1,
                 process_pending_tasks=1,
-                single_file_timeout_seconds=600,
+                legacy_no_progress_timeout_seconds=600,
                 legacy_conversion_cache=False,
             )
             manager = IndexManager(db, settings)

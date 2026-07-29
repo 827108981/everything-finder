@@ -7,6 +7,7 @@ from pathlib import Path
 
 from local_full_text_search.config.defaults import AppSettings
 from local_full_text_search.core.database import DatabaseManager
+from local_full_text_search.core.errors import IndexNotReadyError
 from local_full_text_search.core.index_manager import IndexManager
 from local_full_text_search.core.search_engine import SearchEngine
 from local_full_text_search.models.content_block import ContentBlock
@@ -14,6 +15,16 @@ from local_full_text_search.models.search_query import SearchQuery
 
 
 class SearchEngineTests(unittest.TestCase):
+    def test_search_is_blocked_before_first_complete_index(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            db = DatabaseManager(base / "index.db")
+            db.initialize()
+            db.add_root(base / "files")
+
+            with self.assertRaises(IndexNotReadyError):
+                SearchEngine(db).search(SearchQuery(text="anything"))
+
     def test_extension_filter(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -145,6 +156,7 @@ class SearchEngineTests(unittest.TestCase):
                     """,
                     fts_rows,
                 )
+            db.update_root_scan_time(root_id, "ready")
 
             page = SearchEngine(db).search(
                 SearchQuery(
@@ -185,6 +197,7 @@ class SearchEngineTests(unittest.TestCase):
                     ocr_confidence=confidence,
                 )
                 db.replace_file_blocks(file_id, name, str(path), [block], parser_name="test")
+            db.update_root_scan_time(root_id, "ready")
 
             engine = SearchEngine(db)
             strict = engine.search(
@@ -209,6 +222,28 @@ class SearchEngineTests(unittest.TestCase):
             self.assertEqual(strict.total_confirmed, 1)
             self.assertEqual(fuzzy.total_confirmed, 2)
             self.assertTrue(any(result.has_fuzzy_match for result in fuzzy.results))
+
+    def test_chinese_query_automatically_ignores_spacing_differences(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = base / "files"
+            root.mkdir()
+            (root / "sensor.txt").write_text("操作时请拔掉3 个传感器。", encoding="utf-8")
+            db = DatabaseManager(base / "index.db")
+            db.initialize()
+            root_id = db.add_root(root)
+            IndexManager(db, AppSettings(enable_ocr=False)).index_root(root_id)
+
+            page = SearchEngine(db).search(
+                SearchQuery(
+                    text="拔掉 3 个传感器",
+                    mode="exact",
+                    search_filename=False,
+                    search_path=False,
+                )
+            )
+
+            self.assertEqual(page.total_confirmed, 1)
 
 
 if __name__ == "__main__":

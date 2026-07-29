@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from pathlib import Path
 from typing import Iterable
 
@@ -12,11 +13,14 @@ from local_full_text_search.models.content_block import ContentBlock
 class BaseParser(ABC):
     name = "base"
     defer_normalization = False
+    supports_resume = False
 
     def __init__(self) -> None:
         self.last_status = "success"
         self.last_error_code: str | None = None
         self.last_error_message: str | None = None
+        self.resume_cursor = 0
+        self._progress_callback: Callable[[dict[str, object]], None] | None = None
 
     def reset_status(self) -> None:
         self.last_status = "success"
@@ -27,6 +31,39 @@ class BaseParser(ABC):
         self.last_status = status
         self.last_error_code = error_code
         self.last_error_message = message
+
+    def configure_runtime(
+        self,
+        *,
+        resume_cursor: int = 0,
+        progress_callback: Callable[[dict[str, object]], None] | None = None,
+    ) -> None:
+        self.resume_cursor = max(0, int(resume_cursor))
+        self._progress_callback = progress_callback
+
+    def report_progress(
+        self,
+        phase: str,
+        *,
+        completed: int = 0,
+        total: int = 0,
+        unit_type: str = "",
+        cursor: int | str | None = None,
+        detail: str = "",
+    ) -> None:
+        callback = self._progress_callback
+        if callback is None:
+            return
+        callback(
+            {
+                "phase": phase,
+                "completed": max(0, int(completed)),
+                "total": max(0, int(total)),
+                "unit_type": unit_type,
+                "cursor": cursor,
+                "detail": detail,
+            }
+        )
 
     @abstractmethod
     def supports(self, file_path: Path) -> bool:

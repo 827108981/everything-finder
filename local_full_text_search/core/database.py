@@ -11,19 +11,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from local_full_text_search.config.constants import DB_PATH, PARSER_VERSION
+from local_full_text_search.config.constants import DB_PATH, PARSER_VERSION, VIDEO_EXTENSIONS
 from local_full_text_search.models.content_block import ContentBlock
 from local_full_text_search.models.index_metrics import FileTiming, IndexRunMetrics
 
 SCHEMA_VERSION = 4
 SUCCESSFUL_DOCUMENT_STATUSES = {
     "success",
-    "partial_success",
     "metadata_only",
-    "ocr_disabled",
-    "converter_missing",
-    "unsupported",
-    "skipped",
 }
 
 
@@ -440,9 +435,9 @@ class DatabaseManager:
                     enabled=excluded.enabled,
                     include_subfolders=excluded.include_subfolders,
                     updated_at=excluded.updated_at,
-                    status='ready'
+                    status='pending'
                 """,
-                (str(path), int(enabled), int(include_subfolders), "{}", now, now, "ready"),
+                (str(path), int(enabled), int(include_subfolders), "{}", now, now, "pending"),
             )
             row = con.execute("SELECT id FROM roots WHERE path = ?", (str(path),)).fetchone()
             return int(row["id"])
@@ -601,7 +596,7 @@ class DatabaseManager:
         path_text = str(file_path)
         changed_status = "processing" if mark_processing else "pending"
         existing = con.execute(
-            "SELECT id, quick_fingerprint, content_hash, parse_status, parser_version, parse_error_code FROM files WHERE path = ?",
+            "SELECT id, extension, quick_fingerprint, content_hash, parse_status, parser_version, parse_error_code FROM files WHERE path = ?",
             (path_text,),
         ).fetchone()
         if existing is None:
@@ -630,20 +625,20 @@ class DatabaseManager:
             file_id = int(cur.lastrowid)
             self._upsert_file_fts(con, file_id, file_path.name, path_text)
             return file_id, True
-        retry_statuses: set[str] = set()
-        if retry_failed_files and existing["parse_error_code"] in {
-            "FILE_IN_USE",
-            "OCR_UNAVAILABLE",
-            "PROCESS_WORKER_CRASH",
-            "PARSE_TIMEOUT",
-        }:
-            retry_statuses.update({"failed", "failed_retryable", "ocr_failed"})
+        retry_incomplete = (
+            retry_failed_files
+            and str(existing["parse_status"]) != "success"
+            and not (
+                str(existing["extension"] or "") in VIDEO_EXTENSIONS
+                and str(existing["parse_status"]) == "metadata_only"
+            )
+        )
         changed = (
             existing["quick_fingerprint"] != fingerprint
             or (expected_parser_version is not None and existing["parser_version"] != expected_parser_version)
             or (compute_full_hash and existing["content_hash"] != content_hash)
             or existing["parse_status"] in {"pending", "processing", "cancelled", "deleted"}
-            or existing["parse_status"] in retry_statuses
+            or retry_incomplete
         )
         next_status = changed_status if changed else str(existing["parse_status"])
         con.execute(
@@ -691,6 +686,38 @@ class DatabaseManager:
         with self.connect() as con:
             con.execute("UPDATE files SET parse_status = 'processing' WHERE id = ?", (file_id,))
 
+    def mark_video_excluded(self, file_ids: Sequence[int]) -> None:
+        """Keep video filename/path metadata without creating searchable content blocks."""
+        ids = [int(value) for value in file_ids]
+        if not ids:
+            return
+        placeholders = ",".join("?" for _ in ids)
+        now = utc_now()
+        with self.connect() as con:
+            old_document_ids = self._document_ids_for_files(con, ids)
+            con.execute(
+                f"DELETE FROM content_fts WHERE rowid IN ("
+                f"SELECT id FROM content_blocks WHERE file_id IN ({placeholders}) "
+                "AND document_id IS NULL)",
+                tuple(ids),
+            )
+            con.execute(
+                f"DELETE FROM content_blocks WHERE file_id IN ({placeholders}) "
+                "AND document_id IS NULL",
+                tuple(ids),
+            )
+            con.execute(
+                f"""
+                UPDATE files SET
+                    document_id = NULL, content_key = NULL, parse_status = 'metadata_only',
+                    parse_error_code = NULL, parse_error_message = NULL,
+                    parser_name = 'video_metadata', parser_version = ?, indexed_at = ?
+                WHERE id IN ({placeholders})
+                """,
+                (PARSER_VERSION, now, *ids),
+            )
+            self._garbage_collect_documents(con, old_document_ids)
+
     def invalidate_file(self, path: str | Path) -> bool:
         with self.connect() as con:
             cursor = con.execute(
@@ -713,7 +740,7 @@ class DatabaseManager:
                 """
                 SELECT id, parse_status FROM documents
                 WHERE content_key = ? AND parser_name = ? AND parser_version = ?
-                  AND parse_status NOT IN ('running', 'failed_retryable')
+                  AND parse_status IN ('success', 'metadata_only')
                 """,
                 (content_key, parser_name, parser_version),
             ).fetchone()
@@ -762,7 +789,7 @@ class DatabaseManager:
                     f"""
                     SELECT id, content_key, parser_name, parser_version, parse_status
                     FROM documents
-                    WHERE parse_status NOT IN ('running', 'failed_retryable')
+                    WHERE parse_status IN ('success', 'metadata_only')
                       AND ({predicates})
                     """,
                     params,
@@ -1495,6 +1522,33 @@ class DatabaseManager:
         with self.connect() as con:
             return int(con.execute("SELECT COUNT(*) AS n FROM files WHERE is_deleted = 0").fetchone()["n"])
 
+    def root_completion(self, root_id: int) -> dict[str, int]:
+        video_placeholders = ",".join("?" for _ in VIDEO_EXTENSIONS)
+        video_extensions = tuple(sorted(VIDEO_EXTENSIONS))
+        with self.connect() as con:
+            row = con.execute(
+                f"""
+                SELECT
+                    COUNT(*) AS discovered,
+                    SUM(CASE WHEN extension IN ({video_placeholders}) THEN 1 ELSE 0 END) AS video_excluded,
+                    SUM(CASE WHEN extension NOT IN ({video_placeholders}) THEN 1 ELSE 0 END) AS eligible,
+                    SUM(CASE WHEN extension NOT IN ({video_placeholders})
+                                  AND parse_status = 'success' THEN 1 ELSE 0 END) AS complete
+                FROM files
+                WHERE root_id = ? AND is_deleted = 0
+                """,
+                (*video_extensions, *video_extensions, *video_extensions, root_id),
+            ).fetchone()
+        eligible = int(row["eligible"] or 0)
+        complete = int(row["complete"] or 0)
+        return {
+            "discovered": int(row["discovered"] or 0),
+            "video_excluded": int(row["video_excluded"] or 0),
+            "eligible": eligible,
+            "complete": complete,
+            "blocking": max(0, eligible - complete),
+        }
+
     def begin_deferred_fts(self) -> None:
         with self.connect() as con:
             self._set_index_state(con, "content_fts_dirty", "1")
@@ -1579,10 +1633,11 @@ class DatabaseManager:
             }
 
     def failed_files(self, limit: int = 500) -> list[sqlite3.Row]:
+        video_placeholders = ",".join("?" for _ in VIDEO_EXTENSIONS)
         with self.connect() as con:
             return list(
                 con.execute(
-                    """
+                    f"""
                     SELECT path, extension, parse_status, parse_error_code, parse_error_message, parser_name, indexed_at
                     FROM files
                     WHERE parse_status IN (
@@ -1590,14 +1645,16 @@ class DatabaseManager:
                         'ocr_disabled', 'ocr_failed', 'converter_missing', 'partial_success',
                         'password_protected'
                     )
+                      AND NOT (extension IN ({video_placeholders}) AND parse_status = 'metadata_only')
                     ORDER BY indexed_at DESC
                     LIMIT ?
                     """,
-                    (limit,),
+                    (*sorted(VIDEO_EXTENSIONS), limit),
                 ).fetchall()
             )
 
     def stats(self) -> dict[str, int]:
+        video_placeholders = ",".join("?" for _ in VIDEO_EXTENSIONS)
         with self.connect() as con:
             total = con.execute("SELECT COUNT(*) AS n FROM files WHERE is_deleted = 0").fetchone()["n"]
             blocks = con.execute("SELECT COUNT(*) AS n FROM content_blocks").fetchone()["n"]
@@ -1611,6 +1668,19 @@ class DatabaseManager:
                 "SELECT COUNT(*) AS n FROM files WHERE parse_status IN ('metadata_only', 'skipped', 'ocr_disabled', 'converter_missing') AND is_deleted = 0"
             ).fetchone()["n"]
             documents = con.execute("SELECT COUNT(*) AS n FROM documents").fetchone()["n"]
+            video_excluded = con.execute(
+                f"SELECT COUNT(*) AS n FROM files WHERE is_deleted = 0 AND extension IN ({video_placeholders})",
+                tuple(sorted(VIDEO_EXTENSIONS)),
+            ).fetchone()["n"]
+            eligible = int(total) - int(video_excluded)
+            complete = con.execute(
+                f"""
+                SELECT COUNT(*) AS n FROM files
+                WHERE is_deleted = 0 AND extension NOT IN ({video_placeholders})
+                  AND parse_status = 'success'
+                """,
+                tuple(sorted(VIDEO_EXTENSIONS)),
+            ).fetchone()["n"]
             return {
                 "files": int(total),
                 "blocks": int(blocks),
@@ -1618,7 +1688,44 @@ class DatabaseManager:
                 "failed": int(failed),
                 "unsupported": int(unsupported),
                 "metadata_only": int(metadata_only),
+                "eligible_files": int(eligible),
+                "complete_files": int(complete),
+                "blocking_files": max(0, int(eligible) - int(complete)),
+                "video_excluded": int(video_excluded),
             }
+
+    def index_readiness(self) -> dict[str, object]:
+        stats = self.stats()
+        with self.connect() as con:
+            enabled_roots = int(
+                con.execute("SELECT COUNT(*) AS n FROM roots WHERE enabled = 1").fetchone()["n"]
+            )
+            active_runs = int(
+                con.execute("SELECT COUNT(*) AS n FROM index_runs WHERE status = 'running'").fetchone()["n"]
+            )
+            unready_roots = int(
+                con.execute(
+                    """
+                    SELECT COUNT(*) AS n FROM roots
+                    WHERE enabled = 1 AND COALESCE(status, '') != 'ready'
+                    """
+                ).fetchone()["n"]
+            )
+        ready = (
+            enabled_roots > 0
+            and int(stats["blocking_files"]) == 0
+            and active_runs == 0
+            and unready_roots == 0
+            and not self.has_incomplete_full_batch()
+            and not self._fts_is_dirty()
+        )
+        return {
+            **stats,
+            "enabled_roots": enabled_roots,
+            "active_runs": active_runs,
+            "unready_roots": unready_roots,
+            "ready": ready,
+        }
 
     def add_search_history(self, query_text: str, max_entries: int = 50) -> None:
         text = query_text.strip()

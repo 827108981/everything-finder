@@ -60,7 +60,6 @@ class ParserRegistry:
             ZipParser(settings, ocr_engine=shared_ocr),
             MetadataOnlyParser(),
             LegacyOfficeParser(
-                timeout_seconds=settings.single_file_timeout_seconds,
                 conversion_cache=settings.legacy_conversion_cache,
                 fast_ooxml=settings.fast_ooxml_enabled,
             ),

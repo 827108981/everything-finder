@@ -38,9 +38,19 @@ ARCHIVE_EXTENSIONS = {".zip"}
 
 MEDIA_METADATA_EXTENSIONS = {".mp4"}
 
+VIDEO_EXTENSIONS = {
+    ".mp4",
+    ".avi",
+    ".mov",
+    ".mkv",
+    ".wmv",
+    ".m4v",
+    ".webm",
+}
+
 LEGACY_OFFICE_EXTENSIONS = {".doc", ".xls", ".ppt"}
 
-SUPPORTED_EXTENSIONS = DOCUMENT_EXTENSIONS | IMAGE_EXTENSIONS | ARCHIVE_EXTENSIONS | MEDIA_METADATA_EXTENSIONS
+SUPPORTED_EXTENSIONS = DOCUMENT_EXTENSIONS | IMAGE_EXTENSIONS | ARCHIVE_EXTENSIONS | VIDEO_EXTENSIONS
 
 TEXT_EXTENSIONS = {
     ".txt",
@@ -80,7 +90,7 @@ FILE_TYPE_GROUPS = {
     "文本/日志": TEXT_EXTENSIONS,
     "图片": IMAGE_EXTENSIONS,
     "压缩包": ARCHIVE_EXTENSIONS,
-    "其他": MEDIA_METADATA_EXTENSIONS,
+    "其他": VIDEO_EXTENSIONS,
 }
 
 
@@ -119,10 +129,10 @@ PARSER_VERSIONS = {
     "pptx_stream": "1",
     "xlsx": "2",
     "xlsx_stream": "1",
-    "pdf": "3",
+    "pdf": "4",
     "image_ocr": "3",
-    "zip": "3",
-    "legacy_office": "2",
+    "zip": "4",
+    "legacy_office": "3",
     "text": "2",
     "metadata": "2",
 }

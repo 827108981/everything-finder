@@ -4,11 +4,18 @@ import re
 import sqlite3
 import time
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from local_full_text_search.core.database import DatabaseManager
-from local_full_text_search.core.normalizer import count_hits, make_context, normalize_text, parse_terms
+from local_full_text_search.core.errors import IndexNotReadyError
+from local_full_text_search.core.normalizer import (
+    contains_cjk,
+    count_hits,
+    make_context,
+    normalize_text,
+    parse_terms,
+)
 from local_full_text_search.core.task_manager import CancelToken
 from local_full_text_search.models.search_query import SearchQuery
 from local_full_text_search.models.search_result import SearchHit, SearchResult
@@ -31,6 +38,15 @@ class SearchEngine:
         self.db = db
 
     def search(self, query: SearchQuery, cancel_token: CancelToken | None = None) -> SearchPage:
+        readiness = self.db.index_readiness()
+        if not bool(readiness["ready"]):
+            raise IndexNotReadyError(
+                "完整索引尚未完成："
+                f"{readiness['complete_files']}/{readiness['eligible_files']} 个文件完整成功，"
+                f"仍有 {readiness['blocking_files']} 个文件需要处理"
+            )
+        if query.mode != "regex" and contains_cjk(query.text) and not query.ignore_spaces:
+            query = replace(query, ignore_spaces=True)
         started = time.perf_counter()
         token = cancel_token or CancelToken()
         regex_pattern = self._compile_regex(query)

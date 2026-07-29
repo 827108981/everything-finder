@@ -35,7 +35,7 @@ class FastIndexingTests(unittest.TestCase):
             page = SearchEngine(db).search(SearchQuery(text="PARALLEL_HIT", mode="exact", page_size=100))
             self.assertEqual(page.total_confirmed, 30)
 
-    def test_tiny_image_is_metadata_only_without_loading_ocr(self) -> None:
+    def test_tiny_image_is_complete_without_loading_ocr(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             root = base / "files"
@@ -47,9 +47,9 @@ class FastIndexingTests(unittest.TestCase):
             settings = AppSettings(enable_ocr=True, ocr_images=True, min_ocr_image_pixels=12_000)
             summary = IndexManager(db, settings).index_root(root_id)
             self.assertEqual(summary.failed, 0)
-            self.assertEqual(summary.metadata_only, 1)
-            diagnostics = db.failed_files()
-            self.assertEqual(diagnostics[0]["parse_error_code"], "IMAGE_TOO_SMALL_FOR_OCR")
+            self.assertEqual(summary.indexed, 1)
+            self.assertEqual(db.failed_files(), [])
+            self.assertTrue(db.index_readiness()["ready"])
 
     def test_saturated_ocr_lane_does_not_block_normal_documents(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -57,7 +57,7 @@ class FastIndexingTests(unittest.TestCase):
             root = base / "files"
             root.mkdir()
             for index in range(12):
-                (root / f"image_{index:02d}.png").write_bytes(b"placeholder")
+                Image.new("RGB", (20, 20), "white").save(root / f"image_{index:02d}.png")
             normal_path = root / "normal.txt"
             normal_path.write_text("NORMAL_QUEUE_HIT", encoding="utf-8")
 

@@ -23,3 +23,7 @@ class PasswordProtectedError(AppError):
 
 class PartialParseError(AppError):
     """Raised when a parser can keep metadata but not extract body text."""
+
+
+class IndexNotReadyError(AppError):
+    """Raised when search is attempted before the complete index is published."""

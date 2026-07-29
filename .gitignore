@@ -3,6 +3,7 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 build/
+build_release_*/
 build_optimized/
 build_final/
 build_validation/
@@ -10,6 +11,7 @@ build_repaired/
 build_lockfix/
 build_lockfix2/
 dist/
+dist_release_*/
 dist_result_grouped/
 dist_optimized/
 dist_final/

@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
 
 from local_full_text_search.config.constants import IMAGE_EXTENSIONS
 from local_full_text_search.models.search_result import SearchResult
+from local_full_text_search.ui.result_view import highlight_context
 
 
 class PreviewPanel(QFrame):
@@ -99,6 +100,7 @@ class PreviewPanel(QFrame):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setWidget(inner)
 
         layout = QVBoxLayout(self)
@@ -109,7 +111,7 @@ class PreviewPanel(QFrame):
         self.open_folder_button.clicked.connect(self._open_folder)
         self.copy_path_button.clicked.connect(self._copy_path)
 
-    def show_result(self, result: SearchResult | None) -> None:
+    def show_result(self, result: SearchResult | None, query_text: str = "") -> None:
         if result is None:
             self.current_path = None
             self.title.setText("选择一个搜索结果")
@@ -126,7 +128,9 @@ class PreviewPanel(QFrame):
         self.meta.setText(
             f"{type_text} · {format_size(result.size_bytes)} · {modified}{confidence}\n{result.location_text}\n{wrap_path(result.file_path)}"
         )
-        self.context.setPlainText(result.context or "文件名/路径命中")
+        self.context.setHtml(
+            highlight_context(result.context or "文件名/路径命中", query_text)
+        )
         self._load_image_preview(result.file_path, result.extension)
 
     def _load_image_preview(self, file_path: str, extension: str) -> None:

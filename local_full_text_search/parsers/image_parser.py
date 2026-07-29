@@ -53,7 +53,14 @@ class ImageParser(BaseParser):
         if dimensions is not None:
             width, height = dimensions
             if width * height < self.min_pixels:
-                self.set_status("metadata_only", "IMAGE_TOO_SMALL_FOR_OCR", "图片尺寸过小，跳过 OCR")
+                self.report_progress(
+                    "image_too_small",
+                    completed=1,
+                    total=1,
+                    unit_type="image",
+                    cursor=1,
+                    detail="图片尺寸低于 OCR 阈值，按完整空文本处理",
+                )
                 return
         cancel_token.wait_if_paused()
         cancel_token.throw_if_cancelled()
@@ -65,10 +72,8 @@ class ImageParser(BaseParser):
                 result = self.ocr.recognize(preprocess_image(file_path, max_side=self.max_side))
                 self.cache.save(key, result)
         except Exception as exc:
-            # OCR 依赖缺失或模型初始化失败时，文件名/路径索引仍然有价值。
-            # 这里不抛出异常，避免图片批量索引污染“真实失败”列表。
             logger.exception("OCR failed for %s", file_path)
-            self.set_status("ocr_disabled", "OCR_UNAVAILABLE", f"OCR 不可用：{exc}")
+            self.set_status("failed_retryable", "OCR_UNAVAILABLE", f"OCR 不可用：{exc}")
             return
         yield self.make_block(
             file_path,
@@ -79,4 +84,12 @@ class ImageParser(BaseParser):
             source_type="ocr",
             ocr_confidence=result.confidence,
             extra=result.extra,
+        )
+        self.report_progress(
+            "image_ocr",
+            completed=1,
+            total=1,
+            unit_type="image",
+            cursor=1,
+            detail=file_path.name,
         )

@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from local_full_text_search.config.defaults import AppSettings
 from local_full_text_search.core.database import DatabaseManager
+from local_full_text_search.core.errors import IndexNotReadyError
 from local_full_text_search.core.index_manager import IndexManager
 from local_full_text_search.core.search_engine import SearchEngine
 from local_full_text_search.models.search_query import SearchQuery
@@ -33,7 +34,7 @@ class ZipParserTests(unittest.TestCase):
             self.assertEqual(page.total_confirmed, 1)
             self.assertIn("archive.zip > docs/readme.txt", page.results[0].location_text)
 
-    def test_zip_path_traversal_is_partial_success_or_metadata(self) -> None:
+    def test_zip_path_traversal_blocks_search_until_fully_successful(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             root = base / "files"
@@ -47,8 +48,11 @@ class ZipParserTests(unittest.TestCase):
             root_id = db.add_root(root)
             summary = IndexManager(db, AppSettings()).index_root(root_id)
             self.assertEqual(summary.failed, 0)
-            page = SearchEngine(db).search(SearchQuery(text="ZIP_SAFE_HIT", mode="exact"))
-            self.assertEqual(page.total_confirmed, 1)
+            self.assertEqual(summary.partial_success, 1)
+            self.assertFalse(db.index_readiness()["ready"])
+            with self.assertRaises(IndexNotReadyError):
+                SearchEngine(db).search(SearchQuery(text="ZIP_SAFE_HIT", mode="exact"))
+            self.assertEqual(db.stats()["blocks"], 0)
 
     def test_zip_temporary_directory_is_removed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

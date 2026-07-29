@@ -36,6 +36,7 @@ class ZipParser(BaseParser):
     """
 
     name = "zip"
+    supports_resume = True
 
     def __init__(
         self,
@@ -57,7 +58,7 @@ class ZipParser(BaseParser):
             return
         TEMP_DIR.mkdir(parents=True, exist_ok=True)
         extracted_root = Path(tempfile.mkdtemp(prefix="zip_index_", dir=TEMP_DIR))
-        yielded = 0
+        yielded = 1 if self.resume_cursor > 0 else 0
         failed_members = 0
         skipped_members = 0
         try:
@@ -70,19 +71,25 @@ class ZipParser(BaseParser):
                 if total_size > self.settings.max_zip_uncompressed_bytes:
                     self.set_status("skipped", "ZIP_SIZE_LIMIT", "压缩包解压后体积超过安全限制")
                     return
-                for info in infos:
+                start_member = min(self.resume_cursor, len(infos))
+                for member_index, info in enumerate(infos):
+                    if member_index < start_member:
+                        continue
                     cancel_token.wait_if_paused()
                     cancel_token.throw_if_cancelled()
                     if info.flag_bits & 0x1:
                         skipped_members += 1
+                        self._report_member_progress(member_index, len(infos), info.filename)
                         continue
                     safe_name = safe_zip_member_name(info.filename)
                     if safe_name is None:
                         failed_members += 1
+                        self._report_member_progress(member_index, len(infos), info.filename)
                         continue
                     parser = self._parser_for_member(safe_name)
                     if parser is None:
                         skipped_members += 1
+                        self._report_member_progress(member_index, len(infos), safe_name)
                         continue
                     if Path(safe_name).suffix.lower() in {
                         ".txt", ".log", ".csv", ".md", ".json", ".xml", ".ini"
@@ -99,6 +106,7 @@ class ZipParser(BaseParser):
                                 yield block
                         except Exception:
                             failed_members += 1
+                        self._report_member_progress(member_index, len(infos), safe_name)
                         continue
                     extracted = extracted_root / hashlib.sha256(info.filename.encode("utf-8")).hexdigest()
                     extracted = extracted.with_suffix(Path(safe_name).suffix)
@@ -115,6 +123,7 @@ class ZipParser(BaseParser):
                             yield block
                     except Exception:
                         failed_members += 1
+                    self._report_member_progress(member_index, len(infos), safe_name)
                 if failed_members:
                     self.set_status(
                         "partial_success" if yielded else "failed",
@@ -127,6 +136,16 @@ class ZipParser(BaseParser):
             self.set_status("failed", "ZIP_CORRUPTED", "压缩包损坏或格式异常")
         finally:
             shutil.rmtree(extracted_root, ignore_errors=True)
+
+    def _report_member_progress(self, member_index: int, total: int, name: str) -> None:
+        self.report_progress(
+            "zip_member",
+            completed=member_index + 1,
+            total=total,
+            unit_type="member",
+            cursor=member_index + 1,
+            detail=name,
+        )
 
     def _parse_text_member(
         self,

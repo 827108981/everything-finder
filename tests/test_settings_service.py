@@ -35,8 +35,8 @@ def test_legacy_settings_are_persisted_at_current_version(tmp_path: Path) -> Non
     settings = SettingsService(path).load()
     persisted = json.loads(path.read_text(encoding="utf-8"))
 
-    assert settings.settings_version == 4
-    assert persisted["settings_version"] == 4
+    assert settings.settings_version == 5
+    assert persisted["settings_version"] == 5
     assert persisted["ocr_scanned_pdf"] is False
     assert "process_parser_workers" in persisted
 

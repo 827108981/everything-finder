@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import json
 import logging
 import os
 import pickle
@@ -25,6 +26,7 @@ from local_full_text_search.config.constants import (
     PARSER_VERSIONS,
     SUPPORTED_EXTENSIONS,
     TEMP_DIR,
+    VIDEO_EXTENSIONS,
 )
 from local_full_text_search.config.defaults import AppSettings
 from local_full_text_search.core.block_coalescer import BlockCoalescer
@@ -60,6 +62,7 @@ class IndexSummary:
     unsupported: int = 0
     metadata_only: int = 0
     partial_success: int = 0
+    excluded_video: int = 0
     deleted: int = 0
     cancelled: bool = False
 
@@ -81,6 +84,14 @@ class ParseJob:
     started_monotonic: float = 0.0
     retry_count: int = 0
     watchdog_timed_out: bool = False
+    resume_cursor: int = 0
+    progress_sequence: int = 0
+    progress_phase: str = ""
+    progress_completed: int = 0
+    progress_total: int = 0
+    progress_detail: str = ""
+    last_progress_monotonic: float = 0.0
+    timeout_seconds: int = 0
 
 
 @dataclass(slots=True)
@@ -107,6 +118,10 @@ class ParseOutcome:
     spool_checksum: str | None = None
     spool_bytes: int = 0
     spool_write_ms: int = 0
+    resume_cursor: int = 0
+    progress_phase: str = ""
+    progress_completed: int = 0
+    progress_total: int = 0
 
 
 @dataclass(slots=True)
@@ -176,11 +191,11 @@ class ProcessLaneWatchdog:
         self,
         lanes: dict[str, ParseLane],
         spool_dir: Path,
-        timeout_seconds: int,
+        settings: AppSettings,
     ) -> None:
         self.lanes = lanes
         self.spool_dir = spool_dir
-        self.timeout_seconds = max(1, int(timeout_seconds))
+        self.settings = settings
         self._stop = threading.Event()
         self._terminated: set[ProcessPoolExecutor] = set()
         self._thread = threading.Thread(
@@ -206,8 +221,12 @@ class ProcessLaneWatchdog:
                 for future, job in list(lane.jobs.items()):
                     if future.done() or not job.started_monotonic:
                         continue
-                    if now - job.started_monotonic >= self.timeout_seconds:
+                    refresh_job_progress(job, self.spool_dir, now)
+                    timeout_seconds = no_progress_timeout(self.settings, job)
+                    last_progress = job.last_progress_monotonic or job.started_monotonic
+                    if now - last_progress >= timeout_seconds:
                         job.watchdog_timed_out = True
+                        job.timeout_seconds = timeout_seconds
                         overdue.append(job)
                 if not overdue:
                     continue
@@ -216,9 +235,8 @@ class ProcessLaneWatchdog:
                     continue
                 self._terminated.add(executor)
                 logger.warning(
-                    "Process lane %s exceeded %ss with %s overdue task(s); terminating worker pool",
+                    "Process lane %s made no progress for the configured interval with %s overdue task(s); terminating worker pool",
                     lane.name,
-                    self.timeout_seconds,
                     len(overdue),
                 )
                 terminate_process_pool_workers(executor, self.spool_dir)
@@ -283,6 +301,7 @@ class IndexManager:
         metrics = IndexRunMetrics(run_id=run_id, mode="full_batch" if full_batch else "incremental")
         summary = IndexSummary()
         self.db.start_index_run(metrics)
+        self.db.update_root_scan_time(root_id, "indexing")
         root_path = Path(str(root["path"]))
         include_subfolders = bool(root["include_subfolders"])
         previous_paths = self.db.active_paths_for_root(root_id)
@@ -314,6 +333,9 @@ class IndexManager:
             metrics.scan_ms = int((time.perf_counter() - scan_started) * 1000)
             metrics.discovered_files = len(discovered)
             metrics.discovered_bytes = sum(_safe_file_size(path) for path in discovered)
+            eligible_total = sum(
+                1 for path in discovered if path.suffix.lower() not in VIDEO_EXTENSIONS
+            )
             seen_paths = {str(path) for path in discovered}
             self._emit(
                 progress_callback,
@@ -321,7 +343,11 @@ class IndexManager:
                 summary,
                 current_file="",
                 pending=0,
-                total_files=len(discovered),
+                total_files=eligible_total,
+                discovered_files=len(discovered),
+                excluded_video=sum(
+                    1 for path in discovered if path.suffix.lower() in VIDEO_EXTENSIONS
+                ),
                 total_bytes=metrics.discovered_bytes,
                 phase_label="正在分析文件成本和重复内容",
             )
@@ -349,7 +375,7 @@ class IndexManager:
             watchdog = ProcessLaneWatchdog(
                 lanes,
                 spool_dir,
-                self.settings.single_file_timeout_seconds,
+                self.settings,
             )
             watchdog.start()
 
@@ -386,7 +412,7 @@ class IndexManager:
                         summary,
                         lanes,
                         estimator,
-                        len(discovered),
+                        eligible_total,
                     )
                     last_heartbeat = now
                 completed = recycled + drain_completed_lanes(
@@ -395,17 +421,27 @@ class IndexManager:
                 for lane_name, job, result, descriptor_bytes in completed:
                     outcome = self._outcome_from_result(job, result, spool_dir)
                     if (
-                        outcome.error_code == "PROCESS_WORKER_CRASH"
-                        and job.retry_count < 1
+                        outcome.error_code in {"PROCESS_WORKER_CRASH", "PARSE_NO_PROGRESS"}
+                        and job.retry_count < max(0, int(self.settings.no_progress_max_retries))
                     ):
                         job.retry_count += 1
-                        job.started_monotonic = 0.0
-                        job.watchdog_timed_out = False
-                        job.queued_monotonic = time.perf_counter()
+                        checkpoint = load_partial_parse_checkpoint(job, spool_dir, consume=False)
+                        if (
+                            checkpoint is not None
+                            and checkpoint.resume_cursor > 0
+                            and job.parser_name in {"pdf", "zip"}
+                        ):
+                            job.resume_cursor = checkpoint.resume_cursor
+                        reset_job_for_retry(job, time.perf_counter())
                         lanes[lane_name].pending.appendleft(job)
                         continue
                     writer.submit(outcome, cancel_token=token)
-                    record_parse_outcome(summary, outcome.status, 1 + len(outcome.alias_file_ids))
+                    record_parse_outcome(
+                        summary,
+                        outcome.status,
+                        1 + len(outcome.alias_file_ids),
+                        extension=outcome.file_path.suffix.lower(),
+                    )
                     metrics.parse_ms_by_lane[lane_name] = (
                         metrics.parse_ms_by_lane.get(lane_name, 0) + outcome.parse_ms
                     )
@@ -437,7 +473,7 @@ class IndexManager:
                         summary,
                         lanes,
                         estimator,
-                        len(discovered),
+                        eligible_total,
                         completed_queue=lane_name,
                         completed_file=str(outcome.file_path),
                         worker_pid=outcome.worker_pid,
@@ -456,16 +492,18 @@ class IndexManager:
                     summary,
                     current_file="",
                     pending=0,
-                    total_files=len(discovered),
-                    completed_files=len(discovered),
+                    total_files=eligible_total,
+                    completed_files=eligible_total,
                     phase_label="正在一次性构建全文索引",
                 )
                 metrics.fts_build_ms = self.db.rebuild_content_fts()
 
-            self.db.update_root_scan_time(root_id, "ready")
-            if full_batch:
+            completion = self.db.root_completion(root_id)
+            is_complete = completion["blocking"] == 0
+            self.db.update_root_scan_time(root_id, "ready" if is_complete else "incomplete")
+            if is_complete and full_batch:
                 self.db.mark_full_batch_complete()
-            if requires_full_rebuild:
+            if is_complete and requires_full_rebuild:
                 self.db.mark_full_rebuild_complete()
             metrics.process_spawn_count = len(worker_pids)
             metrics.total_ms = int((time.perf_counter() - run_started) * 1000)
@@ -474,17 +512,23 @@ class IndexManager:
                     metrics.peak_rss_bytes,
                     resource_monitor.peak_rss_bytes,
                 )
-            run_status = "complete"
+            run_status = "complete" if is_complete else "incomplete"
             self._emit(
                 progress_callback,
-                "finished",
+                "finished" if is_complete else "incomplete",
                 summary,
                 current_file="",
                 pending=0,
-                total_files=len(discovered),
-                completed_files=len(discovered),
+                total_files=completion["eligible"],
+                completed_files=completion["complete"],
+                blocking_files=completion["blocking"],
+                excluded_video=completion["video_excluded"],
                 elapsed_ms=metrics.total_ms,
-                phase_label="索引已完成",
+                phase_label=(
+                    "完整索引已完成"
+                    if is_complete
+                    else f"索引未完成，仍有 {completion['blocking']} 个文件需要处理"
+                ),
             )
         except CancelledError:
             summary.cancelled = True
@@ -585,6 +629,8 @@ class IndexManager:
             settings=self.settings,
             cancel_token=token,
         ):
+            if file_path.suffix.lower() not in SUPPORTED_EXTENSIONS:
+                continue
             discovered.append(file_path)
             discovered_bytes += _safe_file_size(file_path)
             summary.scanned += 1
@@ -633,7 +679,11 @@ class IndexManager:
                 logger.error("Failed to read metadata for %s: %s", file_path, exc)
                 summary.failed += 1
             for file_path, file_id, changed in prepared:
-                if changed:
+                if file_path.suffix.lower() in VIDEO_EXTENSIONS:
+                    if changed:
+                        self.db.mark_video_excluded([file_id])
+                    summary.excluded_video += 1
+                elif changed:
                     prepared_rows.append((file_path, file_id))
                 else:
                     summary.skipped += 1
@@ -691,7 +741,10 @@ class IndexManager:
                     status,
                 )
                 metrics.cache_hits += len(group)
-                summary.skipped += len(group)
+                if group[0].file_path.suffix.lower() in VIDEO_EXTENSIONS:
+                    summary.excluded_video += len(group)
+                else:
+                    summary.skipped += len(group)
                 continue
             primary = group[0]
             primary.alias_file_ids = tuple(job.file_id for job in group[1:])
@@ -813,7 +866,6 @@ class IndexManager:
         spool_dir: Path,
     ) -> list[tuple[str, ParseJob, ParseResult, int | None]]:
         now = time.perf_counter()
-        timeout = max(1, int(self.settings.single_file_timeout_seconds or 120))
         groups: dict[ProcessPoolExecutor, list[ParseLane]] = {}
         for lane in lanes.values():
             if lane.process_based and isinstance(lane.executor, ProcessPoolExecutor):
@@ -823,22 +875,12 @@ class IndexManager:
             broken = bool(getattr(executor, "_broken", False))
             timed_out = any(
                 job.watchdog_timed_out
-                or (
-                    job.started_monotonic
-                    and now - job.started_monotonic >= timeout
-                )
                 for lane in group
                 for future, job in lane.jobs.items()
-                if job.watchdog_timed_out or not future.done()
+                if not future.done()
             )
             if not broken and not timed_out:
                 continue
-            reason_code = "PARSE_TIMEOUT" if timed_out else "PROCESS_WORKER_CRASH"
-            reason_text = (
-                f"单文件解析超过 {timeout} 秒，已终止并回收解析进程"
-                if timed_out
-                else "解析子进程异常退出，已重建进程池"
-            )
             impacted: list[tuple[ParseLane, ParseJob]] = []
             for lane in group:
                 for future, job in list(lane.jobs.items()):
@@ -872,23 +914,33 @@ class IndexManager:
             with self._executor_lock:
                 self._active_process_executors.add(replacement)
             for lane, job in reversed(impacted):
-                if timed_out:
-                    checkpoint = load_partial_parse_checkpoint(job, spool_dir)
-                    if checkpoint is not None:
-                        checkpoint.status = "partial_success"
-                        checkpoint.error_code = reason_code
-                        checkpoint.error_message = reason_text
-                        checkpoint.parse_ms = max(
-                            checkpoint.parse_ms,
-                            int((now - (job.started_monotonic or now)) * 1000),
-                        )
-                        completed.append((lane.name, job, checkpoint, None))
+                job_timed_out = bool(job.watchdog_timed_out)
+                if job_timed_out:
+                    checkpoint = load_partial_parse_checkpoint(job, spool_dir, consume=False)
+                    max_retries = max(0, int(self.settings.no_progress_max_retries))
+                    if job.retry_count < max_retries:
+                        job.retry_count += 1
+                        if (
+                            checkpoint is not None
+                            and checkpoint.resume_cursor > 0
+                            and job.parser_name in {"pdf", "zip"}
+                        ):
+                            job.resume_cursor = checkpoint.resume_cursor
+                        else:
+                            partial_parse_path(job, spool_dir).unlink(missing_ok=True)
+                            job.resume_cursor = 0
+                        reset_job_for_retry(job, now)
+                        lane.pending.appendleft(job)
                         continue
-                if not timed_out and job.retry_count < 1:
-                    job.retry_count += 1
-                    job.started_monotonic = 0.0
-                    job.watchdog_timed_out = False
-                    job.queued_monotonic = now
+                    reason_code = "PARSE_NO_PROGRESS"
+                    reason_text = (
+                        f"连续 {max_retries + 1} 次在“{job.progress_phase or '解析'}”阶段无有效进展，"
+                        f"最近一次等待 {max(1, job.timeout_seconds)} 秒；完整索引尚未发布"
+                    )
+                else:
+                    # Pool recycling can interrupt another healthy task sharing
+                    # the same executor. Requeue it without consuming a retry.
+                    reset_job_for_retry(job, now)
                     lane.pending.appendleft(job)
                     continue
                 outcome = _diagnostic_outcome(
@@ -982,8 +1034,21 @@ class IndexManager:
             queue=snapshot["current_lane"],
             active_elapsed_seconds=snapshot["active_elapsed_seconds"],
             active_file_count=snapshot["active_file_count"],
+            active_phase=snapshot["current_phase"],
+            active_completed_units=snapshot["current_completed"],
+            active_total_units=snapshot["current_total"],
+            active_progress_detail=snapshot["current_detail"],
+            no_progress_seconds=snapshot["no_progress_seconds"],
+            retry_count=snapshot["retry_count"],
             total_files=total_files,
-            completed_files=summary.indexed + summary.failed + summary.unsupported,
+            completed_files=(
+                summary.indexed
+                + summary.skipped
+                + summary.failed
+                + summary.unsupported
+                + summary.metadata_only
+                + summary.partial_success
+            ),
             eta_lower_seconds=(estimate.lower_seconds if estimate else 0),
             eta_upper_seconds=(estimate.upper_seconds if estimate else 0),
             eta_sample_count=(estimate.sample_count if estimate else 0),
@@ -1010,6 +1075,7 @@ class IndexManager:
             "unsupported": summary.unsupported,
             "metadata_only": summary.metadata_only,
             "partial_success": summary.partial_success,
+            "excluded_video": summary.excluded_video,
             "deleted": summary.deleted,
             "cancelled": summary.cancelled,
         }
@@ -1066,6 +1132,16 @@ def lane_progress_snapshot(lanes: Iterable[ParseLane]) -> dict[str, object]:
         "current_lane": lane_name,
         "active_elapsed_seconds": int(elapsed),
         "active_file_count": active_count,
+        "current_phase": current_job.progress_phase if current_job is not None else "",
+        "current_completed": current_job.progress_completed if current_job is not None else 0,
+        "current_total": current_job.progress_total if current_job is not None else 0,
+        "current_detail": current_job.progress_detail if current_job is not None else "",
+        "no_progress_seconds": (
+            int(max(0.0, now - (current_job.last_progress_monotonic or current_job.started_monotonic)))
+            if current_job is not None and current_job.started_monotonic
+            else 0
+        ),
+        "retry_count": current_job.retry_count if current_job is not None else 0,
     }
 
 
@@ -1191,6 +1267,8 @@ def schedule_parse_lanes(
             lane.pending.popleft()
             job.started_monotonic = time.perf_counter()
             job.watchdog_timed_out = False
+            job.last_progress_monotonic = job.started_monotonic
+            job.timeout_seconds = no_progress_timeout(settings, job)
             try:
                 if lane.process_based:
                     future = lane.executor.submit(parse_file_process_worker, job, settings, spool_dir)
@@ -1247,25 +1325,17 @@ def drain_completed_lanes(
                 if token.cancelled:
                     raise CancelledError("任务已取消") from exc
                 if job.watchdog_timed_out:
-                    checkpoint = load_partial_parse_checkpoint(job, spool_dir)
-                    if checkpoint is not None:
-                        checkpoint.status = "partial_success"
-                        checkpoint.error_code = "PARSE_TIMEOUT"
-                        checkpoint.error_message = "单文件解析超时，已保留完成内容"
-                        checkpoint.parse_ms = max(
-                            checkpoint.parse_ms,
-                            int((time.perf_counter() - job.started_monotonic) * 1000),
-                        )
-                        result = checkpoint
-                    else:
-                        result = _diagnostic_outcome(
-                            job,
-                            "process_worker",
-                            "failed_retryable",
-                            "PARSE_TIMEOUT",
-                            "单文件解析超时，未产生可恢复内容",
-                            job.started_monotonic or time.perf_counter(),
-                        )
+                    result = _diagnostic_outcome(
+                        job,
+                        "process_worker",
+                        "failed_retryable",
+                        "PARSE_NO_PROGRESS",
+                        (
+                            f"“{job.progress_phase or '解析'}”阶段连续 "
+                            f"{max(1, job.timeout_seconds)} 秒无有效进展"
+                        ),
+                        job.started_monotonic or time.perf_counter(),
+                    )
                 else:
                     logger.error(
                         "Parse lane %s failed for %s\n%s",
@@ -1291,6 +1361,7 @@ def parse_file_process_worker(job: ParseJob, settings: AppSettings, spool_dir: P
         CancelToken(),
         settings,
         checkpoint_path=checkpoint_path,
+        progress_path=process_progress_path(job, spool_dir),
     )
     outcome.worker_pid = os.getpid()
     spool_dir.mkdir(parents=True, exist_ok=True)
@@ -1301,6 +1372,7 @@ def parse_file_process_worker(job: ParseJob, settings: AppSettings, spool_dir: P
         pickle.dump(outcome, stream, protocol=pickle.HIGHEST_PROTOCOL)
     temporary_path.replace(spool_path)
     checkpoint_path.unlink(missing_ok=True)
+    process_progress_path(job, spool_dir).unlink(missing_ok=True)
     spool_write_ms = int((time.perf_counter() - started) * 1000)
     checksum = sha256_path(spool_path)
     return SpoolParseResult(
@@ -1321,6 +1393,7 @@ def parse_file_with_registry(
     settings: AppSettings | None = None,
     *,
     checkpoint_path: Path | None = None,
+    progress_path: Path | None = None,
 ) -> ParseOutcome:
     started = time.perf_counter()
     try:
@@ -1329,31 +1402,105 @@ def parse_file_with_registry(
         parser = registry.parser_for(job.file_path)
         parser.reset_status()
         logical_blocks: list[ContentBlock] = []
+        if parser.supports_resume and job.resume_cursor > 0 and checkpoint_path is not None:
+            checkpoint = load_partial_parse_checkpoint(job, checkpoint_path.parent, consume=False)
+            if checkpoint is not None and checkpoint.resume_cursor == job.resume_cursor:
+                logical_blocks.extend(checkpoint.blocks)
+            else:
+                job.resume_cursor = 0
         checkpointed_at = 0.0
+        progress_sequence = max(0, int(job.progress_sequence))
+        last_checkpoint_block_count = len(logical_blocks)
+
+        def report_parser_progress(payload: dict[str, object]) -> None:
+            nonlocal checkpointed_at, progress_sequence, last_checkpoint_block_count
+            progress_sequence += 1
+            phase = str(payload.get("phase") or parser.name)
+            completed = max(0, int(payload.get("completed") or 0))
+            total = max(0, int(payload.get("total") or 0))
+            detail = str(payload.get("detail") or "")
+            cursor_value = payload.get("cursor")
+            cursor = int(cursor_value) if isinstance(cursor_value, int) else job.resume_cursor
+            progress_payload = {
+                "job_id": job.task_id,
+                "file_id": job.file_id,
+                "file_path": str(job.file_path),
+                "parser_name": parser.name,
+                "worker_pid": os.getpid(),
+                "progress_sequence": progress_sequence,
+                "phase": phase,
+                "completed": completed,
+                "total": total,
+                "unit_type": str(payload.get("unit_type") or ""),
+                "cursor": cursor,
+                "detail": detail,
+                "updated_at": time.time(),
+            }
+            job.progress_sequence = progress_sequence
+            job.progress_phase = phase
+            job.progress_completed = completed
+            job.progress_total = total
+            job.progress_detail = detail
+            job.last_progress_monotonic = time.perf_counter()
+            if progress_path is not None:
+                write_process_progress(progress_path, progress_payload)
+            now = time.perf_counter()
+            should_checkpoint = (
+                checkpoint_path is not None
+                and (
+                    parser.supports_resume
+                    or (
+                        bool(logical_blocks)
+                        and (
+                            last_checkpoint_block_count == 0
+                            or len(logical_blocks) - last_checkpoint_block_count >= 8
+                            or now - checkpointed_at >= 2.0
+                        )
+                    )
+                )
+            )
+            if should_checkpoint:
+                write_partial_parse_checkpoint(
+                    checkpoint_path,
+                    job,
+                    parser.name,
+                    logical_blocks,
+                    settings or registry.settings,
+                    started,
+                    resume_cursor=cursor,
+                    progress_phase=phase,
+                    progress_completed=completed,
+                    progress_total=total,
+                )
+                checkpointed_at = now
+                last_checkpoint_block_count = len(logical_blocks)
+
+        parser.configure_runtime(
+            resume_cursor=job.resume_cursor,
+            progress_callback=report_parser_progress,
+        )
+        report_parser_progress(
+            {
+                "phase": "starting",
+                "completed": job.resume_cursor,
+                "cursor": job.resume_cursor,
+                "detail": job.file_path.name,
+            }
+        )
         for block in parser.parse(job.file_path, cancel_token):
             cancel_token.wait_if_paused()
             cancel_token.throw_if_cancelled()
             if block.raw_text.strip():
                 logical_blocks.append(block)
-                now = time.perf_counter()
-                should_checkpoint = (
-                    checkpoint_path is not None
-                    and (
-                        len(logical_blocks) == 1
-                        or len(logical_blocks) % 8 == 0
-                        or now - checkpointed_at >= 2.0
+                if not parser.supports_resume:
+                    report_parser_progress(
+                        {
+                            "phase": parser.name,
+                            "completed": len(logical_blocks),
+                            "unit_type": block.block_type,
+                            "detail": block.location_text,
+                        }
                     )
-                )
-                if should_checkpoint:
-                    write_partial_parse_checkpoint(
-                        checkpoint_path,
-                        job,
-                        parser.name,
-                        logical_blocks,
-                        settings or registry.settings,
-                        started,
-                    )
-                    checkpointed_at = now
         parse_ms = int((time.perf_counter() - started) * 1000)
         normalize_started = time.perf_counter()
         effective_settings = settings or registry.settings
@@ -1382,6 +1529,9 @@ def parse_file_with_registry(
             parse_ms=parse_ms,
             normalize_ms=normalize_ms,
             worker_pid=os.getpid(),
+            resume_cursor=0,
+            progress_phase="complete",
+            progress_completed=progress_sequence,
         )
     except UnsupportedFormatError as exc:
         return _diagnostic_outcome(job, "metadata", "unsupported", "UNSUPPORTED_FORMAT", str(exc), started)
@@ -1551,16 +1701,10 @@ def lane_for(file_path: Path, settings: AppSettings) -> str:
         return "zip"
     if suffix in LEGACY_OFFICE_EXTENSIONS:
         return "legacy_office"
-    if (
-        suffix == ".pdf"
-        and not (settings.enable_ocr and settings.ocr_scanned_pdf)
-        and _safe_file_size(file_path) >= max(0, int(settings.pdf_parallel_min_bytes))
-    ):
+    if suffix == ".pdf":
         return "office_process"
     if suffix in {".docx", ".xlsx", ".xlsm", ".pptx"}:
-        size_bytes = _safe_file_size(file_path)
-        if size_bytes >= max(0, int(settings.large_office_process_min_bytes or 0)):
-            return "office_process"
+        return "office_process"
     return "normal"
 
 
@@ -1601,11 +1745,24 @@ def merge_summary(target: IndexSummary, source: IndexSummary) -> None:
     target.unsupported += source.unsupported
     target.metadata_only += source.metadata_only
     target.partial_success += source.partial_success
+    target.excluded_video += source.excluded_video
     target.deleted += source.deleted
     target.cancelled = target.cancelled or source.cancelled
 
 
-def record_parse_outcome(summary: IndexSummary, status: str, count: int = 1) -> None:
+def record_parse_outcome(
+    summary: IndexSummary,
+    status: str,
+    count: int = 1,
+    *,
+    extension: str = "",
+) -> None:
+    if extension.lower() in VIDEO_EXTENSIONS:
+        summary.excluded_video += count
+        return
+    if status == "success":
+        summary.indexed += count
+        return
     if status in {"failed", "failed_retryable", "password_protected"}:
         summary.failed += count
         return
@@ -1615,11 +1772,12 @@ def record_parse_outcome(summary: IndexSummary, status: str, count: int = 1) -> 
     if status == "skipped":
         summary.skipped += count
         return
-    summary.indexed += count
     if status in {"metadata_only", "ocr_disabled", "converter_missing"}:
         summary.metadata_only += count
     elif status == "partial_success":
         summary.partial_success += count
+    else:
+        summary.failed += count
 
 
 def record_index_status(summary: IndexSummary, status: str) -> None:
@@ -1658,6 +1816,66 @@ def partial_parse_path(job: ParseJob, spool_dir: Path) -> Path:
     return spool_dir / f"{job.file_id}.partial.pickle"
 
 
+def process_progress_path(job: ParseJob, spool_dir: Path) -> Path:
+    return spool_dir / f"{job.file_id}.progress.json"
+
+
+def write_process_progress(path: Path, payload: dict[str, object]) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(f".tmp.{os.getpid()}")
+        temporary.write_text(
+            json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+            encoding="utf-8",
+        )
+        temporary.replace(path)
+    except Exception:
+        logger.debug("Unable to write parser progress %s", path, exc_info=True)
+
+
+def refresh_job_progress(job: ParseJob, spool_dir: Path, observed_at: float) -> None:
+    path = process_progress_path(job, spool_dir)
+    if not path.is_file():
+        return
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if int(payload.get("file_id") or -1) != job.file_id:
+            return
+        sequence = max(0, int(payload.get("progress_sequence") or 0))
+        if sequence <= job.progress_sequence:
+            return
+        job.progress_sequence = sequence
+        job.progress_phase = str(payload.get("phase") or "")
+        job.progress_completed = max(0, int(payload.get("completed") or 0))
+        job.progress_total = max(0, int(payload.get("total") or 0))
+        job.progress_detail = str(payload.get("detail") or "")
+        job.last_progress_monotonic = observed_at
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        logger.debug("Unable to read parser progress %s", path, exc_info=True)
+
+
+def no_progress_timeout(settings: AppSettings, job: ParseJob) -> int:
+    base = {
+        "ocr": settings.ocr_no_progress_timeout_seconds,
+        "zip": settings.archive_no_progress_timeout_seconds,
+        "legacy_office": settings.legacy_no_progress_timeout_seconds,
+        "office_process": settings.process_no_progress_timeout_seconds,
+        "normal": settings.normal_no_progress_timeout_seconds,
+    }.get(job.lane, settings.normal_no_progress_timeout_seconds)
+    if "ocr" in job.progress_phase.lower():
+        base = max(base, settings.ocr_no_progress_timeout_seconds)
+    multiplier = 1 << min(max(0, int(job.retry_count)), 2)
+    return max(1, int(base)) * multiplier
+
+
+def reset_job_for_retry(job: ParseJob, queued_at: float) -> None:
+    job.started_monotonic = 0.0
+    job.watchdog_timed_out = False
+    job.last_progress_monotonic = 0.0
+    job.timeout_seconds = 0
+    job.queued_monotonic = queued_at
+
+
 def write_partial_parse_checkpoint(
     checkpoint_path: Path,
     job: ParseJob,
@@ -1665,6 +1883,11 @@ def write_partial_parse_checkpoint(
     logical_blocks: list[ContentBlock],
     settings: AppSettings,
     started: float,
+    *,
+    resume_cursor: int = 0,
+    progress_phase: str = "",
+    progress_completed: int = 0,
+    progress_total: int = 0,
 ) -> None:
     """Persist an atomic parse checkpoint so worker recycling is loss-bounded."""
 
@@ -1692,6 +1915,10 @@ def write_partial_parse_checkpoint(
             queue_wait_ms=max(0, int((job.started_monotonic - job.queued_monotonic) * 1000)),
             parse_ms=int((time.perf_counter() - started) * 1000),
             worker_pid=os.getpid(),
+            resume_cursor=max(0, int(resume_cursor)),
+            progress_phase=progress_phase,
+            progress_completed=max(0, int(progress_completed)),
+            progress_total=max(0, int(progress_total)),
         )
         temporary_path = checkpoint_path.with_suffix(f".tmp.{os.getpid()}")
         with temporary_path.open("wb") as stream:
@@ -1702,7 +1929,12 @@ def write_partial_parse_checkpoint(
         logger.debug("Unable to write parse checkpoint %s", checkpoint_path, exc_info=True)
 
 
-def load_partial_parse_checkpoint(job: ParseJob, spool_dir: Path) -> ParseOutcome | None:
+def load_partial_parse_checkpoint(
+    job: ParseJob,
+    spool_dir: Path,
+    *,
+    consume: bool = True,
+) -> ParseOutcome | None:
     checkpoint_path = partial_parse_path(job, spool_dir)
     if not checkpoint_path.is_file():
         return None
@@ -1714,7 +1946,8 @@ def load_partial_parse_checkpoint(job: ParseJob, spool_dir: Path) -> ParseOutcom
         if outcome.file_id != job.file_id or outcome.file_path != job.file_path:
             raise ValueError("Partial parse checkpoint identity mismatch")
         hydrate_outcome(outcome, job)
-        checkpoint_path.unlink(missing_ok=True)
+        if consume:
+            checkpoint_path.unlink(missing_ok=True)
         return outcome
     except Exception:
         logger.warning("Unable to load partial parse checkpoint %s", checkpoint_path, exc_info=True)

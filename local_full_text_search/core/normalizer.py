@@ -8,6 +8,7 @@ WHITESPACE_PATTERN = re.compile(r"\s+")
 CONTROL_PATTERN = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 HYPHEN_PATTERN = re.compile(r"[-‐‑‒–—―﹣－]")
 PUNCT_PATTERN = re.compile(r"[\s\.,;:!?，。；：！？、'\"“”‘’（）()\[\]{}<>《》]")
+CJK_PATTERN = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
 
 
 def normalize_text(
@@ -90,3 +91,7 @@ def count_hits(normalized_text: str, normalized_terms: list[str]) -> int:
         if term:
             total += normalized_text.count(term)
     return total
+
+
+def contains_cjk(text: str | None) -> bool:
+    return bool(text and CJK_PATTERN.search(text))

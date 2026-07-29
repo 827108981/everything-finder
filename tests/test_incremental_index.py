@@ -64,7 +64,7 @@ class IncrementalIndexTests(unittest.TestCase):
             self.assertEqual(restored.indexed, 1)
             self.assertEqual(page.total_confirmed, 1)
 
-    def test_permanently_corrupted_file_is_not_retried_until_changed(self) -> None:
+    def test_incomplete_file_is_retried_on_each_full_index_attempt(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             root = base / "files"
@@ -79,8 +79,9 @@ class IncrementalIndexTests(unittest.TestCase):
             second = manager.index_root(root_id)
 
             self.assertEqual(first.failed, 1)
-            self.assertEqual(second.failed, 0)
-            self.assertEqual(second.skipped, 1)
+            self.assertEqual(second.failed, 1)
+            self.assertEqual(second.skipped, 0)
+            self.assertFalse(db.index_readiness()["ready"])
 
 
 if __name__ == "__main__":

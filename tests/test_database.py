@@ -58,7 +58,7 @@ class DatabaseIndexSearchTests(unittest.TestCase):
             result = SearchEngine(db).search(SearchQuery(text="alpha", mode="exact"))
             self.assertEqual(result.total_confirmed, 0)
 
-    def test_unsupported_format_is_recorded(self) -> None:
+    def test_unsupported_format_is_outside_index_scope(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             root = base / "files"
@@ -68,11 +68,12 @@ class DatabaseIndexSearchTests(unittest.TestCase):
             db.initialize()
             root_id = db.add_root(root)
             summary = IndexManager(db, AppSettings()).index_root(root_id)
-            self.assertEqual(summary.unsupported, 1)
-            failed = db.failed_files()
-            self.assertEqual(failed[0]["parse_status"], "unsupported")
+            self.assertEqual(summary.scanned, 0)
+            self.assertEqual(summary.unsupported, 0)
+            self.assertEqual(db.failed_files(), [])
+            self.assertTrue(db.index_readiness()["ready"])
 
-    def test_mp4_is_metadata_only_not_failed(self) -> None:
+    def test_mp4_is_excluded_from_parse_completion_and_failures(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             root = base / "files"
@@ -83,8 +84,12 @@ class DatabaseIndexSearchTests(unittest.TestCase):
             root_id = db.add_root(root)
             summary = IndexManager(db, AppSettings()).index_root(root_id)
             self.assertEqual(summary.failed, 0)
-            diagnostics = db.failed_files()
-            self.assertEqual(diagnostics[0]["parse_status"], "metadata_only")
+            self.assertEqual(summary.excluded_video, 1)
+            self.assertEqual(db.failed_files(), [])
+            readiness = db.index_readiness()
+            self.assertTrue(readiness["ready"])
+            self.assertEqual(readiness["eligible_files"], 0)
+            self.assertEqual(readiness["video_excluded"], 1)
 
     def test_search_history_is_deduplicated_and_bounded(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -15,9 +15,11 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMenu,
+    QPushButton,
     QVBoxLayout,
 )
 
+from local_full_text_search.core.normalizer import contains_cjk
 from local_full_text_search.models.search_result import SearchHit, SearchResult
 
 
@@ -52,6 +54,11 @@ class ResultView(QListWidget):
             self.addItem(item)
             self._cards.append(card)
             self.setItemWidget(item, card)
+            card.height_changed.connect(
+                lambda current_card=card, current_item=item: current_item.setSizeHint(
+                    QSize(100, current_card.preferred_row_height(self.viewport().width()))
+                )
+            )
         if results:
             self.setCurrentRow(0)
         else:
@@ -123,10 +130,13 @@ class ResultView(QListWidget):
 
 
 class ResultCard(QFrame):
+    height_changed = Signal()
+
     def __init__(self, result: SearchResult, query_text: str) -> None:
         super().__init__()
         self.result = result
         self.query_text = query_text
+        self._expanded = False
         self.setObjectName("ResultCard")
         self.setProperty("selected", False)
         modified = datetime.fromtimestamp(result.modified_time).strftime("%Y-%m-%d %H:%M")
@@ -148,10 +158,17 @@ class ResultCard(QFrame):
         location.setObjectName("ResultMeta")
         location.setWordWrap(True)
 
-        context = QLabel(render_context_html(result, query_text))
-        context.setObjectName("ResultContext")
-        context.setTextFormat(Qt.TextFormat.RichText)
-        context.setWordWrap(True)
+        self.context = QLabel(render_context_html(result, query_text))
+        self.context.setObjectName("ResultContext")
+        self.context.setTextFormat(Qt.TextFormat.RichText)
+        self.context.setWordWrap(True)
+
+        self.expand_button = QPushButton()
+        self.expand_button.setObjectName("LinkButton")
+        self.expand_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.expand_button.clicked.connect(self._toggle_expanded)
+        self.expand_button.setVisible(hidden_hit_count(result) > 0)
+        self._update_expand_button()
 
         path = QLabel(f"{wrap_path(result.file_path)}\n{modified}")
         path.setObjectName("ResultPath")
@@ -187,7 +204,8 @@ class ResultCard(QFrame):
         body.setSpacing(5)
         body.addLayout(top)
         body.addWidget(location)
-        body.addWidget(context)
+        body.addWidget(self.context)
+        body.addWidget(self.expand_button, alignment=Qt.AlignmentFlag.AlignLeft)
         body.addWidget(path)
         body.addLayout(badge_layout)
 
@@ -204,19 +222,44 @@ class ResultCard(QFrame):
     def preferred_row_height(self, width: int) -> int:
         usable_width = max(width - 150, 260)
         chars_per_line = max(28, usable_width // 7)
-        title_lines = min(wrapped_line_count(self.result.filename, chars_per_line), 3)
-        location_lines = min(wrapped_line_count(self.result.location_text, chars_per_line), 2)
-        path_lines = min(wrapped_line_count(self.result.file_path, max(24, chars_per_line - 8)) + 1, 4)
+        title_lines = wrapped_line_count(self.result.filename, chars_per_line)
+        location_lines = wrapped_line_count(self.result.location_text, chars_per_line)
+        path_lines = wrapped_line_count(
+            self.result.file_path,
+            max(24, chars_per_line - 8),
+        ) + 1
         context_lines = 0
-        for hit in visible_hits(self.result):
+        for hit in visible_hits(self.result, expanded=self._expanded):
             context_lines += 1
-            context_lines += min(wrapped_line_count(hit.context or "文件名/路径命中", chars_per_line), 3)
-        if hidden_hit_count(self.result) > 0:
+            context_lines += wrapped_line_count(
+                hit.context or "文件名/路径命中",
+                chars_per_line,
+            )
+        if hidden_hit_count(self.result, expanded=self._expanded) > 0:
             context_lines += 1
         height = 46 + title_lines * 22 + location_lines * 18 + context_lines * 20 + path_lines * 17
+        if len(result_hits(self.result)) > 3:
+            height += 28
         if self.result.parse_status and self.result.parse_status not in {"success", ""}:
             height += 24
-        return max(150, min(height, 360))
+        return max(160, height)
+
+    def _toggle_expanded(self) -> None:
+        self._expanded = not self._expanded
+        self.context.setText(
+            render_context_html(self.result, self.query_text, expanded=self._expanded)
+        )
+        self._update_expand_button()
+        self.height_changed.emit()
+
+    def _update_expand_button(self) -> None:
+        total = len(result_hits(self.result))
+        if total <= 3:
+            self.expand_button.setVisible(False)
+            return
+        self.expand_button.setText(
+            "收起命中" if self._expanded else f"展开全部 {total} 段命中"
+        )
 
     def set_selected(self, selected: bool) -> None:
         self.setProperty("selected", selected)
@@ -226,27 +269,47 @@ class ResultCard(QFrame):
             widget.style().polish(widget)
 
 
-def render_context_html(result: SearchResult, query_text: str) -> str:
+def render_context_html(
+    result: SearchResult,
+    query_text: str,
+    *,
+    expanded: bool = False,
+) -> str:
     parts: list[str] = []
-    for hit in visible_hits(result):
+    for hit in visible_hits(result, expanded=expanded):
         label = html.escape(hit_label(hit))
         context = highlight_context(hit.context or "文件名/路径命中", query_text)
         parts.append(
             f'<span style="color:#667085;font-size:12px;">{label}</span><br>{context}'
         )
-    hidden = hidden_hit_count(result)
+    hidden = hidden_hit_count(result, expanded=expanded)
     if hidden > 0:
-        parts.append(f'<span style="color:#667085;font-size:12px;">另有 {hidden} 段命中，可在右侧预览查看</span>')
+        parts.append(f'<span style="color:#667085;font-size:12px;">另有 {hidden} 段命中</span>')
     return "<br><br>".join(parts) if parts else highlight_context(result.context or "文件名/路径命中", query_text)
 
 
 def highlight_context(context: str, query_text: str) -> str:
-    escaped = html.escape(context)
     terms = [part for part in re.split(r"\s+", query_text.strip()) if part]
     if not terms:
-        return escaped
-    pattern = re.compile("|".join(re.escape(html.escape(term)) for term in terms if term), re.IGNORECASE)
-    return pattern.sub(lambda match: f'<span style="background:#FEF3C7;color:#182230;">{match.group(0)}</span>', escaped)
+        return html.escape(context).replace("\n", "<br>")
+    alternatives: list[str] = []
+    for term in terms:
+        if contains_cjk(term):
+            alternatives.append(r"\s*".join(re.escape(character) for character in term))
+        else:
+            alternatives.append(re.escape(term))
+    pattern = re.compile("|".join(alternatives), re.IGNORECASE)
+    rendered: list[str] = []
+    offset = 0
+    for match in pattern.finditer(context):
+        rendered.append(html.escape(context[offset : match.start()]))
+        rendered.append(
+            '<span style="background:#FDE68A;color:#182230;font-weight:600;">'
+            f"{html.escape(match.group(0))}</span>"
+        )
+        offset = match.end()
+    rendered.append(html.escape(context[offset:]))
+    return "".join(rendered).replace("\n", "<br>")
 
 
 def result_hits(result: SearchResult) -> list[SearchHit]:
@@ -265,12 +328,13 @@ def result_hits(result: SearchResult) -> list[SearchHit]:
     ]
 
 
-def visible_hits(result: SearchResult) -> list[SearchHit]:
-    return result_hits(result)[:3]
+def visible_hits(result: SearchResult, *, expanded: bool = False) -> list[SearchHit]:
+    hits = result_hits(result)
+    return hits if expanded else hits[:3]
 
 
-def hidden_hit_count(result: SearchResult) -> int:
-    return max(0, len(result_hits(result)) - len(visible_hits(result)))
+def hidden_hit_count(result: SearchResult, *, expanded: bool = False) -> int:
+    return max(0, len(result_hits(result)) - len(visible_hits(result, expanded=expanded)))
 
 
 def hit_label(hit: SearchHit) -> str:

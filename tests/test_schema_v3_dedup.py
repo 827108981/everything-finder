@@ -9,6 +9,7 @@ from pathlib import Path
 
 from local_full_text_search.config.defaults import AppSettings
 from local_full_text_search.core.database import DatabaseManager
+from local_full_text_search.core.errors import IndexNotReadyError
 from local_full_text_search.core.index_manager import IndexManager
 from local_full_text_search.core.normalizer import normalize_text
 from local_full_text_search.core.search_engine import SearchEngine
@@ -219,10 +220,8 @@ class SchemaV3DedupTests(unittest.TestCase):
 
             reopened = DatabaseManager(base / "index.db")
             reopened.initialize()
-            self.assertEqual(
-                SearchEngine(reopened).search(SearchQuery(text="RESUMED_FTS_ONLY_HIT")).total_confirmed,
-                0,
-            )
+            with self.assertRaises(IndexNotReadyError):
+                SearchEngine(reopened).search(SearchQuery(text="RESUMED_FTS_ONLY_HIT"))
             summary = IndexManager(reopened, settings).index_root(root_id)
             self.assertEqual(summary.indexed, 0)
             self.assertEqual(summary.skipped, 1)
@@ -296,6 +295,7 @@ class SchemaV3DedupTests(unittest.TestCase):
                 )
 
             db.rebuild_content_fts()
+            db.mark_full_batch_complete()
             engine = SearchEngine(db)
             self.assertEqual(engine.search(SearchQuery(text="NEW_DEFERRED_FTS_HIT")).total_confirmed, 1)
             self.assertEqual(engine.search(SearchQuery(text="OLD_DEFERRED_FTS_HIT")).total_confirmed, 0)

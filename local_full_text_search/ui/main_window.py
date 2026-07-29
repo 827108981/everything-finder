@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QSplitter,
     QStackedWidget,
+    QStyle,
     QTableWidget,
     QTableWidgetItem,
     QTextEdit,
@@ -194,8 +195,10 @@ class MainWindow(QMainWindow):
     def refresh_all(self) -> None:
         roots = self.db.list_roots()
         stats = self.db.stats()
+        readiness = self.db.index_readiness()
         self.search_page.set_roots(roots)
         self.search_page.set_stats(stats, has_roots=bool(roots))
+        self.search_page.set_index_ready(bool(readiness["ready"]), readiness)
         self.index_page.set_roots(roots, self.root_stats_by_id())
         self.refresh_failed_page()
         self.update_index_status()
@@ -229,13 +232,23 @@ class MainWindow(QMainWindow):
         self.failed_page.set_rows(self.db.failed_files(limit=2000))
 
     def update_index_status(self) -> None:
-        stats = self.db.stats()
+        readiness = self.db.index_readiness()
         if self.pending_monitor_scan and self.scan_thread is None:
             self.top_bar.set_index_status("检测到文件变化，点击更新", is_pending=True)
             return
+        complete = int(readiness["complete_files"])
+        eligible = int(readiness["eligible_files"])
+        blocking = int(readiness["blocking_files"])
+        video = int(readiness["video_excluded"])
+        if bool(readiness["ready"]):
+            video_text = f" · 排除视频 {video}" if video else ""
+            self.top_bar.set_index_status(f"完整索引 {complete}/{eligible}{video_text}")
+            return
         self.top_bar.set_index_status(
-            f"已索引 {stats['files']} 个文件",
+            f"索引未完成 {complete}/{eligible} · 待处理 {blocking}",
             is_running=self.scan_thread is not None,
+            is_error=self.scan_thread is None and blocking > 0,
+            is_pending=self.scan_thread is None and blocking == 0,
         )
 
     def root_stats_by_id(self) -> dict[int, dict[str, int]]:
@@ -280,6 +293,18 @@ class MainWindow(QMainWindow):
             self.switch_page("index")
             return
         self.pending_monitor_scan = False
+        if self.search_thread is not None:
+            self.pending_search = False
+            self.cancel_search()
+        self.search_page.set_index_ready(
+            False,
+            {
+                **self.db.index_readiness(),
+                "active_runs": 1,
+                "ready": False,
+            },
+        )
+        self.hide_preview()
         self.scan_thread = QThread()
         self.scan_worker = ScanWorker(self.db.db_path, self.settings)
         self.scan_worker.moveToThread(self.scan_thread)
@@ -315,6 +340,12 @@ class MainWindow(QMainWindow):
         active_elapsed = int(payload.get("active_elapsed_seconds") or 0)
         active_queue = str(payload.get("queue") or "")
         active_count = int(payload.get("active_file_count") or 0)
+        active_phase = str(payload.get("active_phase") or "")
+        active_completed = int(payload.get("active_completed_units") or 0)
+        active_total = int(payload.get("active_total_units") or 0)
+        no_progress = int(payload.get("no_progress_seconds") or 0)
+        retry_count = int(payload.get("retry_count") or 0)
+        excluded_video = int(payload.get("excluded_video") or 0)
         text = f"{phase_label} {completed:,} / {max(total, completed):,}"
         self.top_bar.set_index_status(text, is_running=True)
         self.index_page.set_scan_progress(
@@ -327,6 +358,12 @@ class MainWindow(QMainWindow):
             active_elapsed_seconds=active_elapsed,
             active_queue=active_queue,
             active_file_count=active_count,
+            active_phase=active_phase,
+            active_completed_units=active_completed,
+            active_total_units=active_total,
+            no_progress_seconds=no_progress,
+            retry_count=retry_count,
+            excluded_video=excluded_video,
             indeterminate=stage in {"discovering", "planning", "fts"},
         )
 
@@ -351,6 +388,9 @@ class MainWindow(QMainWindow):
         self._finish_close_if_idle()
 
     def request_search(self) -> None:
+        if not self.search_page.index_ready():
+            self.search_page.show_index_not_ready_state()
+            return
         if not self.search_page.text():
             self.page = 1
             self.total_confirmed = 0
@@ -365,7 +405,7 @@ class MainWindow(QMainWindow):
         self._run_search()
 
     def _run_search(self) -> None:
-        if not self.search_page.text():
+        if not self.search_page.text() or not self.search_page.index_ready():
             return
         query = SearchQuery(
             text=self.search_page.text(),
@@ -449,7 +489,7 @@ class MainWindow(QMainWindow):
     def show_preview(self, result: object) -> None:
         if result is None:
             return
-        self.preview_panel.show_result(result)
+        self.preview_panel.show_result(result, self.search_page.text())
         if not self.preview_panel.isVisible():
             self.preview_panel.setVisible(True)
             self.search_splitter.setSizes([860, 420])
@@ -635,6 +675,8 @@ class SearchPage(QWidget):
         self.setObjectName("Page")
         self._stats: dict[str, int] = {}
         self._has_roots = False
+        self._index_ready = False
+        self._readiness: dict[str, object] = {}
         self.debounce = QTimer(self)
         self.debounce.setSingleShot(True)
         self.debounce.timeout.connect(self.search_requested.emit)
@@ -791,6 +833,31 @@ class SearchPage(QWidget):
         if not self.text():
             self.show_idle_state()
 
+    def set_index_ready(
+        self,
+        ready: bool,
+        readiness: dict[str, object] | None = None,
+    ) -> None:
+        self._index_ready = bool(ready)
+        self._readiness = dict(readiness or {})
+        for widget in (
+            self.search_box,
+            self.mode_combo,
+            self.file_type_combo,
+            self.scope_combo,
+            self.more_button,
+            self.advanced,
+        ):
+            widget.setEnabled(self._index_ready)
+        if not self._index_ready:
+            self.debounce.stop()
+            self.show_index_not_ready_state()
+        elif self.content_stack.currentWidget() is self.empty_state:
+            self.show_idle_state()
+
+    def index_ready(self) -> bool:
+        return self._index_ready
+
     def focus_search(self) -> None:
         self.search_box.input.setFocus()
         self.search_box.input.selectAll()
@@ -893,6 +960,7 @@ class SearchPage(QWidget):
     def set_history(self, items: list[str]) -> None:
         self._history = items
         self.search_box.history_button.setEnabled(bool(items))
+        self.search_box.history_button.setVisible(bool(items))
 
     def _show_history(self) -> None:
         if not self._history:
@@ -919,17 +987,53 @@ class SearchPage(QWidget):
                 "添加搜索范围",
                 self.add_root_requested.emit,
             )
+        elif not self._index_ready:
+            self.show_index_not_ready_state()
+            return
         else:
-            count = self._stats.get("files", 0)
+            complete = self._stats.get("complete_files", 0)
+            eligible = self._stats.get("eligible_files", 0)
+            video = self._stats.get("video_excluded", 0)
+            video_text = f"，另排除视频 {video:,} 个" if video else ""
             self.empty_state.set_content(
                 "输入关键词开始搜索",
-                f"支持搜索 PDF、Word、Excel、PowerPoint、文本、日志和图片中的文字\n已索引 {count:,} 个文件",
+                "支持搜索 PDF、Word、Excel、PowerPoint、文本、日志和图片中的文字\n"
+                f"完整索引 {complete:,}/{eligible:,}{video_text}",
                 "",
                 None,
             )
         self.content_stack.setCurrentWidget(self.empty_state)
         self.pager.setVisible(False)
         self.set_status("输入关键词开始搜索")
+        self.clear_timing()
+
+    def show_index_not_ready_state(self) -> None:
+        if not self._has_roots:
+            self.show_idle_state()
+            return
+        complete = int(self._readiness.get("complete_files") or 0)
+        eligible = int(self._readiness.get("eligible_files") or 0)
+        blocking = int(self._readiness.get("blocking_files") or 0)
+        active = int(self._readiness.get("active_runs") or 0)
+        unready_roots = int(self._readiness.get("unready_roots") or 0)
+        if active:
+            subtitle = (
+                f"正在建立完整索引：已完成 {complete:,}/{eligible:,}。"
+                "全部可解析文件成功后会自动开放搜索。"
+            )
+        elif blocking:
+            subtitle = (
+                f"已完整完成 {complete:,}/{eligible:,}，仍有 {blocking:,} 个文件未成功。"
+                "请在“未成功索引”中查看原因并重新更新。"
+            )
+        elif unready_roots:
+            subtitle = "搜索范围尚未完成首次索引，请先在“索引管理”中更新全部。"
+        else:
+            subtitle = "完整索引尚未就绪，请先更新全部。"
+        self.empty_state.set_content("完整索引尚未完成", subtitle, "", None)
+        self.content_stack.setCurrentWidget(self.empty_state)
+        self.pager.setVisible(False)
+        self.set_status("完整索引完成前不可搜索")
         self.clear_timing()
 
     def show_no_results(self) -> None:
@@ -964,15 +1068,23 @@ class SearchBox(QFrame):
         self.input.setObjectName("SearchInput")
         self.input.setPlaceholderText("搜索文件名、正文、表格、幻灯片和图片文字")
         self.input.returnPressed.connect(self.search_requested.emit)
-        self.clear_button = QPushButton("×")
+        self.clear_button = QPushButton()
         self.clear_button.setObjectName("IconButton")
         self.clear_button.setFixedSize(30, 30)
+        self.clear_button.setIcon(
+            self.style().standardIcon(QStyle.StandardPixmap.SP_LineEditClearButton)
+        )
+        self.clear_button.setToolTip("清空搜索内容")
         self.clear_button.clicked.connect(self.input.clear)
-        self.history_button = QPushButton("◷")
+        self.history_button = QPushButton()
         self.history_button.setObjectName("IconButton")
         self.history_button.setFixedSize(30, 30)
+        self.history_button.setIcon(
+            self.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogDetailedView)
+        )
         self.history_button.setToolTip("搜索历史")
         self.history_button.setEnabled(False)
+        self.history_button.setVisible(False)
         self.history_button.clicked.connect(self.history_requested.emit)
         self.stop_button = QPushButton("停止")
         self.stop_button.setObjectName("StopButton")
@@ -1185,6 +1297,12 @@ class IndexPage(QWidget):
         active_elapsed_seconds: int = 0,
         active_queue: str = "",
         active_file_count: int = 0,
+        active_phase: str = "",
+        active_completed_units: int = 0,
+        active_total_units: int = 0,
+        no_progress_seconds: int = 0,
+        retry_count: int = 0,
+        excluded_video: int = 0,
         indeterminate: bool = False,
     ) -> None:
         self.set_task_running(True)
@@ -1205,6 +1323,21 @@ class IndexPage(QWidget):
             if active_file_count > 1:
                 suffix += f"，活动任务 {active_file_count} 个"
             suffix += "）"
+        if active_phase:
+            phase_display = active_phase.replace("_", " ")
+            if active_total_units > 0:
+                suffix += (
+                    f" · {phase_display} "
+                    f"{active_completed_units:,}/{active_total_units:,}"
+                )
+            else:
+                suffix += f" · {phase_display}"
+        if no_progress_seconds > 0:
+            suffix += f" · 距上次进展 {format_active_duration(no_progress_seconds)}"
+        if retry_count > 0:
+            suffix += f" · 第 {retry_count} 次重试"
+        if excluded_video > 0:
+            suffix += f" · 排除视频 {excluded_video}"
         self.task_label.setText(
             f"{phase_label} {completed:,} / {max(total, completed):,} · 失败 {failed}{suffix}"
         )

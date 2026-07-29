@@ -18,6 +18,7 @@ class PdfParser(BaseParser):
     """Extract native PDF text and optionally OCR scanned pages."""
 
     name = "pdf"
+    supports_resume = True
 
     def __init__(
         self,
@@ -65,9 +66,15 @@ class PdfParser(BaseParser):
                 page_count = doc.page_count
                 doc.close()
                 doc = None
-                yield from self._parse_native_parallel(file_path, page_count, cancel_token)
+                yield from self._parse_native_parallel(
+                    file_path,
+                    page_count,
+                    cancel_token,
+                    start_page=min(self.resume_cursor, page_count),
+                )
                 return
-            for index in range(doc.page_count):
+            page_count = doc.page_count
+            for index in range(min(self.resume_cursor, page_count), page_count):
                 cancel_token.wait_if_paused()
                 cancel_token.throw_if_cancelled()
                 page = doc.load_page(index)
@@ -109,6 +116,14 @@ class PdfParser(BaseParser):
                         ocr_confidence=result.confidence,
                         extra=result.extra,
                     )
+                self.report_progress(
+                    "pdf_page",
+                    completed=index + 1,
+                    total=page_count,
+                    unit_type="page",
+                    cursor=index + 1,
+                    detail=f"第 {index + 1} 页",
+                )
         finally:
             if doc is not None:
                 doc.close()
@@ -118,12 +133,17 @@ class PdfParser(BaseParser):
         file_path: Path,
         page_count: int,
         cancel_token: CancelToken,
+        *,
+        start_page: int = 0,
     ) -> Iterable[ContentBlock]:
         workers = min(self.parallel_workers, page_count, max(1, os.cpu_count() or 1))
-        chunk_size = max(1, min(64, (page_count + workers * 4 - 1) // (workers * 4)))
+        remaining_pages = max(0, page_count - start_page)
+        if remaining_pages <= 0:
+            return
+        chunk_size = max(1, min(64, (remaining_pages + workers * 4 - 1) // (workers * 4)))
         ranges = [
             (start, min(page_count, start + chunk_size))
-            for start in range(0, page_count, chunk_size)
+            for start in range(start_page, page_count, chunk_size)
         ]
         results: list[tuple[int, str]] = []
         executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="lfts-pdf-page")
@@ -132,10 +152,18 @@ class PdfParser(BaseParser):
             for start, end in ranges
         ]
         try:
-            for future in as_completed(futures):
+            for completed_chunks, future in enumerate(as_completed(futures), start=1):
                 cancel_token.wait_if_paused()
                 cancel_token.throw_if_cancelled()
                 results.extend(future.result())
+                self.report_progress(
+                    "pdf_extract_chunk",
+                    completed=completed_chunks,
+                    total=len(futures),
+                    unit_type="chunk",
+                    cursor=start_page,
+                    detail=f"已完成 {completed_chunks}/{len(futures)} 个分页批次",
+                )
         finally:
             executor.shutdown(wait=not cancel_token.cancelled, cancel_futures=True)
         for page_index, text in sorted(results):
@@ -149,6 +177,14 @@ class PdfParser(BaseParser):
                 page_number=page_index + 1,
                 source_type="native_text",
                 extra={"has_images": False, "is_scanned_like": False, "parallel": True},
+            )
+            self.report_progress(
+                "pdf_page",
+                completed=page_index + 1,
+                total=page_count,
+                unit_type="page",
+                cursor=page_index + 1,
+                detail=f"第 {page_index + 1} 页",
             )
 
 

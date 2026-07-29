@@ -7,7 +7,7 @@ from .constants import DEFAULT_EXCLUDED_DIRS, DEFAULT_EXCLUDED_FILE_PATTERNS
 
 @dataclass(slots=True)
 class AppSettings:
-    settings_version: int = 4
+    settings_version: int = 5
     default_search_mode: str = "exact"
     case_sensitive: bool = False
     auto_search: bool = False
@@ -50,7 +50,12 @@ class AppSettings:
     auto_scan_on_start: bool = False
     monitor_file_changes: bool = False
     retry_failed_files: bool = True
-    single_file_timeout_seconds: int = 120
+    normal_no_progress_timeout_seconds: int = 300
+    ocr_no_progress_timeout_seconds: int = 900
+    archive_no_progress_timeout_seconds: int = 900
+    legacy_no_progress_timeout_seconds: int = 1800
+    process_no_progress_timeout_seconds: int = 300
+    no_progress_max_retries: int = 3
     compute_full_hash: bool = False
     include_hidden_files: bool = False
     enable_ocr: bool = True
@@ -84,7 +89,7 @@ class AppSettings:
         previous_version = int(data.get("settings_version", 0) or 0)
         if previous_version < 4 and data.get("max_ocr_image_side", 2400) == 2400:
             values["max_ocr_image_side"] = 960
-        values["settings_version"] = 4
+        values["settings_version"] = 5
         return cls(**values)
 
 
