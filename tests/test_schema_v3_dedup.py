@@ -8,7 +8,10 @@ import unittest
 from pathlib import Path
 
 from local_full_text_search.config.defaults import AppSettings
-from local_full_text_search.core.database import DatabaseManager
+from local_full_text_search.core.database import (
+    SCHEMA_VERSION,
+    DatabaseManager,
+)
 from local_full_text_search.core.errors import IndexNotReadyError
 from local_full_text_search.core.index_manager import IndexManager
 from local_full_text_search.core.normalizer import normalize_text
@@ -71,7 +74,10 @@ class SchemaV3DedupTests(unittest.TestCase):
                         (block_id,),
                     )
                 )
-                self.assertEqual(con.execute("PRAGMA user_version").fetchone()[0], 5)
+                self.assertEqual(
+                    con.execute("PRAGMA user_version").fetchone()[0],
+                    SCHEMA_VERSION,
+                )
                 self.assertEqual(con.execute("SELECT COUNT(*) FROM short_tokens").fetchone()[0], 0)
             self.assertEqual(file_row["parse_status"], "success")
             self.assertTrue(file_row["parser_version"])

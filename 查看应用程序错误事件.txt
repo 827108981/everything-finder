@@ -1,0 +1,57 @@
+查看应用程序错误事件
+
+一、使用事件查看器
+
+1. 按 Win + R。
+2. 输入 eventvwr.msc，按回车。
+3. 左侧打开：Windows 日志 -> 应用程序。
+4. 右侧点击“筛选当前日志”。
+5. 设置以下筛选条件：
+   - 事件级别：错误
+   - 事件来源：Application Error
+   - 事件 ID：1000
+6. 查找以下两个时间附近的记录：
+   - 2026-08-01 21:03:40
+   - 2026-08-01 21:05:10
+
+双击事件后，重点查看以下字段：
+
+故障应用程序名称
+故障模块名称
+异常代码
+故障应用程序路径
+故障模块路径
+
+其中最重要的是“故障模块名称”。如果是 Qt6Core.dll、Qt6Gui.dll 或 Qt6Widgets.dll，说明问题很可能发生在 Qt 图形界面运行时。
+
+也可以同时查看事件来源为 Windows Error Reporting、事件 ID 为 1001 的记录。
+
+二、使用 PowerShell
+
+以普通用户身份打开 PowerShell，执行：
+
+$start = Get-Date '2026-08-01 21:00:00'
+$end = Get-Date '2026-08-01 21:08:00'
+
+Get-WinEvent -FilterHashtable @{
+    LogName = 'Application'
+    StartTime = $start
+    EndTime = $end
+} |
+Where-Object {
+    $_.Id -in 1000, 1001 -or
+    $_.ProviderName -match 'Application Error|Windows Error Reporting'
+} |
+Select-Object TimeCreated, ProviderName, Id, Message |
+Format-List
+
+三、使用可靠性监视器
+
+如果“应用程序”日志中没有记录：
+
+1. 按 Win + R。
+2. 输入 perfmon /rel，按回车。
+3. 找到对应日期的红色“应用程序故障”记录。
+4. 查看“故障模块名称”。
+
+把事件详情中的“常规”内容或截图发回来，即可继续判断具体是 Qt DLL、显卡驱动还是其他运行库。

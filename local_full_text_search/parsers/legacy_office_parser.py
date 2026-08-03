@@ -10,10 +10,15 @@ import subprocess
 import tempfile
 import time
 from collections.abc import Iterable
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
 from local_full_text_search.config.constants import CACHE_DIR, TEMP_DIR
+from local_full_text_search.core.errors import (
+    CancelledError,
+    PauseRequestedError,
+)
 from local_full_text_search.core.task_manager import CancelToken
 from local_full_text_search.models.content_block import ContentBlock
 from local_full_text_search.parsers.base_parser import BaseParser
@@ -27,18 +32,63 @@ from local_full_text_search.parsers.xlsx_parser import XlsxParser
 logger = logging.getLogger(__name__)
 
 
+@contextmanager
+def _shared_fallback_lock() -> Iterable[None]:
+    """Serialize WPS/LibreOffice fallbacks shared by the three legacy lanes."""
+
+    TEMP_DIR.mkdir(parents=True, exist_ok=True)
+    lock_path = TEMP_DIR / "legacy_office_fallback.lock"
+    with lock_path.open("a+b") as handle:
+        if handle.tell() == 0 and lock_path.stat().st_size == 0:
+            handle.write(b"\0")
+            handle.flush()
+        acquired = False
+        try:
+            while not acquired:
+                handle.seek(0)
+                try:
+                    if os.name == "nt":
+                        import msvcrt
+
+                        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                    else:
+                        import fcntl
+
+                        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    acquired = True
+                except OSError:
+                    time.sleep(0.1)
+            yield
+        finally:
+            if acquired:
+                handle.seek(0)
+                try:
+                    if os.name == "nt":
+                        import msvcrt
+
+                        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                    else:
+                        import fcntl
+
+                        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                except OSError:
+                    logger.debug("Unable to release legacy fallback lock", exc_info=True)
+
+
 @dataclass(slots=True)
 class ConversionResult:
     path: Path | None = None
     status: str = "success"
     error_code: str | None = None
     message: str | None = None
+    converter: str = ""
 
 
 class LegacyOfficeParser(BaseParser):
     """Convert old Office formats in a reusable, process-local session."""
 
     name = "legacy_office"
+    supports_resume = True
 
     def __init__(
         self,
@@ -54,7 +104,22 @@ class LegacyOfficeParser(BaseParser):
     def supports(self, file_path: Path) -> bool:
         return file_path.suffix.lower() in {".doc", ".xls", ".ppt"}
 
-    def parse(self, file_path: Path, cancel_token: CancelToken) -> Iterable[ContentBlock]:
+    def parse(
+        self,
+        file_path: Path,
+        cancel_token: CancelToken,
+    ) -> Iterable[ContentBlock]:
+        try:
+            yield from self._parse_legacy(file_path, cancel_token)
+        except (CancelledError, PauseRequestedError):
+            self._office_session.close()
+            raise
+
+    def _parse_legacy(
+        self,
+        file_path: Path,
+        cancel_token: CancelToken,
+    ) -> Iterable[ContentBlock]:
         cancel_token.throw_if_cancelled()
         TEMP_DIR.mkdir(parents=True, exist_ok=True)
         if not _looks_like_ole(file_path):
@@ -65,6 +130,7 @@ class LegacyOfficeParser(BaseParser):
             )
             return
         with tempfile.TemporaryDirectory(prefix="legacy_office_", dir=TEMP_DIR) as temp_name:
+            converter_kind = "cache"
             self.report_progress(
                 "legacy_cache_lookup",
                 completed=0,
@@ -76,6 +142,7 @@ class LegacyOfficeParser(BaseParser):
             if converted is None:
                 result = self._convert(file_path, Path(temp_name))
                 converted = result.path
+                converter_kind = result.converter or "unknown"
                 if converted is not None:
                     converted = self._store_cached_conversion(file_path, converted)
                 else:
@@ -98,13 +165,36 @@ class LegacyOfficeParser(BaseParser):
                 completed=0,
                 total=max(1, converted.stat().st_size),
                 unit_type="bytes",
+                cursor=self.resume_cursor,
                 detail=converted.name,
             )
+            cancel_token.wait_if_paused()
+            cancel_token.throw_if_cancelled()
             parser = self._parser_for_converted(converted)
-            for block in parser.parse(converted, cancel_token):
+            confirmed_blocks = max(0, int(self.resume_cursor))
+            for block_number, block in enumerate(
+                parser.parse(converted, cancel_token),
+                start=1,
+            ):
+                if block_number <= confirmed_blocks:
+                    continue
                 block.file_path = str(file_path)
                 block.location_text = f"转换自 {file_path.suffix.lower()} > {block.location_text}"
+                block.extra["legacy_converter"] = converter_kind
+                block.extra["legacy_lane"] = {
+                    ".doc": "legacy_word",
+                    ".xls": "legacy_excel",
+                    ".ppt": "legacy_powerpoint",
+                }[file_path.suffix.lower()]
                 yield block
+                self.report_progress(
+                    "legacy_converted_block",
+                    completed=block_number,
+                    total=0,
+                    unit_type="block",
+                    cursor=block_number,
+                    detail=block.location_text,
+                )
             if parser.last_status != "success":
                 self.set_status(parser.last_status, parser.last_error_code, parser.last_error_message)
 
@@ -127,11 +217,12 @@ class LegacyOfficeParser(BaseParser):
             unit_type="file",
             detail=file_path.name,
         )
-        libre_result = self._convert_with_libreoffice(file_path, temp_dir)
+        with _shared_fallback_lock():
+            libre_result = self._convert_with_libreoffice(file_path, temp_dir)
         if libre_result.path is not None:
             candidate = temp_dir / f"{file_path.stem}{self._target_suffix(file_path)}"
             if candidate.exists():
-                return ConversionResult(path=candidate)
+                return ConversionResult(path=candidate, converter="LibreOffice")
         if office_result.error_code != "CONVERTER_MISSING":
             return office_result
         return libre_result
@@ -178,7 +269,7 @@ class LegacyOfficeParser(BaseParser):
                 registry_path.unlink(missing_ok=True)
         candidate = output_dir / f"{source.stem}{self._target_suffix(source)}"
         if process is not None and process.returncode == 0 and candidate.is_file():
-            return ConversionResult(path=candidate)
+            return ConversionResult(path=candidate, converter="LibreOffice")
         detail = ((stderr if "stderr" in locals() else "") or (stdout if "stdout" in locals() else "")).strip()
         return ConversionResult(
             status="failed_retryable",
@@ -208,21 +299,34 @@ class LegacyOfficeParser(BaseParser):
         raise ValueError(f"未知转换格式: {converted}")
 
     def _cache_path(self, source: Path) -> Path:
-        digest = hashlib.sha256()
-        total = max(1, source.stat().st_size)
-        completed = 0
-        with source.open("rb") as stream:
-            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-                digest.update(chunk)
-                completed += len(chunk)
-                self.report_progress(
-                    "legacy_cache_hash",
-                    completed=completed,
-                    total=total,
-                    unit_type="bytes",
-                    detail=source.name,
-                )
-        return CACHE_DIR / "legacy_conversion" / f"{digest.hexdigest()}{self._target_suffix(source)}"
+        runtime_digest = self.runtime_content_digest
+        if runtime_digest:
+            digest_text = (
+                runtime_digest.partition(":")[2]
+                if runtime_digest.startswith("sha256:")
+                else runtime_digest
+            )
+        else:
+            digest = hashlib.sha256()
+            total = max(1, source.stat().st_size)
+            completed = 0
+            with source.open("rb") as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(chunk)
+                    completed += len(chunk)
+                    self.report_progress(
+                        "legacy_cache_hash",
+                        completed=completed,
+                        total=total,
+                        unit_type="bytes",
+                        detail=source.name,
+                    )
+            digest_text = digest.hexdigest()
+        return (
+            CACHE_DIR
+            / "legacy_conversion"
+            / f"{digest_text}.v4{self._target_suffix(source)}"
+        )
 
     def _cached_conversion(self, source: Path) -> Path | None:
         if not self.conversion_cache:
@@ -268,8 +372,25 @@ class OfficeConversionSession:
                 application_errors.append(f"{prog_id}: {exc}")
                 self._reset(key)
                 continue
-            result = self._convert_with_application(app, kind, source, target, prog_id)
+            if prog_id in {"KWPS.Application", "KET.Application", "KWPP.Application"}:
+                with _shared_fallback_lock():
+                    result = self._convert_with_application(
+                        app,
+                        kind,
+                        source,
+                        target,
+                        prog_id,
+                    )
+            else:
+                result = self._convert_with_application(
+                    app,
+                    kind,
+                    source,
+                    target,
+                    prog_id,
+                )
             if result.path is not None:
+                result.converter = prog_id
                 return result
             conversion_errors.append(result)
             self._reset(key)
@@ -575,6 +696,29 @@ def cleanup_registered_office_processes(registry_dir: Path) -> None:
             pass
         finally:
             record.unlink(missing_ok=True)
+
+
+def registered_office_processes_alive(registry_dir: Path) -> list[int]:
+    target_dir = registry_dir / "office_processes"
+    if not target_dir.is_dir():
+        return []
+    try:
+        import psutil
+    except ImportError:
+        return []
+    alive: list[int] = []
+    for record in target_dir.glob("*.json"):
+        try:
+            payload = json.loads(record.read_text(encoding="ascii"))
+            process = psutil.Process(int(payload["pid"]))
+            expected_time = float(payload.get("create_time") or 0.0)
+            if expected_time and abs(process.create_time() - expected_time) > 1.0:
+                continue
+            if process.is_running():
+                alive.append(int(process.pid))
+        except (OSError, ValueError, KeyError, json.JSONDecodeError, psutil.Error):
+            continue
+    return sorted(set(alive))
 
 
 def _looks_like_ole(source: Path) -> bool:

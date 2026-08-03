@@ -40,6 +40,7 @@ hiddenimports = [
 
 if not skip_ocr:
     datas += [
+        ("ocr_models/manifest.json", "ocr_models"),
         ("ocr_models/PP-OCRv4_mobile_det", "ocr_models/PP-OCRv4_mobile_det"),
         ("ocr_models/PP-OCRv4_mobile_rec", "ocr_models/PP-OCRv4_mobile_rec"),
     ]
@@ -95,7 +96,7 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    upx=False,
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
@@ -109,7 +110,7 @@ coll = COLLECT(
     a.binaries,
     a.datas,
     strip=False,
-    upx=True,
+    upx=False,
     upx_exclude=[],
     name="本地多格式全文搜索工具",
 )

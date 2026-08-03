@@ -95,6 +95,9 @@ FILE_TYPE_GROUPS = {
 
 
 def app_data_dir() -> Path:
+    isolated = os.environ.get("LFTS_APP_DATA_DIR")
+    if isolated:
+        return Path(isolated).resolve()
     base = os.environ.get("LOCALAPPDATA")
     if base:
         return Path(base) / APP_NAME
@@ -128,11 +131,11 @@ PARSER_VERSIONS = {
     "pptx": "2",
     "pptx_stream": "1",
     "xlsx": "2",
-    "xlsx_stream": "1",
-    "pdf": "5",
-    "image_ocr": "4",
+    "xlsx_stream": "2",
+    "pdf": "6",
+    "image_ocr": "5",
     "zip": "5",
-    "legacy_office": "3",
+    "legacy_office": "4",
     "text": "2",
     "metadata": "2",
 }

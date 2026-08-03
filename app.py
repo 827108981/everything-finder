@@ -5,25 +5,37 @@ import json
 import os
 import shutil
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import threading
 import time
+from dataclasses import asdict
 from importlib import resources
 from pathlib import Path
 
 from local_full_text_search.services.startup_diagnostics import StartupDiagnostics
 
 
+INDEX_STATUS_LAYOUT_CASES = (
+    (1280, 800, 1.00, "ocr_running"),
+    (1280, 800, 1.25, "ocr_running"),
+    (1280, 800, 1.50, "ocr_running"),
+    (1366, 768, 1.00, "pausing"),
+    (1920, 1080, 1.50, "paused_switched"),
+)
+
+
 def load_application_dependencies() -> None:
     """Load optional/heavy application modules after startup diagnostics is active."""
 
     global APP_DISPLAY_NAME, AppSettings, CancelToken, DatabaseManager, IndexManager
+    global SCHEMA_VERSION
     global SearchEngine, SearchQuery, SettingsService, TEMP_DIR, configure_logging
 
     from local_full_text_search.config.constants import APP_DISPLAY_NAME, TEMP_DIR
     from local_full_text_search.config.defaults import AppSettings
-    from local_full_text_search.core.database import DatabaseManager
+    from local_full_text_search.core.database import SCHEMA_VERSION, DatabaseManager
     from local_full_text_search.core.index_manager import IndexManager
     from local_full_text_search.core.search_engine import SearchEngine
     from local_full_text_search.core.task_manager import CancelToken
@@ -65,6 +77,7 @@ def run_ui_validation() -> int:
     result_path = Path("ui_validation_result.txt")
     image_path = Path("ui_validation.png")
     index_image_path = Path("index_ui_validation.png")
+    paused_index_image_path = Path("index_paused_ui_validation.png")
     try:
         from PySide6.QtGui import QImage
         from PySide6.QtWidgets import QApplication
@@ -135,12 +148,15 @@ def run_ui_validation() -> int:
                     "completed_files": 104,
                     "total_files": 337,
                     "failed": 1,
-                    "current_file": str(sample_root / "large-document.docx"),
-                    "eta_lower_seconds": 420,
-                    "eta_upper_seconds": 660,
-                    "active_phase": "docx_paragraph",
+                    "current_file": str(sample_root / "large-scanned-manual.pdf"),
+                    "eta_seconds": 660,
+                    "eta_ready": True,
+                    "eta_confidence": 0.82,
+                    "active_queue": "pdf",
+                    "active_elapsed_seconds": 252,
+                    "active_phase": "pdf_ocr_tile_recognize_microbatch",
                     "active_completed_units": 128,
-                    "active_total_units": 640,
+                    "active_total_units": 240,
                     "no_progress_seconds": 7,
                     "retry_count": 1,
                     "excluded_video": 9,
@@ -150,6 +166,127 @@ def run_ui_validation() -> int:
             index_pixmap = window.grab()
             if not index_pixmap.save(str(index_image_path), "PNG"):
                 raise RuntimeError("Unable to save index UI screenshot")
+            if "预计剩余约 11 分钟" not in window.index_page.task_eta.text():
+                raise RuntimeError("Index UI did not render the single-value ETA")
+            if not window.index_page.task_runtime.text().startswith("OCR 已运行"):
+                raise RuntimeError("Index UI did not render the OCR runtime on row two")
+            window.index_page.set_pause_state("paused", "普通模式 · 已暂停")
+            app.processEvents()
+            if (
+                not window.index_page.start_button.isEnabled()
+                or not window.index_page.performance_button.isEnabled()
+            ):
+                raise RuntimeError("Mode controls were not enabled after safe pause")
+            paused_pixmap = window.grab()
+            if not paused_pixmap.save(str(paused_index_image_path), "PNG"):
+                raise RuntimeError("Unable to save paused index UI screenshot")
+            window.switch_page("failed")
+            window.failed_page.set_rows(
+                [
+                    {
+                        "id": 999,
+                        "path": str(sample_root / "stale-pdf-task.pdf"),
+                        "filename": "stale-pdf-task.pdf",
+                        "extension": ".pdf",
+                        "parse_status": "pending",
+                        "parse_error_message": "任务未完成",
+                    }
+                ]
+            )
+            window.failed_page.set_readiness(
+                {
+                    "ready": False,
+                    "repairable": True,
+                    "not_ready_reasons": ["blocking_files"],
+                }
+            )
+            app.processEvents()
+            force_button = window.failed_page.force_complete_button
+            if force_button.text() != "强力完成本次索引":
+                raise RuntimeError("Failed-files UI did not expose force completion")
+            window.failed_page.set_rows([])
+            window.failed_page.set_readiness(
+                {
+                    "ready": False,
+                    "repairable": True,
+                    "not_ready_reasons": [
+                        "unfinished_tasks",
+                        "content_fts_dirty",
+                    ],
+                }
+            )
+            app.processEvents()
+            if force_button.isHidden() or not force_button.isEnabled():
+                raise RuntimeError(
+                    "Force completion must repair a zero-blocker residual state"
+                )
+            if "残留解析任务" not in force_button.toolTip():
+                raise RuntimeError("Force completion did not disclose residual tasks")
+            window.failed_page.set_readiness(
+                {
+                    "ready": True,
+                    "repairable": False,
+                    "not_ready_reasons": [],
+                }
+            )
+            app.processEvents()
+            if force_button.isEnabled():
+                raise RuntimeError("Force completion must be disabled after readiness")
+            window.failed_page.set_rows(
+                [
+                    {
+                        "id": 999,
+                        "path": str(sample_root / "stale-pdf-task.pdf"),
+                        "filename": "stale-pdf-task.pdf",
+                        "extension": ".pdf",
+                        "parse_status": "pending",
+                        "parse_error_message": "任务未完成",
+                    }
+                ]
+            )
+            window.failed_page.set_readiness(
+                {
+                    "ready": False,
+                    "repairable": True,
+                    "not_ready_reasons": ["blocking_files"],
+                }
+            )
+            app.processEvents()
+            if not force_button.isEnabled():
+                raise RuntimeError(
+                    "Force completion control must be enabled with blockers"
+                )
+            if force_button.mapTo(
+                window.failed_page,
+                force_button.rect().bottomLeft(),
+            ).y() >= window.failed_page.table.geometry().top():
+                raise RuntimeError("Force completion control is below the failed-files table")
+            if force_button.geometry().intersects(
+                window.failed_page.status.geometry()
+            ):
+                raise RuntimeError("Force completion control overlaps status text")
+            window.failed_page.set_exclusion_running(True)
+            window.failed_page.set_exclusion_progress(
+                {
+                    "stage": "rebuilding_content_fts",
+                    "phase_label": "正在重建全文索引",
+                    "large_fts_operation": True,
+                    "can_cancel": True,
+                    "elapsed_seconds": 3,
+                }
+            )
+            app.processEvents()
+            if window.failed_page.exclusion_progress.isHidden():
+                raise RuntimeError("Scope exclusion progress is not visible")
+            if (
+                window.failed_page.exclude_button.isEnabled()
+                or window.failed_page.restore_button.isEnabled()
+                or force_button.isEnabled()
+            ):
+                raise RuntimeError("Conflicting controls remain enabled during exclusion")
+            if "大型 FTS 操作" not in window.failed_page.status.text():
+                raise RuntimeError("Scope exclusion FTS stage is not disclosed")
+            window.failed_page.set_exclusion_running(False)
             window.close()
             app.processEvents()
             message = (
@@ -427,6 +564,974 @@ def run_schema_v4_validation() -> int:
         result_path.write_text(f"SCHEMA_V4_VALIDATION_FAILED: {exc}\n", encoding="utf-8")
         print(f"SCHEMA_V4_VALIDATION_FAILED: {exc}")
         return 1
+
+
+def seed_failure_fallback_demo(
+    db: object,
+    demo_root: Path,
+) -> dict[str, object]:
+    """Create a repeatable mixed-success scope for hands-on fallback testing."""
+
+    import zipfile
+
+    from local_full_text_search.models.content_block import ContentBlock
+
+    demo_root.mkdir(parents=True, exist_ok=True)
+    sources = {
+        "searchable": demo_root / "正常可搜索文件.txt",
+        "broken_pdf": demo_root / "损坏的PDF.pdf",
+        "password_word": demo_root / "受密码保护的Word文档.docx",
+        "ocr_failed": demo_root / "OCR识别失败图片.png",
+        "oversize_zip": demo_root / "成员数超过安全上限的压缩包.zip",
+        "metadata_zip": demo_root / "仅元数据完成的压缩包.zip",
+    }
+    sources["searchable"].write_text(
+        "DEMO_SEARCH_OK\n该文件用于确认排除异常项后，正常正文仍然可以搜索。\n",
+        encoding="utf-8",
+    )
+    sources["broken_pdf"].write_bytes(b"%PDF-1.4\ninvalid demo document")
+    sources["password_word"].write_bytes(b"PK\x03\x04encrypted-demo")
+    sources["ocr_failed"].write_bytes(b"not-a-readable-png")
+    with zipfile.ZipFile(sources["oversize_zip"], "w") as archive:
+        for index in range(2001):
+            archive.writestr(f"demo-{index:04d}.txt", b"")
+    with zipfile.ZipFile(sources["metadata_zip"], "w") as archive:
+        archive.writestr("unsupported-demo.bin", b"demo")
+
+    root_id = db.add_root(demo_root)
+    file_ids = {
+        name: db.upsert_file_metadata(root_id, path)[0]
+        for name, path in sources.items()
+    }
+    searchable = sources["searchable"]
+    db.replace_file_blocks(
+        file_ids["searchable"],
+        searchable.name,
+        str(searchable),
+        [
+            ContentBlock(
+                file_path=str(searchable),
+                block_index=0,
+                block_type="paragraph",
+                location_text="演示正文",
+                raw_text="DEMO_SEARCH_OK 正常文件仍然可以搜索",
+                normalized_text="demo_search_ok 正常文件仍然可以搜索",
+            )
+        ],
+        parser_name="text",
+    )
+    db.record_failure(
+        file_ids["broken_pdf"],
+        "PDF_CORRUPTED",
+        "演示：PDF 结构损坏，无法读取页面",
+        parser_name="pdf",
+    )
+    db.set_file_error_status(
+        file_ids["password_word"],
+        "password_protected",
+        "PASSWORD_PROTECTED",
+        "演示：文档受密码保护",
+        parser_name="docx",
+    )
+    db.set_file_error_status(
+        file_ids["ocr_failed"],
+        "ocr_failed",
+        "OCR_FAILED",
+        "演示：图片无法解码，OCR 识别失败",
+        parser_name="image_ocr",
+    )
+    db.set_file_error_status(
+        file_ids["oversize_zip"],
+        "skipped",
+        "ZIP_FILE_COUNT_LIMIT",
+        "演示：压缩包成员数超过 2,000 个安全上限",
+        parser_name="zip",
+    )
+    db.set_file_error_status(
+        file_ids["metadata_zip"],
+        "metadata_only",
+        "ZIP_NO_SUPPORTED_MEMBER",
+        "演示：压缩包内没有支持的正文文件",
+        parser_name="zip",
+    )
+    db.update_root_scan_time(root_id, "incomplete")
+    db.begin_deferred_fts()
+    return {
+        "root_id": root_id,
+        "file_ids": file_ids,
+        "demo_root": str(demo_root),
+        "search_token": "DEMO_SEARCH_OK",
+    }
+
+
+def reset_failure_fallback_demo(app_data_dir: Path, db_path: Path) -> Path:
+    app_data_dir = app_data_dir.resolve()
+    db_path = db_path.resolve()
+    if not db_path.is_relative_to(app_data_dir):
+        raise RuntimeError("演示数据库不在隔离数据目录内，已拒绝重置")
+    for suffix in ("", "-wal", "-shm"):
+        Path(str(db_path) + suffix).unlink(missing_ok=True)
+    demo_root = app_data_dir / "demo-files"
+    if demo_root.exists():
+        shutil.rmtree(demo_root)
+    return demo_root
+
+
+def run_failure_fallback_demo_validation() -> int:
+    result_path = Path("failure_fallback_demo_validation_result.json")
+    try:
+        with tempfile.TemporaryDirectory(prefix="lfts_failure_demo_") as tmp:
+            base = Path(tmp)
+            db = DatabaseManager(base / "demo.db")
+            db.initialize()
+            seeded = seed_failure_fallback_demo(db, base / "demo-files")
+            before = db.index_readiness()
+            result = db.force_complete_current_scope(
+                reason="冻结验证：排除四个演示阻断项并开放搜索",
+                operation_source="failure_demo_validation",
+            )
+            after = db.index_readiness()
+            hits = SearchEngine(db).search(
+                SearchQuery(
+                    text=str(seeded["search_token"]),
+                    mode="exact",
+                )
+            ).total_confirmed
+            integrity = db.integrity_report()
+            payload = {
+                "passed": (
+                    int(before["blocking_files"]) == 4
+                    and len(db.excluded_files(limit=20)) == 4
+                    and int(result["excluded_files"]) == 4
+                    and bool(after["ready"])
+                    and hits == 1
+                    and integrity["integrity"] == ["ok"]
+                    and not integrity["foreign_key_errors"]
+                ),
+                "blocking_before": int(before["blocking_files"]),
+                "excluded_after": len(db.excluded_files(limit=20)),
+                "metadata_only_files": int(before["metadata_only_complete_files"]),
+                "ready_after": bool(after["ready"]),
+                "search_hits": hits,
+                "integrity": integrity["integrity"],
+                "foreign_key_errors": len(integrity["foreign_key_errors"]),
+            }
+        result_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0 if payload["passed"] else 1
+    except Exception as exc:
+        payload = {"passed": False, "error": f"{type(exc).__name__}: {exc}"}
+        result_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 1
+
+
+def capture_index_status_layout(
+    width: int,
+    height: int,
+    scale: float,
+    state: str,
+    output_path: Path,
+) -> int:
+    result_path = output_path.with_suffix(".json")
+    try:
+        from PySide6.QtGui import QFontDatabase
+        from PySide6.QtWidgets import QApplication
+        from local_full_text_search.ui.main_window import MainWindow
+
+        with tempfile.TemporaryDirectory(
+            prefix="lfts_index_layout_"
+        ) as tmp:
+            base = Path(tmp)
+            settings_service = SettingsService(
+                base / "settings.json"
+            )
+            settings = AppSettings(
+                enable_ocr=False,
+                monitor_file_changes=False,
+            )
+            settings_service.save(settings)
+            database = DatabaseManager(base / "layout.db")
+            database.initialize()
+            application = QApplication.instance() or QApplication(
+                ["LocalFullTextSearch", "--capture-index-status-layout"]
+            )
+            font_families = set(QFontDatabase.families())
+            if os.name == "nt" and not {
+                "Microsoft YaHei UI",
+                "Microsoft YaHei",
+            }.intersection(font_families):
+                raise RuntimeError(
+                    "Windows Chinese UI fonts are unavailable"
+                )
+            apply_light_theme(application)
+            window = MainWindow(
+                database,
+                settings,
+                settings_service,
+            )
+            window.resize(int(width), int(height))
+            window.show()
+            window.switch_page("index")
+            if state == "paused_switched":
+                window.index_page.set_performance_mode(True)
+            window.on_scan_progress(
+                {
+                    "stage": "indexing",
+                    "phase_label": "正在解析并写入索引",
+                    "indexed": 209,
+                    "scanned": 309,
+                    "completed_files": 209,
+                    "total_files": 309,
+                    "failed": 2,
+                    "current_file": (
+                        "E:\\MRCODE\\化免\\免疫资料\\9000i\\"
+                        "超长中文文件名_微信图片_20260421082832_32_45.jpg"
+                    ),
+                    "eta_seconds": 660,
+                    "eta_ready": True,
+                    "eta_confidence": 0.82,
+                    "active_queue": "ocr",
+                    "active_elapsed_seconds": 252,
+                    "active_file_count": 3,
+                    "active_phase": (
+                        "ocr_recognize_original_regions"
+                    ),
+                    "active_completed_units": 128,
+                    "active_total_units": 240,
+                    "no_progress_seconds": 7,
+                    "retry_count": 1,
+                    "excluded_video": 22,
+                }
+            )
+            if state == "pausing":
+                window.index_page.set_pause_state(
+                    "pausing",
+                    "普通模式 · 正在暂停",
+                )
+            elif state == "paused_switched":
+                window.index_page.set_pause_state(
+                    "paused",
+                    "性能模式 · 已暂停",
+                )
+            application.processEvents()
+            page = window.index_page
+            labels = {
+                "overview": page.task_label,
+                "eta": page.task_eta,
+                "runtime": page.task_runtime,
+                "phase": page.task_phase,
+                "units": page.task_units,
+            }
+            clipped: list[str] = []
+            for name, label in labels.items():
+                required = label.fontMetrics().horizontalAdvance(
+                    label.text()
+                )
+                available = label.contentsRect().width()
+                if label.text() and required > available + 2:
+                    clipped.append(
+                        f"{name}:{required}>{available}"
+                    )
+            buttons = (
+                page.start_button,
+                page.performance_button,
+                page.pause_button,
+                page.cancel_button,
+            )
+            missing_buttons = [
+                button.text()
+                for button in buttons
+                if not button.isVisible()
+                or button.width()
+                < button.sizeHint().width() - 2
+            ]
+            if page.task_file.toolTip() != (
+                "E:\\MRCODE\\化免\\免疫资料\\9000i\\"
+                "超长中文文件名_微信图片_20260421082832_32_45.jpg"
+            ):
+                raise RuntimeError(
+                    "Full current path is not available as tooltip"
+                )
+            if clipped:
+                raise RuntimeError(
+                    "Critical index status text is clipped: "
+                    + ", ".join(clipped)
+                )
+            if missing_buttons:
+                raise RuntimeError(
+                    "Index controls are clipped or hidden: "
+                    + ", ".join(missing_buttons)
+                )
+            output_path.parent.mkdir(
+                parents=True,
+                exist_ok=True,
+            )
+            pixmap = window.grab()
+            if not pixmap.save(str(output_path), "PNG"):
+                raise RuntimeError("Unable to save layout screenshot")
+            payload = {
+                "passed": True,
+                "requested_size": [width, height],
+                "scale": scale,
+                "state": state,
+                "device_pixel_ratio": round(
+                    float(window.devicePixelRatioF()),
+                    3,
+                ),
+                "font_family_count": len(font_families),
+                "image_size": [
+                    pixmap.width(),
+                    pixmap.height(),
+                ],
+                "critical_text": {
+                    name: label.text()
+                    for name, label in labels.items()
+                },
+                "file_tooltip": page.task_file.toolTip(),
+                "buttons": [
+                    {
+                        "text": button.text(),
+                        "enabled": button.isEnabled(),
+                    }
+                    for button in buttons
+                ],
+            }
+            result_path.write_text(
+                json.dumps(
+                    payload,
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+            window.close()
+            application.processEvents()
+        print(json.dumps(payload, ensure_ascii=False))
+        return 0
+    except Exception as exc:
+        payload = {
+            "passed": False,
+            "error": f"{type(exc).__name__}: {exc}",
+            "requested_size": [width, height],
+            "scale": scale,
+            "state": state,
+        }
+        result_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        print(json.dumps(payload, ensure_ascii=False))
+        return 1
+
+
+def run_index_status_layout_validation() -> int:
+    result_path = Path(
+        "index_status_layout_validation_result.json"
+    )
+    screenshot_dir = Path("index_status_layout_screenshots")
+    screenshot_dir.mkdir(parents=True, exist_ok=True)
+    executable = Path(sys.executable).resolve()
+    command_prefix = (
+        [str(executable)]
+        if getattr(sys, "frozen", False)
+        else [str(executable), str(Path(__file__).resolve())]
+    )
+    reports: list[dict[str, object]] = []
+    for width, height, scale, state in INDEX_STATUS_LAYOUT_CASES:
+        label = (
+            f"{width}x{height}_{round(scale * 100)}pct_{state}"
+        )
+        output = (
+            screenshot_dir / f"{label}.png"
+        ).resolve()
+        environment = os.environ.copy()
+        environment["QT_QPA_PLATFORM"] = (
+            "windows" if os.name == "nt" else "offscreen"
+        )
+        environment["QT_SCALE_FACTOR"] = str(scale)
+        environment["QT_ENABLE_HIGHDPI_SCALING"] = "1"
+        environment["PYTHONUTF8"] = "1"
+        completed = subprocess.run(
+            [
+                *command_prefix,
+                "--capture-index-status-layout",
+                str(width),
+                str(height),
+                str(scale),
+                state,
+                str(output),
+            ],
+            cwd=Path.cwd(),
+            env=environment,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+        case_result = output.with_suffix(".json")
+        if case_result.is_file():
+            payload = json.loads(
+                case_result.read_text(encoding="utf-8")
+            )
+        else:
+            payload = {
+                "passed": False,
+                "error": (
+                    "capture result is missing; "
+                    f"stdout={completed.stdout}; "
+                    f"stderr={completed.stderr}"
+                ),
+            }
+        payload["exit_code"] = completed.returncode
+        payload["screenshot"] = str(output)
+        reports.append(payload)
+    passed = bool(
+        len(reports) == len(INDEX_STATUS_LAYOUT_CASES)
+        and all(
+            bool(report.get("passed"))
+            and int(report.get("exit_code") or 0) == 0
+            for report in reports
+        )
+    )
+    result = {
+        "passed": passed,
+        "cases": reports,
+    }
+    result_path.write_text(
+        json.dumps(result, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0 if passed else 1
+
+
+def run_hang_recovery_validation_command() -> int:
+    from local_full_text_search.core.hang_validation import (
+        run_hang_recovery_validation,
+    )
+
+    report = run_hang_recovery_validation(
+        Path("hang_recovery_validation_result.json"),
+        timeout_seconds=1.0,
+    )
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    return 0 if report["passed"] else 1
+
+
+def run_semantic_progress_validation_command() -> int:
+    from local_full_text_search.core.hang_validation import (
+        run_semantic_progress_validation,
+    )
+
+    report = run_semantic_progress_validation(
+        Path("semantic_progress_validation_result.json"),
+        timeout_seconds=0.5,
+    )
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    return 0 if report["passed"] else 1
+
+
+def run_single_eta_validation_command() -> int:
+    from local_full_text_search.core.eta_replay import (
+        EtaHistoryContext,
+        EtaReplayEvent,
+        replay_eta,
+    )
+
+    result_path = Path("single_eta_validation_result.json")
+    try:
+        events = [
+            EtaReplayEvent(
+                at_seconds=0,
+                event_type="progress",
+                remaining_cost_by_lane={"ocr": 80},
+                workers_by_lane={"ocr": 1},
+            ),
+            *[
+                EtaReplayEvent(
+                    at_seconds=float(index * 10),
+                    event_type="completion",
+                    lane="ocr",
+                    completed_cost=10,
+                    service_seconds=10,
+                    remaining_cost_by_lane={"ocr": 80 - index * 10},
+                )
+                for index in range(1, 5)
+            ],
+            EtaReplayEvent(
+                at_seconds=45,
+                event_type="pause",
+                remaining_cost_by_lane={"ocr": 40},
+            ),
+            EtaReplayEvent(
+                at_seconds=55,
+                event_type="progress",
+                remaining_cost_by_lane={"ocr": 40},
+            ),
+            EtaReplayEvent(
+                at_seconds=60,
+                event_type="resume",
+                remaining_cost_by_lane={"ocr": 40},
+            ),
+            *[
+                EtaReplayEvent(
+                    at_seconds=float(60 + index * 10),
+                    event_type="completion",
+                    lane="ocr",
+                    completed_cost=10,
+                    service_seconds=10,
+                    remaining_cost_by_lane={
+                        "ocr": max(0, 40 - index * 10)
+                    },
+                )
+                for index in range(1, 4)
+            ],
+            EtaReplayEvent(
+                at_seconds=100,
+                event_type="finish",
+                remaining_cost_by_lane={},
+            ),
+        ]
+        report = replay_eta(events)
+        baseline = EtaHistoryContext(
+            parser_name="pdf",
+            parser_version="7",
+            ocr_enabled=True,
+            ocr_strategy="adaptive",
+            ocr_model_fingerprint="validation-model",
+            execution_mode="normal",
+            hardware_tier="validation-cpu",
+            disk_class="local-ssd",
+            extension=".pdf",
+            size_bucket="10m-100m",
+            page_bucket="21-100",
+        )
+        network = EtaHistoryContext(
+            **{
+                **asdict(baseline),
+                "disk_class": "network",
+            }
+        )
+        if report.first_ready_seconds != 30:
+            raise RuntimeError(
+                f"unexpected first ready time: {report.first_ready_seconds}"
+            )
+        if not report.pause_frozen:
+            raise RuntimeError("ETA changed during the pause interval")
+        if baseline.key == network.key:
+            raise RuntimeError("ETA history did not isolate disk classes")
+        payload = {
+            "passed": True,
+            "history_isolated": True,
+            **report.to_dict(),
+        }
+        result_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0
+    except Exception as exc:
+        payload = {"passed": False, "error": str(exc)}
+        result_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 1
+
+
+def run_schema_v6_validation() -> int:
+    """Migrate a populated schema-v4 database through the latest schema."""
+
+    result_path = Path("schema_v6_validation_result.txt")
+    try:
+        with tempfile.TemporaryDirectory(prefix="lfts_schema_v6_") as tmp:
+            base = Path(tmp)
+            root = base / "files"
+            root.mkdir()
+            source = root / "existing.txt"
+            source.write_text("SCHEMA_V6_MIGRATION_PRESERVES_HIT", encoding="utf-8")
+            db_path = base / "validation.db"
+            db = DatabaseManager(db_path)
+            db.initialize()
+            root_id = db.add_root(root)
+            IndexManager(db, AppSettings(enable_ocr=False)).index_root(root_id)
+
+            con = sqlite3.connect(db_path)
+            try:
+                con.execute("PRAGMA foreign_keys = OFF")
+                con.execute("PRAGMA legacy_alter_table = ON")
+                for index_name in (
+                    "idx_files_container",
+                    "idx_files_source_kind",
+                    "idx_files_zip_member_source",
+                    "idx_files_content_hash_full",
+                    "idx_files_exact_content",
+                ):
+                    con.execute(f"DROP INDEX IF EXISTS {index_name}")
+                con.execute("ALTER TABLE files RENAME TO files_v5")
+                con.execute(
+                    """
+                    CREATE TABLE files (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        root_id INTEGER NOT NULL,
+                        path TEXT NOT NULL UNIQUE,
+                        filename TEXT NOT NULL,
+                        extension TEXT,
+                        size_bytes INTEGER,
+                        modified_time REAL,
+                        created_time REAL,
+                        quick_fingerprint TEXT,
+                        content_hash TEXT,
+                        content_key TEXT,
+                        document_id INTEGER,
+                        parse_status TEXT NOT NULL,
+                        parse_error_code TEXT,
+                        parse_error_message TEXT,
+                        parser_name TEXT,
+                        parser_version TEXT,
+                        indexed_at TEXT,
+                        last_seen_at TEXT,
+                        is_deleted INTEGER NOT NULL DEFAULT 0,
+                        FOREIGN KEY(root_id) REFERENCES roots(id),
+                        FOREIGN KEY(document_id) REFERENCES documents(id)
+                    )
+                    """
+                )
+                legacy_columns = (
+                    "id, root_id, path, filename, extension, size_bytes, "
+                    "modified_time, created_time, quick_fingerprint, content_hash, "
+                    "content_key, document_id, parse_status, parse_error_code, "
+                    "parse_error_message, parser_name, parser_version, indexed_at, "
+                    "last_seen_at, is_deleted"
+                )
+                con.execute(
+                    f"INSERT INTO files({legacy_columns}) "
+                    f"SELECT {legacy_columns} FROM files_v5"
+                )
+                con.execute("DROP TABLE files_v5")
+                con.execute("PRAGMA user_version = 4")
+                con.commit()
+            finally:
+                con.close()
+
+            started = time.perf_counter()
+            migrated = DatabaseManager(db_path)
+            migrated.initialize()
+            migration_ms = int((time.perf_counter() - started) * 1000)
+            backup = base / "validation.schema-v4.backup.db"
+            with migrated.connect() as con:
+                columns = {
+                    str(row["name"]) for row in con.execute("PRAGMA table_info(files)")
+                }
+                indexes = {
+                    str(row["name"]) for row in con.execute("PRAGMA index_list(files)")
+                }
+                version = int(con.execute("PRAGMA user_version").fetchone()[0])
+            hits = SearchEngine(migrated).search(
+                SearchQuery(text="SCHEMA_V6_MIGRATION_PRESERVES_HIT", mode="exact")
+            ).total_confirmed
+            required_columns = {"source_kind", "container_file_id", "content_hash_full"}
+            required_indexes = {
+                "idx_files_container",
+                "idx_files_source_kind",
+                "idx_files_zip_member_source",
+                "idx_files_content_hash_full",
+            }
+            task_columns = set()
+            attempt_table = False
+            with migrated.connect() as con:
+                task_columns = {
+                    str(row["name"])
+                    for row in con.execute("PRAGMA table_info(parse_tasks)")
+                }
+                attempt_table = bool(
+                    con.execute(
+                        """
+                        SELECT 1 FROM sqlite_master
+                        WHERE type = 'table' AND name = 'parse_task_attempts'
+                        """
+                    ).fetchone()
+                )
+            required_task_columns = {
+                "parent_task_id",
+                "unit_key",
+                "progress_phase",
+                "progress_cursor",
+                "last_semantic_progress_at",
+                "worker_pid",
+                "checkpoint_path",
+            }
+            if version != SCHEMA_VERSION or not required_columns.issubset(columns):
+                raise RuntimeError(
+                    f"Schema-v6 columns were not migrated: version={version}; columns={columns}"
+                )
+            if not required_task_columns.issubset(task_columns) or not attempt_table:
+                raise RuntimeError(
+                    "Schema-v6 task-progress tables are incomplete: "
+                    f"columns={task_columns}; attempts={attempt_table}"
+                )
+            if not required_indexes.issubset(indexes):
+                raise RuntimeError(f"Schema-v5 indexes are incomplete: {indexes}")
+            if not backup.is_file() or hits != 1:
+                raise RuntimeError(
+                    f"Schema-v4 content was not preserved: backup={backup.is_file()}; hits={hits}"
+                )
+            message = (
+                "SCHEMA_V6_VALIDATION_OK\n"
+                f"migration_ms={migration_ms}; backup={backup.name}; hits={hits}\n"
+            )
+            result_path.write_text(message, encoding="utf-8")
+            print(message, end="")
+            return 0
+    except Exception as exc:
+        result_path.write_text(
+            f"SCHEMA_V6_VALIDATION_FAILED: {exc}\n",
+            encoding="utf-8",
+        )
+        print(f"SCHEMA_V6_VALIDATION_FAILED: {exc}")
+        return 1
+
+
+def run_schema_v8_validation_command() -> int:
+    from local_full_text_search.core.schema_validation import (
+        run_schema_v8_validation,
+    )
+
+    result_path = Path("schema_v8_validation_result.json")
+    try:
+        with tempfile.TemporaryDirectory(
+            prefix="lfts_schema_v8_"
+        ) as tmp:
+            payload = run_schema_v8_validation(Path(tmp))
+        result_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0 if payload["passed"] else 1
+    except Exception as exc:
+        payload = {"passed": False, "error": str(exc)}
+        result_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 1
+
+
+def run_schema_v7_validation_command() -> int:
+    return run_schema_v8_validation_command()
+
+
+def run_manual_exclusion_validation_command() -> int:
+    from local_full_text_search.core.manual_exclusion_validation import (
+        run_manual_exclusion_validation,
+    )
+
+    result_path = Path("manual_exclusion_validation_result.json")
+    try:
+        with tempfile.TemporaryDirectory(
+            prefix="lfts_manual_exclusion_"
+        ) as tmp:
+            payload = run_manual_exclusion_validation(Path(tmp))
+        result_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0 if payload["passed"] else 1
+    except Exception as exc:
+        payload = {"passed": False, "error": str(exc)}
+        result_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 1
+
+
+def run_phase2_validation_command(name: str) -> int:
+    from local_full_text_search.core.phase2_validation import (
+        validate_ocr_adaptive_v2,
+        validate_ocr_backend_gate,
+        validate_paused_mode_switch,
+        validate_pdf_page_pipeline,
+        validate_safe_pause,
+        write_validation_result,
+    )
+
+    validators = {
+        "pdf_page_pipeline": validate_pdf_page_pipeline,
+        "ocr_adaptive_v2": validate_ocr_adaptive_v2,
+        "ocr_backend": (
+            lambda base: validate_ocr_backend_gate(base)
+        ),
+        "safe_pause": validate_safe_pause,
+        "paused_mode_switch": validate_paused_mode_switch,
+    }
+    validator = validators.get(name)
+    if validator is None:
+        print(f"UNKNOWN_PHASE2_VALIDATION: {name}")
+        return 2
+    return write_validation_result(name, validator)
+
+
+def run_legacy_word_doc_generator_command() -> int:
+    index = sys.argv.index("--generate-legacy-word-doc")
+    if index + 1 >= len(sys.argv):
+        print("--generate-legacy-word-doc requires an output path")
+        return 2
+    from local_full_text_search.core.phase2_validation import (
+        _create_legacy_word_doc,
+    )
+
+    try:
+        _create_legacy_word_doc(Path(sys.argv[index + 1]))
+    except Exception as exc:
+        print(f"LEGACY_WORD_DOC_GENERATION_FAILED: {exc}")
+        return 1
+    print("LEGACY_WORD_DOC_GENERATION_OK")
+    return 0
+
+
+def _safe_command_print(payload: object) -> None:
+    try:
+        print(payload)
+    except OSError:
+        pass
+
+
+def run_compare_index_command(
+    baseline_path: Path,
+    candidate_path: Path,
+    queries_path: Path,
+    output_path: Path | None = None,
+) -> int:
+    from local_full_text_search.core.corpus_validation import (
+        compare_index_databases,
+    )
+
+    target = (
+        Path(output_path).resolve()
+        if output_path is not None
+        else Path("compare_index_result.json").resolve()
+    )
+    try:
+        payload = compare_index_databases(
+            baseline_path,
+            candidate_path,
+            queries_path,
+        )
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        _safe_command_print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0 if payload["passed"] else 1
+    except Exception as exc:
+        payload = {"passed": False, "error": str(exc)}
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        _safe_command_print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 1
+
+
+def run_cold_index_benchmark_parent(
+    root: Path,
+    output_path: Path,
+    *,
+    performance_mode: bool = False,
+) -> int:
+    output_path = Path(output_path).resolve()
+    state_dir = output_path.parent / (
+        output_path.stem + ".cold-state"
+    )
+    if output_path.exists():
+        print(f"冷索引输出已存在，拒绝覆盖: {output_path}")
+        return 2
+    if state_dir.exists():
+        print(f"冷索引状态目录已存在，拒绝复用缓存: {state_dir}")
+        return 2
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    executable = Path(sys.executable).resolve()
+    command = (
+        [str(executable)]
+        if getattr(sys, "frozen", False)
+        else [str(executable), str(Path(__file__).resolve())]
+    )
+    environment = os.environ.copy()
+    environment["LFTS_APP_DATA_DIR"] = str(state_dir)
+    worker_command = [
+            *command,
+            "--benchmark-cold-index-worker",
+            str(Path(root).resolve()),
+            str(output_path),
+            str(state_dir),
+        ]
+    if performance_mode:
+        worker_command.append("--performance")
+    result = subprocess.run(
+        worker_command,
+        cwd=output_path.parent,
+        env=environment,
+        check=False,
+    )
+    return int(result.returncode)
+
+
+def run_cold_index_benchmark_worker(
+    root: Path,
+    output_path: Path,
+    state_dir: Path,
+    *,
+    performance_mode: bool = False,
+) -> int:
+    from local_full_text_search.core.corpus_validation import (
+        run_cold_index_benchmark,
+    )
+
+    try:
+        payload = run_cold_index_benchmark(
+            root,
+            output_path,
+            state_dir=state_dir,
+            performance_mode=performance_mode,
+        )
+        _safe_command_print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0 if payload["passed"] else 1
+    except Exception as exc:
+        payload = {"passed": False, "error": str(exc)}
+        target = Path(output_path).resolve()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        _safe_command_print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 1
+
+
+def _option_after(flag: str) -> str | None:
+    if flag not in sys.argv:
+        return None
+    index = sys.argv.index(flag)
+    if index + 1 >= len(sys.argv):
+        return None
+    return str(sys.argv[index + 1])
 
 
 def run_field_reindex_validation(db_path: Path, settings_path: Path) -> int:
@@ -742,7 +1847,7 @@ def run_shutdown_validation() -> int:
 
 
 def run_checkpoint_timeout_validation() -> int:
-    """Force an OCR no-progress timeout and verify incomplete text is not published."""
+    """Prove a long OCR task survives while it keeps making semantic progress."""
 
     result_path = Path("checkpoint_timeout_validation_result.txt")
     try:
@@ -762,10 +1867,11 @@ def run_checkpoint_timeout_validation() -> int:
                 if font_path.exists()
                 else ImageFont.load_default()
             )
+            validation_nonce = time.time_ns()
             for line in range(12):
                 draw.text(
                     (60, 50 + line * 90),
-                    f"OCR TIMEOUT PAGE CONTENT {line:02d}",
+                    f"OCR TIMEOUT {validation_nonce} PAGE {line:02d}",
                     fill="black",
                     font=font,
                 )
@@ -775,7 +1881,7 @@ def run_checkpoint_timeout_validation() -> int:
             document = fitz.open()
             native_page = document.new_page()
             native_page.insert_text((72, 72), "NATIVE_CHECKPOINT_SURVIVES_TIMEOUT")
-            for _ in range(30):
+            for _ in range(3):
                 scanned_page = document.new_page(width=800, height=600)
                 scanned_page.insert_image(scanned_page.rect, filename=str(image_path))
             document.save(pdf_path)
@@ -789,21 +1895,29 @@ def run_checkpoint_timeout_validation() -> int:
                 ocr_images=True,
                 ocr_scanned_pdf=True,
                 ocr_cpu_threads=1,
-                ocr_no_progress_timeout_seconds=1,
+                ocr_no_progress_timeout_seconds=15,
+                process_no_progress_timeout_seconds=15,
                 no_progress_max_retries=0,
                 process_parser_workers=1,
                 process_pending_tasks=1,
+                pdf_parser_workers=1,
+                pdf_pending_tasks=1,
+                ocr_workers=1,
+                ocr_pending_tasks=1,
+                ocr_microbatch_parent_jobs=1,
             )
             started = time.perf_counter()
             summary = IndexManager(db, settings).index_root(root_id)
             elapsed = time.perf_counter() - started
-            search_blocked = False
             try:
-                SearchEngine(db).search(
+                hit_count = SearchEngine(db).search(
                     SearchQuery(text="NATIVE_CHECKPOINT_SURVIVES_TIMEOUT", mode="exact")
-                )
+                ).total_confirmed
             except Exception as exc:
-                search_blocked = exc.__class__.__name__ == "IndexNotReadyError"
+                raise RuntimeError(
+                    "Completed semantic-progress index was not searchable: "
+                    f"{type(exc).__name__}: {exc}"
+                ) from exc
             with db.connect() as con:
                 row = con.execute(
                     "SELECT parse_status, parse_error_code FROM files WHERE path = ?",
@@ -812,17 +1926,22 @@ def run_checkpoint_timeout_validation() -> int:
                 block_count = int(con.execute("SELECT COUNT(*) FROM content_blocks").fetchone()[0])
             if row is None:
                 raise RuntimeError("Checkpoint PDF was not recorded")
-            if row["parse_status"] != "failed_retryable" or row["parse_error_code"] != "PARSE_NO_PROGRESS":
-                raise RuntimeError(f"Unexpected timeout status: {dict(row)}")
-            if summary.failed != 1 or not search_blocked or block_count != 0:
+            if row["parse_status"] != "success" or row["parse_error_code"] is not None:
+                raise RuntimeError(f"Semantic progress was incorrectly timed out: {dict(row)}")
+            if summary.failed != 0 or hit_count != 1 or block_count < 4:
                 raise RuntimeError(
-                    f"Incomplete content publication was not blocked: summary={summary}; "
-                    f"search_blocked={search_blocked}; blocks={block_count}"
+                    f"Semantic progress result was incomplete: summary={summary}; "
+                    f"hits={hit_count}; blocks={block_count}"
+                )
+            if elapsed <= settings.process_no_progress_timeout_seconds:
+                raise RuntimeError(
+                    "Validation did not run longer than the no-progress threshold: "
+                    f"elapsed={elapsed:.3f}s"
                 )
             message = (
-                "CHECKPOINT_TIMEOUT_VALIDATION_OK\n"
+                "SEMANTIC_PROGRESS_VALIDATION_OK\n"
                 f"elapsed_seconds={elapsed:.3f}; failed={summary.failed}; "
-                f"search_blocked={search_blocked}; published_blocks={block_count}\n"
+                f"hits={hit_count}; published_blocks={block_count}\n"
             )
             result_path.write_text(message, encoding="utf-8")
             print(message, end="")
@@ -1022,6 +2141,117 @@ def main() -> int:
             return finish_command(run_schema_v3_validation())
         if "--validate-schema-v4" in sys.argv:
             return finish_command(run_schema_v4_validation())
+        if "--validate-schema-v6" in sys.argv:
+            return finish_command(run_schema_v6_validation())
+        if "--validate-schema-v7" in sys.argv:
+            return finish_command(run_schema_v7_validation_command())
+        if "--validate-schema-v8" in sys.argv:
+            return finish_command(run_schema_v8_validation_command())
+        if "--validate-manual-exclusion" in sys.argv:
+            return finish_command(
+                run_manual_exclusion_validation_command()
+            )
+        if "--validate-failure-demo" in sys.argv:
+            return finish_command(run_failure_fallback_demo_validation())
+        if "--validate-pdf-page-pipeline" in sys.argv:
+            return finish_command(
+                run_phase2_validation_command(
+                    "pdf_page_pipeline"
+                )
+            )
+        if "--validate-ocr-adaptive-v2" in sys.argv:
+            return finish_command(
+                run_phase2_validation_command("ocr_adaptive_v2")
+            )
+        if "--validate-ocr-backend" in sys.argv:
+            return finish_command(
+                run_phase2_validation_command("ocr_backend")
+            )
+        if "--capture-index-status-layout" in sys.argv:
+            index = sys.argv.index(
+                "--capture-index-status-layout"
+            )
+            if index + 5 >= len(sys.argv):
+                print(
+                    "--capture-index-status-layout "
+                    "需要 width height scale state output"
+                )
+                return finish_command(2)
+            return finish_command(
+                capture_index_status_layout(
+                    int(sys.argv[index + 1]),
+                    int(sys.argv[index + 2]),
+                    float(sys.argv[index + 3]),
+                    str(sys.argv[index + 4]),
+                    Path(sys.argv[index + 5]),
+                )
+            )
+        if "--validate-index-status-layout" in sys.argv:
+            return finish_command(
+                run_index_status_layout_validation()
+            )
+        if "--validate-safe-pause" in sys.argv:
+            return finish_command(
+                run_phase2_validation_command("safe_pause")
+            )
+        if "--validate-paused-mode-switch" in sys.argv:
+            return finish_command(
+                run_phase2_validation_command(
+                    "paused_mode_switch"
+                )
+            )
+        if "--generate-legacy-word-doc" in sys.argv:
+            return finish_command(run_legacy_word_doc_generator_command())
+        if "--benchmark-cold-index-worker" in sys.argv:
+            index = sys.argv.index("--benchmark-cold-index-worker")
+            if index + 3 >= len(sys.argv):
+                print(
+                    "--benchmark-cold-index-worker "
+                    "需要 folder output state-dir"
+                )
+                return finish_command(2)
+            return finish_command(
+                run_cold_index_benchmark_worker(
+                    Path(sys.argv[index + 1]),
+                    Path(sys.argv[index + 2]),
+                    Path(sys.argv[index + 3]),
+                    performance_mode="--performance" in sys.argv,
+                )
+            )
+        if "--benchmark-cold-index" in sys.argv:
+            index = sys.argv.index("--benchmark-cold-index")
+            output = _option_after("--output")
+            if index + 1 >= len(sys.argv) or output is None:
+                print(
+                    "--benchmark-cold-index "
+                    "需要 <folder> --output <json>"
+                )
+                return finish_command(2)
+            return finish_command(
+                run_cold_index_benchmark_parent(
+                    Path(sys.argv[index + 1]),
+                    Path(output),
+                    performance_mode="--performance" in sys.argv,
+                )
+            )
+        if "--compare-index" in sys.argv:
+            index = sys.argv.index("--compare-index")
+            queries = _option_after("--queries")
+            output = _option_after("--output")
+            if index + 2 >= len(sys.argv) or queries is None:
+                print(
+                    "--compare-index 需要 <baseline-db> "
+                    "<candidate-db> --queries <json>"
+                )
+                return finish_command(2)
+            return finish_command(
+                run_compare_index_command(
+                    Path(sys.argv[index + 1]),
+                    Path(sys.argv[index + 2]),
+                    Path(queries),
+                    Path(output) if output else None,
+                )
+            )
         if "--validate-field-reindex" in sys.argv:
             index = sys.argv.index("--validate-field-reindex")
             if index + 2 >= len(sys.argv):
@@ -1039,6 +2269,12 @@ def main() -> int:
             return finish_command(run_shutdown_validation())
         if "--validate-checkpoint-timeout" in sys.argv:
             return finish_command(run_checkpoint_timeout_validation())
+        if "--validate-hang-recovery" in sys.argv:
+            return finish_command(run_hang_recovery_validation_command())
+        if "--validate-semantic-progress" in sys.argv:
+            return finish_command(run_semantic_progress_validation_command())
+        if "--validate-single-eta" in sys.argv:
+            return finish_command(run_single_eta_validation_command())
         if "--validate-legacy-shutdown" in sys.argv:
             index = sys.argv.index("--validate-legacy-shutdown")
             if index + 1 >= len(sys.argv):
@@ -1062,13 +2298,25 @@ def main() -> int:
         diagnostics.stage_completed()
         diagnostics.stage_started("初始化索引数据库")
         db = DatabaseManager()
+        demo_mode = "--failure-fallback-demo" in sys.argv
+        demo_root: Path | None = None
+        if demo_mode:
+            app_data = Path(os.environ.get("LFTS_APP_DATA_DIR", "")).resolve()
+            if not os.environ.get("LFTS_APP_DATA_DIR"):
+                raise RuntimeError("异常保底演示必须使用独立的 LFTS_APP_DATA_DIR")
+            demo_root = reset_failure_fallback_demo(app_data, db.db_path)
         db.initialize()
+        if demo_root is not None:
+            seed_failure_fallback_demo(db, demo_root)
         diagnostics.stage_completed()
         diagnostics.stage_started("创建图形界面")
         app = QApplication(sys.argv)
         app.setApplicationName(APP_DISPLAY_NAME)
         apply_light_theme(app)
         window = MainWindow(db, settings, settings_service)
+        if demo_mode:
+            window.setWindowTitle(f"{APP_DISPLAY_NAME} - 异常保底演示（隔离数据）")
+            window.switch_page("failed")
         window.show()
         diagnostics.stage_completed()
         diagnostics.mark_window_visible()

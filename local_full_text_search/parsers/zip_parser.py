@@ -12,6 +12,13 @@ from typing import Iterable
 
 from local_full_text_search.config.constants import TEMP_DIR
 from local_full_text_search.config.defaults import AppSettings
+from local_full_text_search.core.errors import (
+    CancelledError,
+    PauseRequestedError,
+    ZipMemberContentChangedError,
+    ZipMemberDirectoryChangedError,
+    ZipMemberSizeChangedError,
+)
 from local_full_text_search.core.normalizer import normalize_text
 from local_full_text_search.core.task_manager import CancelToken
 from local_full_text_search.models.content_block import ContentBlock
@@ -31,6 +38,7 @@ from local_full_text_search.ocr.ocr_engine import OcrEngine
 ZIP_MEMBER_EXTENSIONS = {
     ".txt", ".log", ".csv", ".md", ".json", ".xml", ".ini",
     ".pdf", ".docx", ".xlsx", ".xlsm", ".pptx",
+    ".doc", ".xls", ".ppt",
     ".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".zip",
 }
 
@@ -59,6 +67,8 @@ def scan_zip_manifest(
     file_path: Path,
     settings: AppSettings,
     cancel_token: CancelToken,
+    *,
+    progress_reporter: object | None = None,
 ) -> ZipManifest:
     """Validate an archive and collect stable member metadata.
 
@@ -82,17 +92,41 @@ def scan_zip_manifest(
             cancel_token.throw_if_cancelled()
             if info.is_dir():
                 skipped += 1
+                _report_manifest_progress(
+                    progress_reporter,
+                    member_index,
+                    len(infos),
+                    info.filename,
+                )
                 continue
             decoded_name = decoded_zip_member_name(info)
             safe_name = safe_zip_member_name(decoded_name)
             if safe_name is None:
                 unsafe += 1
+                _report_manifest_progress(
+                    progress_reporter,
+                    member_index,
+                    len(infos),
+                    decoded_name,
+                )
                 continue
             if info.flag_bits & 0x1:
                 encrypted += 1
+                _report_manifest_progress(
+                    progress_reporter,
+                    member_index,
+                    len(infos),
+                    decoded_name,
+                )
                 continue
             if Path(safe_name).suffix.lower() not in ZIP_MEMBER_EXTENSIONS:
                 skipped += 1
+                _report_manifest_progress(
+                    progress_reporter,
+                    member_index,
+                    len(infos),
+                    decoded_name,
+                )
                 continue
             members.append(
                 ZipMemberDescriptor(
@@ -104,7 +138,35 @@ def scan_zip_manifest(
                     crc32=int(info.CRC),
                 )
             )
+            _report_manifest_progress(
+                progress_reporter,
+                member_index,
+                len(infos),
+                decoded_name,
+            )
     return ZipManifest(tuple(members), len(infos), skipped, unsafe, encrypted)
+
+
+def _report_manifest_progress(
+    reporter: object | None,
+    member_index: int,
+    total: int,
+    detail: str,
+) -> None:
+    if reporter is None:
+        return
+    advance = getattr(reporter, "advance", None)
+    if not callable(advance):
+        return
+    completed = member_index + 1
+    advance(
+        phase="zip_manifest",
+        completed=completed,
+        total=total,
+        cursor=f"member:{completed}",
+        checkpoint_version=completed,
+        detail=detail,
+    )
 
 
 def hash_zip_member(
@@ -118,18 +180,18 @@ def hash_zip_member(
     with zipfile.ZipFile(file_path) as archive:
         infos = archive.infolist()
         if descriptor.member_index < 0 or descriptor.member_index >= len(infos):
-            raise OSError("ZIP member directory changed during indexing")
+            raise ZipMemberDirectoryChangedError("ZIP member directory changed during indexing")
         info = infos[descriptor.member_index]
         if info.is_dir():
-            raise OSError("ZIP member directory changed during indexing")
+            raise ZipMemberDirectoryChangedError("ZIP member directory changed during indexing")
         decoded_name = decoded_zip_member_name(info)
         safe_name = safe_zip_member_name(decoded_name)
         if safe_name != descriptor.internal_path:
-            raise OSError("ZIP member directory changed during indexing")
+            raise ZipMemberDirectoryChangedError("ZIP member directory changed during indexing")
         if int(info.file_size) != int(descriptor.size_bytes):
-            raise OSError("ZIP member size changed during indexing")
+            raise ZipMemberSizeChangedError("ZIP member size changed during indexing")
         if int(info.CRC) != int(descriptor.crc32):
-            raise OSError("ZIP member content changed during indexing")
+            raise ZipMemberContentChangedError("ZIP member content changed during indexing")
         with archive.open(info) as source:
             for chunk in iter(lambda: source.read(1024 * 1024), b""):
                 cancel_token.throw_if_cancelled()
@@ -200,6 +262,12 @@ class ZipParser(BaseParser):
                     safe_name = safe_zip_member_name(decoded_name)
                     if safe_name is None:
                         failed_members += 1
+                        self._record_member_diagnostic(
+                            decoded_name,
+                            "zip",
+                            "ZIP_MEMBER_UNSAFE_PATH",
+                            "成员路径不安全，已拒绝解压",
+                        )
                         self._report_member_progress(member_index, len(infos), decoded_name)
                         continue
                     parser = self._parser_for_member(safe_name)
@@ -220,8 +288,15 @@ class ZipParser(BaseParser):
                             ):
                                 yielded += 1
                                 yield block
-                        except Exception:
+                        except (CancelledError, PauseRequestedError):
+                            raise
+                        except Exception as exc:
                             failed_members += 1
+                            self._record_member_exception(
+                                safe_name,
+                                parser.name,
+                                exc,
+                            )
                         self._report_member_progress(member_index, len(infos), safe_name)
                         continue
                     extracted = extracted_root / hashlib.sha256(info.filename.encode("utf-8")).hexdigest()
@@ -245,8 +320,15 @@ class ZipParser(BaseParser):
                             block.extra["zip_internal_path"] = safe_name
                             yielded += 1
                             yield block
-                    except Exception:
+                    except (CancelledError, PauseRequestedError):
+                        raise
+                    except Exception as exc:
                         failed_members += 1
+                        self._record_member_exception(
+                            safe_name,
+                            parser.name,
+                            exc,
+                        )
                     self._report_member_progress(member_index, len(infos), safe_name)
                 if failed_members:
                     self.set_status(
@@ -260,6 +342,35 @@ class ZipParser(BaseParser):
             self.set_status("failed", "ZIP_CORRUPTED", "压缩包损坏或格式异常")
         finally:
             shutil.rmtree(extracted_root, ignore_errors=True)
+
+    def _record_member_exception(
+        self,
+        member_path: str,
+        parser_name: str,
+        exc: Exception,
+    ) -> None:
+        self._record_member_diagnostic(
+            member_path,
+            parser_name,
+            exc.__class__.__name__,
+            str(exc) or exc.__class__.__name__,
+        )
+
+    def _record_member_diagnostic(
+        self,
+        member_path: str,
+        parser_name: str,
+        error_code: str,
+        error_message: str,
+    ) -> None:
+        self.last_diagnostics.append(
+            {
+                "member_path": str(member_path),
+                "parser": str(parser_name),
+                "error_code": str(error_code),
+                "error_message": str(error_message)[:2000],
+            }
+        )
 
     def _report_member_progress(self, member_index: int, total: int, name: str) -> None:
         self.report_progress(
@@ -363,7 +474,18 @@ class ZipParser(BaseParser):
             return DocxStreamParser(fallback, defer_normalization=True) if self.settings.fast_ooxml_enabled else fallback
         if suffix in {".xlsx", ".xlsm"}:
             fallback = XlsxParser()
-            return XlsxStreamParser(fallback, defer_normalization=True) if self.settings.fast_ooxml_enabled else fallback
+            return (
+                XlsxStreamParser(
+                    fallback,
+                    defer_normalization=True,
+                    sheet_workers=self.settings.xlsx_sheet_workers,
+                    shared_strings_disk_threshold_bytes=(
+                        self.settings.xlsx_shared_strings_disk_threshold_bytes
+                    ),
+                )
+                if self.settings.fast_ooxml_enabled
+                else fallback
+            )
         if suffix == ".pptx":
             fallback = PptxParser()
             return PptxStreamParser(fallback, defer_normalization=True) if self.settings.fast_ooxml_enabled else fallback

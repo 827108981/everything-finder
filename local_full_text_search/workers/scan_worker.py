@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+import threading
+import time
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Signal, Slot
@@ -9,7 +11,7 @@ from local_full_text_search.config.defaults import AppSettings
 from local_full_text_search.core.database import DatabaseManager, utc_now
 from local_full_text_search.core.hardware_profile import (
     build_performance_profile,
-    detect_hardware_profile,
+    detect_hardware_profile_for_roots,
     settings_for_profile,
 )
 from local_full_text_search.core.index_manager import IndexManager
@@ -30,6 +32,11 @@ class ScanWorker(QObject):
         self.performance_mode = performance_mode
         self.token = CancelToken()
         self.manager: IndexManager | None = None
+        self._pause_monitor_lock = threading.Lock()
+        self._pause_monitor_generation = 0
+        self._hardware: object | None = None
+        self._root_disk_classes: dict[str, str] = {}
+        self._profile_payload: dict[str, object] | None = None
 
     @Slot()
     def run(self) -> None:
@@ -39,11 +46,15 @@ class ScanWorker(QObject):
             scan_started_at = utc_now()
             effective_settings = self.settings
             profile_payload: dict[str, object] | None = None
+            roots = db.list_roots(enabled_only=True)
+            root_paths = [Path(str(root["path"])) for root in roots]
+            hardware, root_disk_classes = detect_hardware_profile_for_roots(root_paths)
+            self._hardware = hardware
+            self._root_disk_classes = dict(root_disk_classes)
             if self.performance_mode:
-                roots = db.list_roots(enabled_only=True)
-                index_path = Path(str(roots[0]["path"])) if roots else None
-                profile = build_performance_profile(detect_hardware_profile(index_path))
+                profile = build_performance_profile(hardware)
                 profile_payload = profile.to_dict()
+                self._profile_payload = dict(profile_payload)
                 effective_settings = settings_for_profile(self.settings, profile)
                 self.progress.emit(
                     {
@@ -52,7 +63,30 @@ class ScanWorker(QObject):
                         "performance_profile": profile_payload,
                     }
                 )
-            self.manager = IndexManager(db, effective_settings)
+            effective_profile = profile_payload or {
+                "mode": "normal",
+                "parser_workers": effective_settings.parser_workers,
+                "process_parser_workers": effective_settings.process_parser_workers,
+                "pdf_parser_workers": effective_settings.pdf_parser_workers,
+                "ocr_workers": effective_settings.ocr_workers,
+                "ocr_cpu_threads": effective_settings.ocr_cpu_threads,
+                "slow_file_workers": effective_settings.slow_file_workers,
+                "memory_budget_mb": effective_settings.index_memory_budget_mb,
+                "cpu_token_budget": effective_settings.index_cpu_token_budget,
+                "disk_class": hardware.disk_class,
+            }
+            self.manager = IndexManager(
+                db,
+                effective_settings,
+                run_context={
+                    "execution_mode": "performance" if self.performance_mode else "normal",
+                    "hardware": hardware.to_dict(),
+                    "root_disk_classes": root_disk_classes,
+                    "effective_profile": effective_profile,
+                },
+            )
+            if self.token.paused:
+                self.manager.request_pause()
             summary = self.manager.index_enabled_roots(self.token, self.progress.emit)
             run_reports = db.recent_index_runs_since(scan_started_at)
             self.finished.emit(
@@ -61,7 +95,7 @@ class ScanWorker(QObject):
                     "runs": run_reports,
                     "run_metrics": _aggregate_run_metrics(run_reports),
                     "performance_mode": self.performance_mode,
-                    "performance_profile": profile_payload,
+                    "performance_profile": self._profile_payload,
                 }
             )
         except Exception as exc:
@@ -79,10 +113,134 @@ class ScanWorker(QObject):
     @Slot()
     def pause(self) -> None:
         self.token.pause()
+        if self.manager is not None:
+            self.manager.request_pause()
+        self.progress.emit(
+            {
+                "stage": "pausing",
+                "pause_state": "pausing",
+                "phase_label": "正在暂停，等待活动任务到达安全检查点",
+            }
+        )
+        with self._pause_monitor_lock:
+            self._pause_monitor_generation += 1
+            generation = self._pause_monitor_generation
+        threading.Thread(
+            target=self._monitor_safe_pause,
+            args=(generation,),
+            name="lfts-safe-pause-monitor",
+            daemon=True,
+        ).start()
 
     @Slot()
     def resume(self) -> None:
+        if self.manager is not None:
+            self.manager.request_resume()
         self.token.resume()
+        with self._pause_monitor_lock:
+            self._pause_monitor_generation += 1
+        self.progress.emit(
+            {
+                "stage": "resuming",
+                "pause_state": "resuming",
+                "phase_label": "正在从安全检查点继续",
+            }
+        )
+
+    @Slot(bool)
+    def switch_mode(self, performance_mode: bool) -> None:
+        manager = self.manager
+        if (
+            manager is None
+            or not self.token.paused
+            or not manager.is_safely_paused()
+            or self._hardware is None
+        ):
+            self.progress.emit(
+                {
+                    "stage": "mode_switch_rejected",
+                    "pause_state": "pausing" if self.token.paused else "running",
+                    "phase_label": "只有完全暂停后才能切换模式",
+                }
+            )
+            return
+        if performance_mode:
+            profile = build_performance_profile(self._hardware)
+            profile_payload = profile.to_dict()
+            effective_settings = settings_for_profile(self.settings, profile)
+            execution_mode = "performance"
+        else:
+            profile_payload = {
+                "mode": "normal",
+                "parser_workers": self.settings.parser_workers,
+                "process_parser_workers": self.settings.process_parser_workers,
+                "pdf_parser_workers": self.settings.pdf_parser_workers,
+                "ocr_workers": self.settings.ocr_workers,
+                "ocr_cpu_threads": self.settings.ocr_cpu_threads,
+                "slow_file_workers": self.settings.slow_file_workers,
+                "memory_budget_mb": self.settings.index_memory_budget_mb,
+                "cpu_token_budget": self.settings.index_cpu_token_budget,
+                "disk_class": getattr(self._hardware, "disk_class", "unknown"),
+            }
+            effective_settings = self.settings
+            execution_mode = "normal"
+        try:
+            applied = manager.apply_settings_while_paused(
+                effective_settings,
+                execution_mode=execution_mode,
+                effective_profile=profile_payload,
+            )
+        except Exception as exc:
+            logger.exception("Unable to switch indexing mode while paused")
+            self.progress.emit(
+                {
+                    "stage": "mode_switch_failed",
+                    "pause_state": "paused",
+                    "phase_label": f"模式切换失败：{str(exc) or exc.__class__.__name__}",
+                }
+            )
+            return
+        if not applied:
+            self.progress.emit(
+                {
+                    "stage": "mode_switch_rejected",
+                    "pause_state": "paused",
+                    "phase_label": "模式切换未应用，索引仍保持暂停",
+                }
+            )
+            return
+        self.performance_mode = bool(performance_mode)
+        self._profile_payload = dict(profile_payload) if performance_mode else None
+        self.progress.emit(
+            {
+                "stage": "paused",
+                "pause_state": "paused",
+                "performance_mode": self.performance_mode,
+                "performance_profile": profile_payload,
+                "phase_label": (
+                    "性能模式 · 已暂停"
+                    if self.performance_mode
+                    else "普通模式 · 已暂停"
+                ),
+            }
+        )
+
+    def _monitor_safe_pause(self, generation: int) -> None:
+        while self.token.paused and not self.token.cancelled:
+            with self._pause_monitor_lock:
+                if generation != self._pause_monitor_generation:
+                    return
+            manager = self.manager
+            if manager is not None and manager.is_safely_paused():
+                self.progress.emit(
+                    {
+                        "stage": "paused",
+                        "pause_state": "paused",
+                        "phase_label": "已暂停",
+                    }
+                )
+                return
+            time.sleep(0.1)
 
 
 def _aggregate_run_metrics(run_reports: list[dict[str, object]]) -> dict[str, object]:

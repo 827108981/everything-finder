@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import os
+import time
 from collections.abc import Callable
 from pathlib import Path
 
@@ -16,6 +17,7 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMainWindow,
@@ -28,6 +30,7 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QSplitter,
     QStackedWidget,
+    QTabBar,
     QTableWidget,
     QTableWidgetItem,
     QTextEdit,
@@ -46,10 +49,52 @@ from local_full_text_search.services.settings_service import SettingsService
 from local_full_text_search.ui.preview_panel import PreviewPanel
 from local_full_text_search.ui.result_view import ResultView
 from local_full_text_search.workers.scan_worker import ScanWorker
+from local_full_text_search.workers.scope_exclusion_worker import ScopeExclusionWorker
 from local_full_text_search.workers.search_worker import SearchWorker
 
 
 PAGE_INDEX = {"search": 0, "index": 1, "failed": 2, "settings": 3}
+
+
+def performance_mode_notice() -> str:
+    return (
+        "性能模式适合在电脑空闲时使用。程序会根据本机配置尽可能使用 "
+        "CPU、内存和磁盘带宽来缩短索引时间；检测到资源压力时会自动降低并发。"
+    )
+
+
+def format_index_scope_status(readiness: dict[str, object]) -> str:
+    complete = int(readiness.get("complete_files") or 0)
+    eligible = int(readiness.get("eligible_files") or 0)
+    blocking = int(readiness.get("blocking_files") or 0)
+    excluded = int(readiness.get("manual_excluded_files") or 0)
+    video = int(readiness.get("video_excluded") or 0)
+    details = []
+    if excluded:
+        details.append(f"已人工排除 {excluded} 个")
+    if video:
+        details.append(f"排除视频 {video} 个")
+    if bool(readiness.get("ready")):
+        text = f"当前范围完成 {complete}/{eligible}"
+    else:
+        if blocking:
+            text = f"索引未完成 {complete}/{eligible} · 待处理 {blocking}"
+        else:
+            residual = []
+            unfinished = int(readiness.get("unfinished_tasks") or 0)
+            unpublished = int(readiness.get("unpublished_candidates") or 0)
+            if unfinished:
+                residual.append(f"残留任务 {unfinished}")
+            if unpublished:
+                residual.append(f"未发布索引 {unpublished}")
+            if bool(readiness.get("content_fts_dirty")):
+                residual.append("全文索引待发布")
+            text = f"文件已完成 {complete}/{eligible} · 索引状态待修复"
+            if residual:
+                text += " · " + " · ".join(residual)
+    if details:
+        text += " · " + " · ".join(details)
+    return text
 
 
 class MainWindow(QMainWindow):
@@ -66,8 +111,15 @@ class MainWindow(QMainWindow):
         self.search_worker: SearchWorker | None = None
         self.scan_thread: QThread | None = None
         self.scan_worker: ScanWorker | None = None
+        self.exclusion_thread: QThread | None = None
+        self.exclusion_worker: ScopeExclusionWorker | None = None
+        self.exclusion_outcome: tuple[str, object] | None = None
+        self.exclusion_progress_payload: dict[str, object] = {}
+        self.exclusion_started_at = 0.0
         self.pending_search = False
         self.pending_monitor_scan = False
+        self.force_complete_after_retry = False
+        self.pending_force_complete_confirmation = False
         self.closing = False
         self.page = 1
         self.total_confirmed = 0
@@ -76,6 +128,11 @@ class MainWindow(QMainWindow):
         self.force_close_timer.setSingleShot(True)
         self.force_close_timer.setInterval(2_500)
         self.force_close_timer.timeout.connect(self._force_exit)
+        self.exclusion_heartbeat_timer = QTimer(self)
+        self.exclusion_heartbeat_timer.setInterval(1_000)
+        self.exclusion_heartbeat_timer.timeout.connect(
+            self.on_exclusion_heartbeat
+        )
 
         self.setWindowTitle(APP_DISPLAY_NAME)
         self.resize(1440, 900)
@@ -145,10 +202,13 @@ class MainWindow(QMainWindow):
         self.index_page.add_root_requested.connect(self.add_root)
         self.index_page.scan_requested.connect(self.start_scan)
         self.index_page.performance_scan_requested.connect(
-            lambda: self.start_scan(performance_mode=True)
+            self.confirm_performance_scan
         )
         self.index_page.pause_requested.connect(lambda: self.scan_worker.pause() if self.scan_worker else None)
         self.index_page.resume_requested.connect(lambda: self.scan_worker.resume() if self.scan_worker else None)
+        self.index_page.mode_switch_requested.connect(
+            self.request_scan_mode_switch
+        )
         self.index_page.cancel_requested.connect(self.cancel_scan)
         self.index_page.toggle_root_requested.connect(self.toggle_root)
         self.index_page.remove_root_requested.connect(self.remove_root)
@@ -159,6 +219,18 @@ class MainWindow(QMainWindow):
         self.failed_page.open_folder_requested.connect(self.open_folder_path)
         self.failed_page.refresh_requested.connect(self.refresh_failed_page)
         self.failed_page.export_requested.connect(self.export_failed_rows)
+        self.failed_page.exclude_requested.connect(
+            self.exclude_failed_files
+        )
+        self.failed_page.restore_requested.connect(
+            self.restore_excluded_files
+        )
+        self.failed_page.force_complete_requested.connect(
+            self.request_force_complete
+        )
+        self.failed_page.cancel_exclusion_requested.connect(
+            self.cancel_scope_exclusion
+        )
 
         self.settings_page.save_requested.connect(self.save_settings)
 
@@ -191,7 +263,7 @@ class MainWindow(QMainWindow):
         }
         self.top_bar.set_title(title_map[key], subtitle_map[key])
         self.sidebar.set_active(key)
-        if key == "failed":
+        if key == "failed" and self.exclusion_thread is None:
             self.refresh_failed_page()
 
     def refresh_all(self) -> None:
@@ -202,6 +274,7 @@ class MainWindow(QMainWindow):
         self.search_page.set_stats(stats, has_roots=bool(roots))
         self.search_page.set_index_ready(bool(readiness["ready"]), readiness)
         self.index_page.set_roots(roots, self.root_stats_by_id())
+        self.index_page.set_readiness(readiness)
         self.refresh_failed_page()
         self.update_index_status()
         self.search_page.set_history(self.db.search_history())
@@ -223,7 +296,7 @@ class MainWindow(QMainWindow):
         if self.closing:
             return
         self.pending_monitor_scan = True
-        if self.scan_thread is None:
+        if self.scan_thread is None and self.exclusion_thread is None:
             self.top_bar.set_index_status("检测到文件变化，点击更新", is_pending=True)
 
     def clear_search_history(self) -> None:
@@ -231,27 +304,363 @@ class MainWindow(QMainWindow):
         self.search_page.set_history([])
 
     def refresh_failed_page(self) -> None:
-        self.failed_page.set_rows(self.db.failed_files(limit=2000))
+        readiness = self.db.index_readiness()
+        self.failed_page.set_rows(
+            self.db.failed_files(limit=2000),
+            self.db.excluded_files(limit=2000),
+            self.db.metadata_only_files(limit=2000),
+        )
+        self.failed_page.set_readiness(readiness)
 
     def update_index_status(self) -> None:
+        if self.exclusion_thread is not None:
+            self.top_bar.set_index_status("正在更新搜索索引...", is_running=True)
+            return
         readiness = self.db.index_readiness()
         if self.pending_monitor_scan and self.scan_thread is None:
             self.top_bar.set_index_status("检测到文件变化，点击更新", is_pending=True)
             return
-        complete = int(readiness["complete_files"])
-        eligible = int(readiness["eligible_files"])
         blocking = int(readiness["blocking_files"])
-        video = int(readiness["video_excluded"])
         if bool(readiness["ready"]):
-            video_text = f" · 排除视频 {video}" if video else ""
-            self.top_bar.set_index_status(f"完整索引 {complete}/{eligible}{video_text}")
+            self.top_bar.set_index_status(
+                format_index_scope_status(readiness)
+            )
             return
         self.top_bar.set_index_status(
-            f"索引未完成 {complete}/{eligible} · 待处理 {blocking}",
+            format_index_scope_status(readiness),
             is_running=self.scan_thread is not None,
             is_error=self.scan_thread is None and blocking > 0,
             is_pending=self.scan_thread is None and blocking == 0,
         )
+
+    def exclude_failed_files(self, file_ids: list[int]) -> None:
+        if self.exclusion_thread is not None:
+            self.failed_page.set_status("搜索索引正在后台更新，请勿重复操作")
+            return
+        if self.scan_thread is not None:
+            self.failed_page.set_status(
+                "索引任务仍在运行，请先暂停并等待安全点"
+            )
+            return
+        selected = {
+            int(row["id"]): row
+            for row in self.failed_page.rows_by_scope["blocking"]
+            if int(row["id"]) in set(file_ids)
+        }
+        if len(selected) != len(set(file_ids)):
+            self.failed_page.set_status("所选阻断项已变化，请刷新后重试")
+            return
+        reason, accepted = QInputDialog.getText(
+            self,
+            "人工排除原因",
+            "排除原因（可留空）：",
+        )
+        if not accepted:
+            return
+        reason = reason.strip() or "用户确认当前文件暂时无法解析"
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle("确认从当前索引范围排除")
+        dialog.setIcon(QMessageBox.Icon.Warning)
+        dialog.setText(
+            f"将排除 {len(selected)} 个文件。其文件名、路径和正文均不会出现在搜索结果中。"
+        )
+        dialog.setInformativeText(
+            "源文件不会被删除，之后可以在“已人工排除”中恢复纳入。"
+            "后台更新期间搜索和索引管理操作会暂时受限。"
+        )
+        dialog.setDetailedText(
+            "\n".join(
+                f"{row['path']}\n  {row.get('parse_error_code') or row.get('parse_status')}: "
+                f"{row.get('parse_error_message') or ''}"
+                for row in selected.values()
+            )
+        )
+        dialog.setStandardButtons(
+            QMessageBox.StandardButton.Yes
+            | QMessageBox.StandardButton.Cancel
+        )
+        dialog.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        if dialog.exec() != QMessageBox.StandardButton.Yes:
+            return
+        self.start_scope_exclusion(list(selected), reason)
+
+    def start_scope_exclusion(self, file_ids: list[int], reason: str) -> None:
+        self._start_scope_update(file_ids, reason=reason, force_complete=False)
+
+    def start_scope_repair(self, reason: str) -> None:
+        self._start_scope_update([], reason=reason, force_complete=True)
+
+    def _start_scope_update(
+        self,
+        file_ids: list[int],
+        *,
+        reason: str,
+        force_complete: bool,
+    ) -> None:
+        if self.exclusion_thread is not None:
+            self.failed_page.set_status("搜索索引正在后台更新，请勿重复操作")
+            return
+        if self.scan_thread is not None:
+            self.failed_page.set_status("索引任务仍在运行，请先等待当前任务结束")
+            return
+        self.pending_search = False
+        if self.search_thread is not None:
+            self.cancel_search()
+        self.hide_preview()
+        self.exclusion_outcome = None
+        self.exclusion_progress_payload = {
+            "stage": "preparing",
+            "phase_label": (
+                "正在准备修复索引状态"
+                if force_complete
+                else "正在准备后台更新"
+            ),
+            "processed_files": 0,
+            "total_files": len(file_ids),
+            "large_fts_operation": False,
+            "can_cancel": True,
+        }
+        self.exclusion_started_at = time.monotonic()
+        self.exclusion_thread = QThread()
+        self.exclusion_worker = ScopeExclusionWorker(
+            self.db.db_path,
+            file_ids,
+            reason=reason,
+            operation_source=("ui_force_complete" if force_complete else "ui"),
+            force_complete=force_complete,
+        )
+        self.exclusion_worker.moveToThread(self.exclusion_thread)
+        self.exclusion_thread.started.connect(self.exclusion_worker.run)
+        self.exclusion_worker.progress.connect(self.on_exclusion_progress)
+        self.exclusion_worker.finished.connect(self.on_exclusion_finished)
+        self.exclusion_worker.cancelled.connect(self.on_exclusion_cancelled)
+        self.exclusion_worker.failed.connect(self.on_exclusion_failed)
+        self.exclusion_worker.finished.connect(self.exclusion_thread.quit)
+        self.exclusion_worker.cancelled.connect(self.exclusion_thread.quit)
+        self.exclusion_worker.failed.connect(self.exclusion_thread.quit)
+        self.exclusion_thread.finished.connect(self.cleanup_exclusion_thread)
+        readiness = self.db.index_readiness()
+        self.search_page.set_index_ready(
+            False,
+            {**readiness, "index_update_running": True},
+        )
+        self.failed_page.set_exclusion_running(True)
+        self.failed_page.set_exclusion_progress(self.exclusion_progress_payload)
+        self.index_page.set_database_update_running(True)
+        self.top_bar.set_index_status("正在更新搜索索引...", is_running=True)
+        self.exclusion_heartbeat_timer.start()
+        self.exclusion_thread.start()
+
+    def on_exclusion_progress(self, payload: object) -> None:
+        if not isinstance(payload, dict):
+            return
+        self.exclusion_progress_payload = dict(payload)
+        self.failed_page.set_exclusion_progress(payload)
+        phase_label = str(payload.get("phase_label") or "")
+        self.index_page.set_database_update_progress(phase_label)
+        self.top_bar.set_index_status(
+            "正在更新搜索索引..."
+            + (f" · {phase_label}" if phase_label else ""),
+            is_running=True,
+        )
+
+    def on_exclusion_heartbeat(self) -> None:
+        if self.exclusion_thread is None:
+            self.exclusion_heartbeat_timer.stop()
+            return
+        payload = dict(self.exclusion_progress_payload)
+        payload["elapsed_seconds"] = int(
+            max(0.0, time.monotonic() - self.exclusion_started_at)
+        )
+        self.failed_page.set_exclusion_progress(payload)
+
+    def cancel_scope_exclusion(self) -> None:
+        if self.exclusion_worker is None:
+            return
+        self.failed_page.set_exclusion_cancel_pending()
+        self.top_bar.set_index_status("正在取消索引更新并回滚...", is_running=True)
+        self.exclusion_worker.cancel()
+
+    def on_exclusion_finished(self, result: object) -> None:
+        self.exclusion_outcome = ("finished", result)
+
+    def on_exclusion_cancelled(self) -> None:
+        self.exclusion_outcome = ("cancelled", None)
+
+    def on_exclusion_failed(self, message: str) -> None:
+        self.exclusion_outcome = ("failed", message)
+
+    def cleanup_exclusion_thread(self) -> None:
+        outcome = self.exclusion_outcome or (
+            "failed",
+            "后台任务异常结束，请查看日志",
+        )
+        self.exclusion_heartbeat_timer.stop()
+        self.exclusion_thread = None
+        self.exclusion_worker = None
+        self.exclusion_progress_payload = {}
+        self.exclusion_outcome = None
+        self.failed_page.set_exclusion_running(False)
+        self.index_page.set_database_update_running(False)
+        if self.closing:
+            self._finish_close_if_idle()
+            return
+        self.refresh_all()
+        kind, payload = outcome
+        if kind == "finished" and isinstance(payload, dict):
+            changed = int(payload.get("excluded_files") or 0)
+            remaining = int(payload.get("blocking_files") or 0)
+            operation = str(payload.get("operation") or "exclude")
+            if bool(payload.get("ready")):
+                if operation == "force_complete":
+                    self.failed_page.set_status(
+                        f"索引状态修复完成，另排除 {changed} 个文件，当前已开放搜索"
+                    )
+                else:
+                    self.failed_page.set_status(
+                        f"已人工排除 {changed} 个文件，当前索引已开放搜索"
+                    )
+                self.switch_page("search")
+            else:
+                self.failed_page.scope_tabs.setCurrentIndex(0)
+                self.failed_page.set_status(
+                    f"已人工排除 {changed} 个文件，仍有 {remaining} 个阻断项"
+                )
+        elif kind == "cancelled":
+            self.failed_page.set_status("后台更新已取消，本次变更已回滚")
+        else:
+            message = str(payload or "未知错误")
+            self.failed_page.set_status(f"排除失败，所有变更已回滚：{message}")
+            QMessageBox.critical(self, "排除失败", message)
+        self._finish_close_if_idle()
+
+    def restore_excluded_files(self, file_ids: list[int]) -> None:
+        if self.exclusion_thread is not None:
+            self.failed_page.set_status("搜索索引正在后台更新，请稍候")
+            return
+        if self.scan_thread is not None:
+            self.failed_page.set_status(
+                "索引任务仍在运行，请先暂停并等待安全点"
+            )
+            return
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle("恢复纳入并重试")
+        dialog.setIcon(QMessageBox.Icon.Question)
+        dialog.setText(
+            f"将 {len(set(file_ids))} 个文件恢复到当前索引范围并重新尝试解析。"
+        )
+        dialog.setInformativeText(
+            "恢复后，这些文件会重新成为阻断项，直到解析完成。"
+        )
+        dialog.setStandardButtons(
+            QMessageBox.StandardButton.Yes
+            | QMessageBox.StandardButton.Cancel
+        )
+        dialog.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        if dialog.exec() != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            changed = self.db.restore_files_to_index(
+                file_ids,
+                reason="用户恢复纳入并重试",
+                operation_source="ui",
+            )
+        except Exception as exc:
+            self.failed_page.set_status(f"恢复失败：{exc}")
+            return
+        self.refresh_all()
+        self.failed_page.scope_tabs.setCurrentIndex(0)
+        self.failed_page.set_status(f"已恢复 {changed} 个文件，正在重新尝试")
+        self.start_scan()
+
+    def request_force_complete(self) -> None:
+        if self.exclusion_thread is not None:
+            self.failed_page.set_status("搜索索引正在后台更新，请稍候")
+            return
+        if self.scan_thread is not None:
+            self.failed_page.set_status("索引任务仍在运行，请先等待当前任务结束")
+            return
+        readiness = self.db.index_readiness()
+        if bool(readiness.get("ready")):
+            self.refresh_all()
+            self.failed_page.set_status("当前索引已经就绪，无需修复")
+            return
+        blockers = self.db.failed_files(limit=2000)
+        if not blockers:
+            reasons = ", ".join(
+                str(value) for value in readiness.get("not_ready_reasons", [])
+            ) or "索引状态尚未收敛"
+            dialog = QMessageBox(self)
+            dialog.setWindowTitle("修复并开放搜索")
+            dialog.setIcon(QMessageBox.Icon.Warning)
+            dialog.setText("文件已经全部处理，但搜索索引状态仍未完成。")
+            dialog.setInformativeText(
+                "程序将后台清理残留任务、重建全文索引并重新开放搜索；源文件不会被修改。"
+            )
+            dialog.setDetailedText(f"未就绪原因：{reasons}")
+            dialog.setStandardButtons(
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel
+            )
+            dialog.setDefaultButton(QMessageBox.StandardButton.Cancel)
+            if dialog.exec() == QMessageBox.StandardButton.Yes:
+                self.start_scope_repair("用户确认修复零阻断但未就绪的索引状态")
+            return
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle("强力完成本次索引")
+        dialog.setIcon(QMessageBox.Icon.Warning)
+        dialog.setText(
+            f"先对剩余 {len(blockers)} 个阻断项执行最后一次恢复重试。"
+        )
+        dialog.setInformativeText(
+            "如果仍无法完成，系统会再次列出文件并请你确认排除；不会删除源文件。"
+        )
+        dialog.setStandardButtons(
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel
+        )
+        dialog.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        if dialog.exec() != QMessageBox.StandardButton.Yes:
+            return
+        self.force_complete_after_retry = True
+        self.failed_page.set_status("正在执行最后一次恢复重试")
+        self.start_scan()
+
+    def confirm_force_complete_remaining(self) -> None:
+        if self.exclusion_thread is not None:
+            self.failed_page.set_status("搜索索引正在后台更新，请稍候")
+            return
+        blockers = self.db.failed_files(limit=2000)
+        readiness = self.db.index_readiness()
+        if bool(readiness["ready"]):
+            self.refresh_all()
+            self.failed_page.set_status("最后一次恢复重试已成功，索引现已完成")
+            return
+        if not blockers:
+            self.start_scope_repair("最后一次恢复后修复残留索引状态")
+            return
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle("确认排除并开放搜索")
+        dialog.setIcon(QMessageBox.Icon.Warning)
+        dialog.setText(
+            f"最后一次恢复后仍有 {len(blockers)} 个文件无法完成。是否排除这些文件并开放搜索？"
+        )
+        dialog.setInformativeText(
+            "被排除文件的文件名、路径和正文不会进入搜索结果；可在“已人工排除”中恢复重试。"
+        )
+        dialog.setDetailedText(
+            "\n".join(
+                f"{row['path']}\n  {row['parse_status']}: "
+                f"{row['parse_error_message'] or row['parse_error_code'] or '任务未完成'}"
+                for row in blockers
+            )
+        )
+        dialog.setStandardButtons(
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel
+        )
+        dialog.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        if dialog.exec() != QMessageBox.StandardButton.Yes:
+            self.failed_page.set_status("已取消强力完成，索引仍保持未完成状态")
+            return
+        self.start_scope_repair("用户确认多次恢复后排除剩余阻断项并开放搜索")
 
     def root_stats_by_id(self) -> dict[int, dict[str, int]]:
         data: dict[int, dict[str, int]] = {}
@@ -271,6 +680,9 @@ class MainWindow(QMainWindow):
         return data
 
     def add_root(self) -> None:
+        if self.exclusion_thread is not None:
+            self.index_page.task_label.setText("搜索索引正在后台更新，请稍候")
+            return
         directory = QFileDialog.getExistingDirectory(self, "选择搜索目录")
         if not directory:
             return
@@ -280,16 +692,26 @@ class MainWindow(QMainWindow):
         self.index_page.task_label.setText("已添加搜索范围，请选择更新方式")
 
     def remove_root(self, root_id: int) -> None:
+        if self.exclusion_thread is not None:
+            self.index_page.task_label.setText("搜索索引正在后台更新，请稍候")
+            return
         if QMessageBox.question(self, "删除搜索范围", "只删除索引和配置，不会删除原文件。确认继续？") != QMessageBox.StandardButton.Yes:
             return
         self.db.remove_root(root_id)
         self.refresh_all()
 
     def toggle_root(self, root_id: int, enabled: bool) -> None:
+        if self.exclusion_thread is not None:
+            self.index_page.task_label.setText("搜索索引正在后台更新，请稍候")
+            return
         self.db.set_root_enabled(root_id, enabled)
         self.refresh_all()
 
     def start_scan(self, *, performance_mode: bool = False) -> None:
+        if self.exclusion_thread is not None:
+            self.index_page.task_label.setText("搜索索引正在后台更新，请稍候")
+            self.top_bar.set_index_status("正在更新搜索索引...", is_running=True)
+            return
         if self.scan_thread is not None:
             self.switch_page("index")
             return
@@ -326,7 +748,36 @@ class MainWindow(QMainWindow):
             is_running=True,
         )
         self.index_page.set_task_running(True)
+        self.failed_page.set_index_running(True)
         self.scan_thread.start()
+
+    def confirm_performance_scan(self) -> None:
+        answer = QMessageBox.question(
+            self,
+            "启用性能模式",
+            performance_mode_notice() + "\n\n确认开始性能模式索引？",
+            QMessageBox.StandardButton.Yes
+            | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            self.start_scan(performance_mode=True)
+
+    def request_scan_mode_switch(self, performance_mode: bool) -> None:
+        if self.scan_worker is None:
+            return
+        if performance_mode:
+            answer = QMessageBox.question(
+                self,
+                "切换到性能模式",
+                performance_mode_notice() + "\n\n确认切换？",
+                QMessageBox.StandardButton.Yes
+                | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        self.scan_worker.switch_mode(performance_mode)
 
     def cancel_scan(self, *, force: bool = False) -> None:
         if self.scan_worker is not None:
@@ -341,6 +792,22 @@ class MainWindow(QMainWindow):
                 self.index_page.set_performance_profile(profile)
                 self.top_bar.set_index_status("性能模式正在索引...", is_running=True)
             return
+        pause_state = str(payload.get("pause_state") or "")
+        if pause_state:
+            if "performance_mode" in payload:
+                self.index_page.set_performance_mode(
+                    bool(payload.get("performance_mode"))
+                )
+            profile = payload.get("performance_profile")
+            if isinstance(profile, dict) and bool(payload.get("performance_mode")):
+                self.index_page.set_performance_profile(profile)
+            phase_label = str(payload.get("phase_label") or "")
+            self.index_page.set_pause_state(pause_state, phase_label)
+            self.top_bar.set_index_status(
+                phase_label or self.index_page.pause_state_text(),
+                is_running=True,
+            )
+            return
         indexed = int(payload.get("indexed") or 0)
         scanned = int(payload.get("scanned") or 0)
         total = int(payload.get("total_files") or scanned)
@@ -349,11 +816,13 @@ class MainWindow(QMainWindow):
         current = str(payload.get("current_file") or "")
         stage = str(payload.get("stage") or "indexing")
         phase_label = str(payload.get("phase_label") or "正在索引")
-        eta_lower = int(payload.get("eta_lower_seconds") or 0)
-        eta_upper = int(payload.get("eta_upper_seconds") or 0)
-        eta_text = format_remaining_range(eta_lower, eta_upper)
+        eta_seconds = int(payload.get("eta_seconds") or 0)
+        eta_ready = bool(payload.get("eta_ready"))
+        eta_text = format_remaining_single(eta_seconds, eta_ready)
         active_elapsed = int(payload.get("active_elapsed_seconds") or 0)
-        active_queue = str(payload.get("queue") or "")
+        active_queue = str(
+            payload.get("queue") or payload.get("active_queue") or ""
+        )
         active_count = int(payload.get("active_file_count") or 0)
         active_phase = str(payload.get("active_phase") or "")
         active_completed = int(payload.get("active_completed_units") or 0)
@@ -361,6 +830,17 @@ class MainWindow(QMainWindow):
         no_progress = int(payload.get("no_progress_seconds") or 0)
         retry_count = int(payload.get("retry_count") or 0)
         excluded_video = int(payload.get("excluded_video") or 0)
+        diagnostic_state = str(payload.get("diagnostic_state") or "")
+        diagnostic_reason = str(payload.get("diagnostic_reason") or "")
+        representative_is_slowest = bool(
+            payload.get("representative_is_slowest")
+        )
+        other_active_lane_count = int(
+            payload.get("other_active_lane_count") or 0
+        )
+        other_recent_progress_seconds = int(
+            payload.get("other_recent_progress_seconds") or 0
+        )
         text = f"{phase_label} {completed:,} / {max(total, completed):,}"
         self.top_bar.set_index_status(text, is_running=True)
         self.index_page.set_scan_progress(
@@ -379,6 +859,11 @@ class MainWindow(QMainWindow):
             no_progress_seconds=no_progress,
             retry_count=retry_count,
             excluded_video=excluded_video,
+            diagnostic_state=diagnostic_state,
+            diagnostic_reason=diagnostic_reason,
+            representative_is_slowest=representative_is_slowest,
+            other_active_lane_count=other_active_lane_count,
+            other_recent_progress_seconds=other_recent_progress_seconds,
             indeterminate=stage in {"discovering", "planning", "fts"},
         )
 
@@ -391,6 +876,9 @@ class MainWindow(QMainWindow):
         summary_text, summary_tooltip = format_index_run_summary(payload)
         if summary_text:
             self.index_page.show_run_summary(summary_text, summary_tooltip)
+        if self.force_complete_after_retry:
+            self.force_complete_after_retry = False
+            self.pending_force_complete_confirmation = True
 
     def on_scan_failed(self, message: str) -> None:
         self.index_page.set_task_running(False)
@@ -398,15 +886,26 @@ class MainWindow(QMainWindow):
             return
         self.top_bar.set_index_status("索引任务失败", is_error=True)
         QMessageBox.critical(self, "索引任务失败", message)
+        if self.force_complete_after_retry:
+            self.force_complete_after_retry = False
+            self.pending_force_complete_confirmation = True
 
     def cleanup_scan_thread(self) -> None:
         self.scan_thread = None
         self.scan_worker = None
         self.index_page.set_task_running(False)
+        self.failed_page.set_index_running(False)
+        self.refresh_failed_page()
         self.update_index_status()
+        if self.pending_force_complete_confirmation and not self.closing:
+            self.pending_force_complete_confirmation = False
+            QTimer.singleShot(0, self.confirm_force_complete_remaining)
         self._finish_close_if_idle()
 
     def request_search(self) -> None:
+        if self.exclusion_thread is not None:
+            self.search_page.set_status("索引正在更新，请稍候")
+            return
         if not self.search_page.index_ready():
             self.search_page.show_index_not_ready_state()
             return
@@ -447,6 +946,8 @@ class MainWindow(QMainWindow):
         self.search_worker.moveToThread(self.search_thread)
         self.search_thread.started.connect(self.search_worker.run)
         self.search_worker.finished.connect(self.on_search_finished)
+        self.search_worker.partial.connect(self.on_search_partial)
+        self.search_worker.progress.connect(self.on_search_progress)
         self.search_worker.cancelled.connect(self.on_search_cancelled)
         self.search_worker.failed.connect(self.on_search_failed)
         self.search_worker.finished.connect(self.search_thread.quit)
@@ -469,10 +970,20 @@ class MainWindow(QMainWindow):
         if page.total_confirmed <= 0:
             self.hide_preview()
 
+    def on_search_partial(self, page: object) -> None:
+        if self.search_thread is None or page is None:
+            return
+        self.search_page.set_partial_results(page)
+
+    def on_search_progress(self, payload: object) -> None:
+        self.search_page.set_search_progress(payload)
+
     def on_search_cancelled(self) -> None:
         self.search_page.clear_timing()
         if self.pending_search:
             self.search_page.set_status("正在准备新搜索...")
+        elif self.search_page.partial_results_visible:
+            self.search_page.set_status("搜索已停止，当前显示部分结果")
         else:
             self.search_page.set_status("搜索已取消")
             self.search_page.show_interrupted_state("搜索已取消")
@@ -531,6 +1042,9 @@ class MainWindow(QMainWindow):
             self.search_page.set_status(f"打开文件夹失败：{exc}")
 
     def reindex_file(self, path: str) -> None:
+        if self.exclusion_thread is not None:
+            self.search_page.set_status("索引正在更新，请稍候")
+            return
         self.db.invalidate_file(path)
         self.start_scan()
 
@@ -548,16 +1062,38 @@ class MainWindow(QMainWindow):
             return
         with Path(target).open("w", newline="", encoding="utf-8-sig") as handle:
             writer = csv.writer(handle)
-            writer.writerow(["路径", "扩展名", "状态", "错误码", "原因", "解析器", "时间"])
+            writer.writerow(
+                [
+                    "路径",
+                    "扩展名",
+                    "范围状态",
+                    "状态",
+                    "错误码",
+                    "任务阶段",
+                    "安全游标",
+                    "原因",
+                    "恢复建议",
+                    "解析器",
+                    "成员级诊断(JSON)",
+                    "人工排除原因",
+                    "时间",
+                ]
+            )
             for row in rows:
                 writer.writerow(
                     [
                         str(row["path"]),
                         str(row["extension"] or ""),
+                        str(row.get("scope_category") or ""),
                         str(row["parse_status"]),
                         str(row["parse_error_code"] or ""),
+                        str(row["progress_phase"] or ""),
+                        str(row["progress_cursor"] or ""),
                         str(row["parse_error_message"] or ""),
+                        str(row["recovery_advice"] or ""),
                         str(row["parser_name"] or ""),
+                        str(row.get("parse_diagnostics_json") or ""),
+                        str(row.get("reason") or ""),
                         str(row["indexed_at"] or ""),
                     ]
                 )
@@ -572,7 +1108,11 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event: QCloseEvent) -> None:
         self.file_monitor.stop()
-        if self.scan_thread is None and self.search_thread is None:
+        if (
+            self.scan_thread is None
+            and self.search_thread is None
+            and self.exclusion_thread is None
+        ):
             event.accept()
             return
         if self.closing:
@@ -583,12 +1123,18 @@ class MainWindow(QMainWindow):
         self.pending_monitor_scan = False
         self.cancel_scan(force=True)
         self.cancel_search()
+        self.cancel_scope_exclusion()
         self.hide()
         self.force_close_timer.start()
         event.ignore()
 
     def _finish_close_if_idle(self) -> None:
-        if self.closing and self.scan_thread is None and self.search_thread is None:
+        if (
+            self.closing
+            and self.scan_thread is None
+            and self.search_thread is None
+            and self.exclusion_thread is None
+        ):
             self._force_exit()
 
     def _force_exit(self) -> None:
@@ -701,6 +1247,7 @@ class SearchPage(QWidget):
         self.debounce.timeout.connect(self.search_requested.emit)
         self.auto_search_enabled = False
         self._history: list[str] = []
+        self.partial_results_visible = False
         self._estimator = SearchTimeEstimator()
         self._active_estimate_context: SearchEstimateContext | None = None
         self._build()
@@ -756,6 +1303,12 @@ class SearchPage(QWidget):
         status_row.addWidget(self.status_label, 1)
         status_row.addWidget(self.timing_label)
         layout.addLayout(status_row)
+
+        self.search_progress = QProgressBar()
+        self.search_progress.setTextVisible(False)
+        self.search_progress.setFixedHeight(4)
+        self.search_progress.setVisible(False)
+        layout.addWidget(self.search_progress)
 
         self.content_stack = QStackedWidget()
         self.empty_state = EmptyState()
@@ -920,6 +1473,9 @@ class SearchPage(QWidget):
     def set_running(self, running: bool) -> None:
         self.search_box.set_running(running)
         if running:
+            self.partial_results_visible = False
+            self.search_progress.setVisible(True)
+            self.search_progress.setRange(0, 0)
             self._active_estimate_context = self._estimate_context()
             estimate = self._estimator.estimate(self._active_estimate_context)
             self.set_status("正在检索索引...")
@@ -932,8 +1488,51 @@ class SearchPage(QWidget):
                     "",
                     None,
                 )
+        else:
+            self.search_progress.setVisible(False)
+            self.search_progress.setRange(0, 1)
+            self.search_progress.setValue(0)
+
+    def set_search_progress(self, payload: object) -> None:
+        if not isinstance(payload, dict):
+            return
+        phase = str(payload.get("phase_label") or "正在搜索...")
+        checked = int(payload.get("checked_candidates") or 0)
+        total = int(payload.get("total_candidates") or 0)
+        confirmed = int(payload.get("confirmed_files") or 0)
+        elapsed_ms = int(payload.get("elapsed_ms") or 0)
+        progress_kind = str(payload.get("progress_kind") or "busy")
+        if progress_kind == "determinate" and total > 0:
+            self.search_progress.setRange(0, total)
+            self.search_progress.setValue(min(checked, total))
+            detail = f"{checked:,}/{total:,} · 已找到 {confirmed:,} 个文件"
+        else:
+            self.search_progress.setRange(0, 0)
+            detail = f"候选 {checked:,} · 已找到 {confirmed:,} 个文件" if checked else ""
+        if elapsed_ms >= 2_000:
+            slow_reason = str(payload.get("slow_reason") or "")
+            suffix = f" · {detail}" if detail else ""
+            if slow_reason:
+                suffix += f" · {slow_reason}"
+            suffix += f" · 已用时 {format_elapsed(elapsed_ms)}"
+            self.set_status(phase + suffix)
+        else:
+            self.set_status(phase + (f" · {detail}" if detail else ""))
+
+    def set_partial_results(self, page: object) -> None:
+        if page is None or int(page.total_confirmed) <= 0:
+            return
+        self.partial_results_visible = True
+        self.page_label.setText(f"第 {page.page} 页")
+        self.content_stack.setCurrentWidget(self.result_view)
+        self.result_view.set_results(page.results, self.text())
+        self.pager.setVisible(False)
+        self.set_status(
+            f"已先找到 {page.total_confirmed} 个文件名/路径结果，正在继续搜索正文..."
+        )
 
     def set_results(self, page: object) -> None:
+        self.partial_results_visible = False
         if self._active_estimate_context is not None:
             self._estimator.observe(self._active_estimate_context, int(page.elapsed_ms))
             self._active_estimate_context = None
@@ -1013,11 +1612,13 @@ class SearchPage(QWidget):
             complete = self._stats.get("complete_files", 0)
             eligible = self._stats.get("eligible_files", 0)
             video = self._stats.get("video_excluded", 0)
+            excluded = self._stats.get("manual_excluded_files", 0)
             video_text = f"，另排除视频 {video:,} 个" if video else ""
+            excluded_text = f"，已人工排除 {excluded:,} 个" if excluded else ""
             self.empty_state.set_content(
                 "输入关键词开始搜索",
                 "支持搜索 PDF、Word、Excel、PowerPoint、文本、日志和图片中的文字\n"
-                f"完整索引 {complete:,}/{eligible:,}{video_text}",
+                f"当前范围完成 {complete:,}/{eligible:,}{excluded_text}{video_text}",
                 "",
                 None,
             )
@@ -1030,23 +1631,49 @@ class SearchPage(QWidget):
         if not self._has_roots:
             self.show_idle_state()
             return
+        if bool(self._readiness.get("index_update_running")):
+            self.empty_state.set_content(
+                "正在更新搜索索引...",
+                "人工排除任务正在后台处理；完成或回滚后会自动恢复搜索。",
+                "",
+                None,
+            )
+            self.content_stack.setCurrentWidget(self.empty_state)
+            self.pager.setVisible(False)
+            self.set_status("索引正在更新，请稍候")
+            self.clear_timing()
+            return
         complete = int(self._readiness.get("complete_files") or 0)
         eligible = int(self._readiness.get("eligible_files") or 0)
         blocking = int(self._readiness.get("blocking_files") or 0)
         active = int(self._readiness.get("active_runs") or 0)
         unready_roots = int(self._readiness.get("unready_roots") or 0)
+        excluded = int(self._readiness.get("manual_excluded_files") or 0)
+        excluded_text = f"，已人工排除 {excluded:,} 个" if excluded else ""
         if active:
             subtitle = (
-                f"正在建立完整索引：已完成 {complete:,}/{eligible:,}。"
-                "全部可解析文件成功后会自动开放搜索。"
+                f"正在建立当前范围索引：已完成 {complete:,}/{eligible:,}{excluded_text}。"
+                "范围内文件达到允许终态后会自动开放搜索。"
             )
         elif blocking:
             subtitle = (
-                f"已完整完成 {complete:,}/{eligible:,}，仍有 {blocking:,} 个文件未成功。"
+                f"当前范围已完成 {complete:,}/{eligible:,}{excluded_text}，仍有 {blocking:,} 个阻断项。"
                 "请在“未成功索引”中查看原因并重新更新。"
             )
         elif unready_roots:
-            subtitle = "搜索范围尚未完成首次索引，请先在“索引管理”中更新全部。"
+            unfinished = int(self._readiness.get("unfinished_tasks") or 0)
+            unpublished = int(self._readiness.get("unpublished_candidates") or 0)
+            if not blocking and (unfinished or unpublished or bool(self._readiness.get("content_fts_dirty"))):
+                details = []
+                if unfinished:
+                    details.append(f"残留解析任务 {unfinished} 个")
+                if unpublished:
+                    details.append(f"未发布全文索引 {unpublished} 个")
+                if bool(self._readiness.get("content_fts_dirty")):
+                    details.append("全文索引待发布")
+                subtitle = "文件已经全部处理，但" + "、".join(details) + "。请在“未成功索引”中执行强力完成。"
+            else:
+                subtitle = "搜索范围尚未完成首次索引，请先在“索引管理”中更新全部。"
         else:
             subtitle = "完整索引尚未就绪，请先更新全部。"
         self.empty_state.set_content("完整索引尚未完成", subtitle, "", None)
@@ -1201,6 +1828,7 @@ class IndexPage(QWidget):
     performance_scan_requested = Signal()
     pause_requested = Signal()
     resume_requested = Signal()
+    mode_switch_requested = Signal(bool)
     cancel_requested = Signal()
     toggle_root_requested = Signal(int, bool)
     remove_root_requested = Signal(int)
@@ -1211,6 +1839,9 @@ class IndexPage(QWidget):
         super().__init__()
         self.setObjectName("Page")
         self.running = False
+        self.database_update_running = False
+        self.readiness: dict[str, object] = {"ready": False}
+        self.pause_state = "idle"
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 20, 24, 20)
         layout.setSpacing(14)
@@ -1227,30 +1858,60 @@ class IndexPage(QWidget):
 
         self.task_strip = QFrame()
         self.task_strip.setObjectName("TaskStrip")
-        task_layout = QHBoxLayout(self.task_strip)
+        task_layout = QVBoxLayout(self.task_strip)
         task_layout.setContentsMargins(14, 10, 14, 10)
+        task_layout.setSpacing(7)
+        task_overview = QHBoxLayout()
+        task_overview.setSpacing(8)
         self.task_label = QLabel("索引已就绪")
         self.task_label.setObjectName("MutedText")
+        self.task_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.task_eta = QLabel("")
         self.task_eta.setObjectName("IndexEta")
+        self.task_eta.setMinimumWidth(140)
+        self.task_eta.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.task_progress = QProgressBar()
         self.task_progress.setTextVisible(False)
-        self.task_progress.setFixedWidth(180)
+        self.task_progress.setFixedWidth(160)
         self.start_button = QPushButton("更新全部")
         self.performance_button = QPushButton("性能模式更新")
         self.pause_button = QPushButton("暂停")
         self.cancel_button = QPushButton("取消")
-        self.start_button.clicked.connect(self.scan_requested.emit)
-        self.performance_button.clicked.connect(self.performance_scan_requested.emit)
+        self.start_button.clicked.connect(self._normal_mode_clicked)
+        self.performance_button.clicked.connect(self._performance_mode_clicked)
         self.pause_button.clicked.connect(self._toggle_pause)
         self.cancel_button.clicked.connect(self.cancel_requested.emit)
-        task_layout.addWidget(self.task_label, 1)
-        task_layout.addWidget(self.task_eta)
-        task_layout.addWidget(self.task_progress)
-        task_layout.addWidget(self.start_button)
-        task_layout.addWidget(self.performance_button)
-        task_layout.addWidget(self.pause_button)
-        task_layout.addWidget(self.cancel_button)
+        task_overview.addWidget(self.task_label, 1)
+        task_overview.addWidget(self.task_eta)
+        task_overview.addWidget(self.task_progress)
+        task_overview.addWidget(self.start_button)
+        task_overview.addWidget(self.performance_button)
+        task_overview.addWidget(self.pause_button)
+        task_overview.addWidget(self.cancel_button)
+        task_layout.addLayout(task_overview)
+
+        self.task_detail_row = QWidget()
+        detail_layout = QHBoxLayout(self.task_detail_row)
+        detail_layout.setContentsMargins(0, 0, 0, 0)
+        detail_layout.setSpacing(12)
+        self.task_file = QLabel("")
+        self.task_file.setObjectName("MutedText")
+        self.task_file.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self.task_file.setMinimumWidth(80)
+        self.task_runtime = QLabel("")
+        self.task_runtime.setObjectName("MutedText")
+        self.task_runtime.setMinimumWidth(118)
+        self.task_phase = QLabel("")
+        self.task_phase.setObjectName("MutedText")
+        self.task_phase.setMinimumWidth(96)
+        self.task_units = QLabel("")
+        self.task_units.setObjectName("MutedText")
+        self.task_units.setMinimumWidth(84)
+        detail_layout.addWidget(self.task_file, 1)
+        detail_layout.addWidget(self.task_runtime)
+        detail_layout.addWidget(self.task_phase)
+        detail_layout.addWidget(self.task_units)
+        task_layout.addWidget(self.task_detail_row)
         layout.addWidget(self.task_strip)
 
         self.scroll = QScrollArea()
@@ -1265,23 +1926,68 @@ class IndexPage(QWidget):
         self.last_run_summary = ""
         self.set_task_running(False)
 
+    def set_database_update_running(self, running: bool) -> None:
+        self.database_update_running = bool(running)
+        self.add_button.setEnabled(not running)
+        self.scroll.setEnabled(not running)
+        self.start_button.setEnabled(not running)
+        self.performance_button.setEnabled(not running)
+        if running:
+            self.task_progress.setVisible(True)
+            self.task_progress.setRange(0, 0)
+            self.task_detail_row.setVisible(False)
+            self.pause_button.setVisible(False)
+            self.cancel_button.setVisible(False)
+            self.task_label.setText("正在更新搜索索引...")
+            self.task_eta.setText("后台事务进行中")
+        else:
+            self.set_task_running(False)
+
+    def set_database_update_progress(self, phase_label: str) -> None:
+        if not self.database_update_running:
+            return
+        self.task_label.setText(phase_label or "正在更新搜索索引...")
+
+    def set_readiness(self, readiness: dict[str, object]) -> None:
+        self.readiness = dict(readiness)
+        if not self.running and not self.database_update_running:
+            self.task_label.setText(self._idle_status_text())
+
+    def _idle_status_text(self) -> str:
+        if bool(self.readiness.get("ready")):
+            return "索引已就绪"
+        blockers = int(self.readiness.get("blocking_files") or 0)
+        unfinished = int(self.readiness.get("unfinished_tasks") or 0)
+        unpublished = int(self.readiness.get("unpublished_candidates") or 0)
+        if blockers:
+            return f"索引未完成 · {blockers} 个阻断项"
+        details = []
+        if unfinished:
+            details.append(f"残留任务 {unfinished}")
+        if unpublished:
+            details.append(f"未发布索引 {unpublished}")
+        if bool(self.readiness.get("content_fts_dirty")):
+            details.append("全文索引待发布")
+        return "索引状态待修复" + (" · " + " · ".join(details) if details else "")
+
     def set_performance_mode(self, enabled: bool) -> None:
         self.performance_mode = enabled
-        if enabled:
+        if enabled and not self.running:
             self.task_label.setText("正在探测本机硬件并生成性能模式配置...")
-        else:
-            self.task_label.setText("索引已就绪")
+        elif not self.running:
+            self.task_label.setText(self._idle_status_text())
 
     def set_performance_profile(self, profile: dict[str, object]) -> None:
         normal = int(profile.get("normal_workers") or 0)
         office = int(profile.get("office_workers") or 0)
+        pdf = int(profile.get("pdf_workers") or profile.get("pdf_parser_workers") or 0)
         zip_workers = int(profile.get("zip_member_workers") or 0)
         ocr = int(profile.get("ocr_workers") or 0)
         memory = int(profile.get("memory_budget_mb") or 0)
         disk = str(profile.get("disk_class") or "unknown")
         self.task_label.setText(
             "性能模式已应用 · "
-            f"普通 {normal} / Office {office} / ZIP {zip_workers} / OCR {ocr} "
+            f"普通 {normal} / Office {office} / PDF {pdf} / ZIP {zip_workers} / OCR {ocr} "
             f"· 内存 {memory} MB · {disk}"
         )
         self.task_label.setToolTip(str(profile))
@@ -1309,22 +2015,37 @@ class IndexPage(QWidget):
         if running:
             self.last_run_summary = ""
         self.task_progress.setVisible(running)
+        self.task_detail_row.setVisible(running)
         self.pause_button.setVisible(running)
         self.cancel_button.setVisible(running)
-        self.start_button.setEnabled(not running)
-        self.performance_button.setEnabled(not running)
+        mode_enabled = not running or self.pause_state == "paused"
+        self.start_button.setEnabled(mode_enabled and not self.database_update_running)
+        self.performance_button.setEnabled(
+            mode_enabled and not self.database_update_running
+        )
         if not running:
             self.task_progress.setValue(0)
-            self.task_label.setText("索引已就绪")
+            self.task_label.setText(self._idle_status_text())
             self.task_eta.clear()
+            self.task_file.clear()
+            self.task_runtime.clear()
+            self.task_phase.clear()
+            self.task_units.clear()
             if self.last_run_summary:
                 self.task_label.setText(self.last_run_summary)
             self.pause_button.setText("暂停")
             self.paused = False
+            self.pause_state = "idle"
             self.performance_mode = False
+            self.start_button.setText("更新全部")
+            self.performance_button.setText("性能模式更新")
         elif not was_running:
             self.paused = False
+            self.pause_state = "running"
             self.pause_button.setText("暂停")
+            self.pause_button.setEnabled(True)
+            self.start_button.setText("普通模式")
+            self.performance_button.setText("性能模式")
 
     def show_run_summary(self, text: str, tooltip: str = "") -> None:
         self.last_run_summary = text
@@ -1334,12 +2055,56 @@ class IndexPage(QWidget):
     def _toggle_pause(self) -> None:
         if not self.running:
             return
-        self.paused = not getattr(self, "paused", False)
-        self.pause_button.setText("继续" if self.paused else "暂停")
-        if self.paused:
-            self.pause_requested.emit()
-        else:
+        if self.pause_state == "paused":
+            self.set_pause_state("resuming", "正在从安全检查点继续")
             self.resume_requested.emit()
+        elif self.pause_state == "running":
+            self.set_pause_state("pausing", "正在暂停，等待活动任务到达安全检查点")
+            self.pause_requested.emit()
+
+    def _normal_mode_clicked(self) -> None:
+        if self.running:
+            if self.pause_state == "paused":
+                self.mode_switch_requested.emit(False)
+            return
+        self.scan_requested.emit()
+
+    def _performance_mode_clicked(self) -> None:
+        if self.running:
+            if self.pause_state == "paused":
+                self.mode_switch_requested.emit(True)
+            return
+        self.performance_scan_requested.emit()
+
+    def set_pause_state(self, state: str, label: str = "") -> None:
+        self.pause_state = state
+        self.paused = state == "paused"
+        if state == "pausing":
+            self.pause_button.setText("正在暂停")
+            self.pause_button.setEnabled(False)
+        elif state == "paused":
+            self.pause_button.setText("继续")
+            self.pause_button.setEnabled(True)
+        elif state == "resuming":
+            self.pause_button.setText("正在继续")
+            self.pause_button.setEnabled(False)
+        elif state == "running":
+            self.pause_button.setText("暂停")
+            self.pause_button.setEnabled(True)
+        mode_switch_enabled = self.running and state == "paused"
+        self.start_button.setEnabled(mode_switch_enabled or not self.running)
+        self.performance_button.setEnabled(mode_switch_enabled or not self.running)
+        if label:
+            self.task_label.setText(label)
+        if state == "paused":
+            self.task_eta.setText("已暂停 · 继续后重新估算")
+
+    def pause_state_text(self) -> str:
+        return {
+            "pausing": "正在暂停",
+            "paused": "已暂停",
+            "resuming": "正在继续",
+        }.get(self.pause_state, "正在索引")
 
     def set_scan_progress(
         self,
@@ -1359,13 +2124,23 @@ class IndexPage(QWidget):
         no_progress_seconds: int = 0,
         retry_count: int = 0,
         excluded_video: int = 0,
+        diagnostic_state: str = "",
+        diagnostic_reason: str = "",
+        representative_is_slowest: bool = False,
+        other_active_lane_count: int = 0,
+        other_recent_progress_seconds: int = 0,
         indeterminate: bool = False,
     ) -> None:
         self.set_task_running(True)
+        if self.pause_state not in {"pausing", "paused"}:
+            self.set_pause_state("running")
         current_name = Path(current).name if current else ""
-        current_display = compact_text(current_name, 52)
-        suffix = f" · {current_display}" if current_display else ""
-        self.task_label.setToolTip(current)
+        current_display = compact_text(current_name, 44)
+        self.task_file.setText(current_display)
+        self.task_file.setToolTip(current)
+        runtime_text = ""
+        phase_text = ""
+        units_text = ""
         if active_elapsed_seconds > 0:
             queue_labels = {
                 "normal": "普通",
@@ -1373,30 +2148,52 @@ class IndexPage(QWidget):
                 "zip": "ZIP",
                 "office_process": "Office",
                 "legacy_office": "旧版 Office",
+                "legacy_word": "旧版 Word",
+                "legacy_excel": "旧版 Excel",
+                "legacy_powerpoint": "旧版 PowerPoint",
             }
             queue_label = queue_labels.get(active_queue, active_queue)
-            suffix += f"（{queue_label} 已运行 {format_active_duration(active_elapsed_seconds)}"
+            if "ocr" in active_phase.lower():
+                queue_label = "OCR"
+            runtime_text = (
+                f"{queue_label} 已运行 {format_active_duration(active_elapsed_seconds)}"
+            )
             if active_file_count > 1:
-                suffix += f"，活动任务 {active_file_count} 个"
-            suffix += "）"
-        if active_phase:
-            phase_display = active_phase.replace("_", " ")
+                runtime_text += f" · 活动 {active_file_count}"
+        active_phase_text = format_active_phase(active_phase) if active_phase else ""
+        diagnostic_text = scheduler_diagnostic_label(diagnostic_state)
+        if diagnostic_text:
+            phase_text = diagnostic_text
+        elif active_phase_text:
+            phase_text = active_phase_text
             if active_total_units > 0:
-                suffix += (
-                    f" · {phase_display} "
-                    f"{active_completed_units:,}/{active_total_units:,}"
-                )
-            else:
-                suffix += f" · {phase_display}"
+                units_text = f"{active_completed_units:,}/{active_total_units:,}"
         if no_progress_seconds > 0:
-            suffix += f" · 距上次进展 {format_active_duration(no_progress_seconds)}"
+            phase_text += (
+                f" · 距上次进展 {format_active_duration(no_progress_seconds)}"
+            )
         if retry_count > 0:
-            suffix += f" · 第 {retry_count} 次重试"
-        if excluded_video > 0:
-            suffix += f" · 排除视频 {excluded_video}"
+            phase_text += f" · 重试 {retry_count}"
+        self.task_runtime.setText(runtime_text)
+        phase_tooltip_parts = [part for part in (phase_text, active_phase_text) if part]
+        if diagnostic_reason:
+            phase_tooltip_parts.append(diagnostic_reason)
+        if representative_is_slowest and other_active_lane_count > 0:
+            parallel_text = (
+                "当前显示最慢任务；"
+                f"另有 {other_active_lane_count} 个车道仍在处理，"
+                f"最近有效进展 {max(0, other_recent_progress_seconds)} 秒前"
+            )
+            phase_tooltip_parts.append(parallel_text)
+            phase_text += f" · 另 {other_active_lane_count} 车道有进展"
+        self.task_phase.setText(phase_text)
+        self.task_phase.setToolTip("；".join(dict.fromkeys(phase_tooltip_parts)))
+        self.task_units.setText(units_text)
+        mode_label = "性能模式" if getattr(self, "performance_mode", False) else "普通模式"
+        video_suffix = f"·排除视频 {excluded_video}" if excluded_video else ""
         self.task_label.setText(
-            f"{'性能模式 · ' if getattr(self, 'performance_mode', False) else ''}"
-            f"{phase_label} {completed:,} / {max(total, completed):,} · 失败 {failed}{suffix}"
+            f"{mode_label}·总体 {completed:,}/{max(total, completed):,}"
+            f"·失败 {failed}{video_suffix}"
         )
         self.task_eta.setText(eta_text)
         if indeterminate:
@@ -1475,71 +2272,293 @@ class FailedPage(QWidget):
     refresh_requested = Signal()
     export_requested = Signal(list)
     open_folder_requested = Signal(str)
+    exclude_requested = Signal(list)
+    restore_requested = Signal(list)
+    force_complete_requested = Signal()
+    cancel_exclusion_requested = Signal()
 
     def __init__(self) -> None:
         super().__init__()
         self.setObjectName("Page")
-        self.rows: list[object] = []
+        self.rows: list[dict[str, object]] = []
+        self.rows_by_scope: dict[str, list[dict[str, object]]] = {
+            "blocking": [],
+            "excluded": [],
+            "metadata": [],
+        }
+        self.index_running = False
+        self.exclusion_running = False
+        self.readiness: dict[str, object] = {"ready": True, "repairable": False}
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 20, 24, 20)
         layout.setSpacing(14)
         self.subtitle = QLabel("0 个文件需要处理")
         self.subtitle.setObjectName("ContentHeading")
 
+        self.scope_tabs = QTabBar()
+        self.scope_tabs.setObjectName("ScopeTabs")
+        self.scope_tabs.addTab("阻断项 0")
+        self.scope_tabs.addTab("已人工排除 0")
+        self.scope_tabs.addTab("仅元数据完成 0")
+        layout.addWidget(self.scope_tabs)
+
         filters = QHBoxLayout()
         self.status_filter = chip_combo()
         self.extension_filter = chip_combo()
+        self.select_all = QCheckBox("全选当前筛选")
         self.retry_button = QPushButton("重新尝试")
+        self.exclude_button = QPushButton("从当前索引范围排除")
+        self.restore_button = QPushButton("恢复纳入并重试")
+        self.force_complete_button = QPushButton("强力完成本次索引")
         self.export_button = QPushButton("导出明细")
         self.open_log_button = QPushButton("打开日志目录")
+        self.exclusion_progress = QProgressBar()
+        self.exclusion_progress.setTextVisible(False)
+        self.exclusion_progress.setFixedWidth(150)
+        self.exclusion_progress.setVisible(False)
+        self.cancel_exclusion_button = QPushButton("取消索引更新")
+        self.cancel_exclusion_button.setVisible(False)
         self.retry_button.setObjectName("PrimaryButton")
+        self.force_complete_button.setObjectName("PrimaryButton")
         self.retry_button.clicked.connect(self.retry_requested.emit)
+        self.exclude_button.clicked.connect(self._emit_exclude)
+        self.restore_button.clicked.connect(self._emit_restore)
+        self.force_complete_button.clicked.connect(
+            self.force_complete_requested.emit
+        )
+        self.cancel_exclusion_button.clicked.connect(
+            self.cancel_exclusion_requested.emit
+        )
         self.export_button.clicked.connect(lambda: self.export_requested.emit(self.visible_rows()))
         self.open_log_button.clicked.connect(self.open_log_dir)
         filters.addWidget(self.subtitle)
         filters.addSpacing(12)
         filters.addWidget(self.status_filter)
         filters.addWidget(self.extension_filter)
+        filters.addWidget(self.select_all)
         filters.addStretch(1)
-        filters.addWidget(self.retry_button)
-        filters.addWidget(self.export_button)
-        filters.addWidget(self.open_log_button)
         layout.addLayout(filters)
 
-        self.table = QTableWidget(0, 6)
+        actions = QHBoxLayout()
+        self.status = QLabel("")
+        self.status.setObjectName("InlineStatus")
+        actions.addWidget(self.status, 1)
+        actions.addWidget(self.exclusion_progress)
+        actions.addWidget(self.cancel_exclusion_button)
+        actions.addWidget(self.retry_button)
+        actions.addWidget(self.exclude_button)
+        actions.addWidget(self.restore_button)
+        actions.addWidget(self.force_complete_button)
+        actions.addWidget(self.export_button)
+        actions.addWidget(self.open_log_button)
+        layout.addLayout(actions)
+
+        self.table = QTableWidget(0, 11)
         self.table.setObjectName("FailedTable")
-        self.table.setHorizontalHeaderLabels(["文件名", "路径", "类型", "原因", "最后尝试", "操作"])
+        self.table.setHorizontalHeaderLabels(
+            [
+                "选择",
+                "文件名",
+                "路径",
+                "类型",
+                "状态",
+                "任务阶段",
+                "安全游标",
+                "原因",
+                "恢复建议",
+                "最后尝试",
+                "操作",
+            ]
+        )
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        self.table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(10, QHeaderView.ResizeMode.ResizeToContents)
         self.table.verticalHeader().setVisible(False)
         self.table.setAlternatingRowColors(False)
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         layout.addWidget(self.table, 1)
-        self.status = QLabel("")
-        self.status.setObjectName("InlineStatus")
-        layout.addWidget(self.status)
+        self.scope_tabs.currentChanged.connect(self._scope_changed)
         self.status_filter.currentIndexChanged.connect(self.apply_filters)
         self.extension_filter.currentIndexChanged.connect(self.apply_filters)
+        self.select_all.toggled.connect(self._select_visible)
 
-    def set_rows(self, rows: list[object]) -> None:
-        self.rows = rows
-        self.subtitle.setText(f"{len(rows)} 个文件需要处理")
+    def set_rows(
+        self,
+        blocking: list[object],
+        excluded: list[object] | None = None,
+        metadata: list[object] | None = None,
+    ) -> None:
+        self.rows_by_scope = {
+            "blocking": [self._normalize_row(row, "blocking") for row in blocking],
+            "excluded": [self._normalize_row(row, "excluded") for row in (excluded or [])],
+            "metadata": [self._normalize_row(row, "metadata") for row in (metadata or [])],
+        }
+        self.scope_tabs.setTabText(0, f"阻断项 {len(self.rows_by_scope['blocking'])}")
+        self.scope_tabs.setTabText(1, f"已人工排除 {len(self.rows_by_scope['excluded'])}")
+        self.scope_tabs.setTabText(2, f"仅元数据完成 {len(self.rows_by_scope['metadata'])}")
+        self._scope_changed(self.scope_tabs.currentIndex())
+
+    @staticmethod
+    def _normalize_row(row: object, scope: str) -> dict[str, object]:
+        data = dict(row)
+        if scope == "excluded":
+            data["exclusion_id"] = data.get("id")
+            data["id"] = data.get("file_id")
+            data["parse_status"] = data.get("current_parse_status") or data.get("parse_status")
+            data["parse_error_code"] = data.get("current_error_code") or data.get("parse_error_code")
+            data["parse_error_message"] = data.get("current_error_message") or data.get("parse_error_message")
+            data["indexed_at"] = data.get("created_at") or data.get("indexed_at")
+            data["recovery_advice"] = "恢复纳入后重新解析"
+        data.setdefault("filename", Path(str(data.get("path") or "")).name)
+        for key in (
+            "path",
+            "extension",
+            "parse_status",
+            "parse_error_code",
+            "parse_error_message",
+            "parse_diagnostics_json",
+            "parser_name",
+            "indexed_at",
+            "progress_phase",
+            "progress_cursor",
+            "recovery_advice",
+            "reason",
+        ):
+            data.setdefault(key, "")
+        data["scope_category"] = scope
+        return data
+
+    def _scope_changed(self, index: int) -> None:
+        scope = ("blocking", "excluded", "metadata")[max(0, min(index, 2))]
+        self.rows = self.rows_by_scope[scope]
+        self.subtitle.setText(
+            f"{len(self.rows)} 个阻断项"
+            if scope == "blocking"
+            else f"{len(self.rows)} 个已人工排除文件"
+            if scope == "excluded"
+            else f"{len(self.rows)} 个仅元数据完成文件"
+        )
         self.status_filter.blockSignals(True)
         self.extension_filter.blockSignals(True)
         self.status_filter.clear()
         self.extension_filter.clear()
         self.status_filter.addItem("全部原因", "")
         self.extension_filter.addItem("全部格式", "")
-        for value in sorted({str(row["parse_status"]) for row in rows}):
+        for value in sorted({str(row["parse_status"]) for row in self.rows}):
             self.status_filter.addItem(value, value)
-        for value in sorted({str(row["extension"] or "") for row in rows}):
+        for value in sorted({str(row["extension"] or "") for row in self.rows}):
             self.extension_filter.addItem(value or "<无扩展名>", value)
         self.status_filter.blockSignals(False)
         self.extension_filter.blockSignals(False)
+        selectable = scope in {"blocking", "excluded"}
+        self.select_all.setVisible(selectable)
+        self.select_all.setChecked(False)
+        self.retry_button.setVisible(scope == "blocking")
+        self.exclude_button.setVisible(scope == "blocking")
+        self.restore_button.setVisible(scope == "excluded")
+        self.force_complete_button.setVisible(
+            True
+        )
+        self._update_action_states()
         self.apply_filters()
 
-    def visible_rows(self) -> list[object]:
+    def set_index_running(self, running: bool) -> None:
+        self.index_running = bool(running)
+        self._update_action_states()
+
+    def set_readiness(self, readiness: dict[str, object]) -> None:
+        self.readiness = dict(readiness)
+        self._update_force_complete_state()
+
+    def set_exclusion_running(self, running: bool) -> None:
+        self.exclusion_running = bool(running)
+        self.exclusion_progress.setVisible(running)
+        self.cancel_exclusion_button.setVisible(running)
+        self.table.setEnabled(not running)
+        self._update_action_states()
+        if not running:
+            self.exclusion_progress.setRange(0, 1)
+            self.exclusion_progress.setValue(0)
+
+    def set_exclusion_progress(self, payload: object) -> None:
+        if not isinstance(payload, dict):
+            return
+        phase_label = str(payload.get("phase_label") or "正在后台处理")
+        processed = int(payload.get("processed_files") or 0)
+        total = int(payload.get("total_files") or 0)
+        elapsed = int(payload.get("elapsed_seconds") or 0)
+        large_fts = bool(payload.get("large_fts_operation"))
+        can_cancel = bool(payload.get("can_cancel", True))
+        if total > 0 and str(payload.get("stage") or "") == "recording_exclusions":
+            self.exclusion_progress.setRange(0, max(total, 1))
+            self.exclusion_progress.setValue(min(processed, total))
+            count_text = f" · {processed}/{total} 个文件"
+        else:
+            self.exclusion_progress.setRange(0, 0)
+            count_text = ""
+        fts_text = " · 正在执行大型 FTS 操作" if large_fts else ""
+        elapsed_text = f" · 已用时 {elapsed} 秒" if elapsed > 0 else ""
+        self.set_status(
+            f"正在更新搜索索引... · {phase_label}{count_text}{fts_text}{elapsed_text}"
+        )
+        self.cancel_exclusion_button.setEnabled(can_cancel)
+        self.cancel_exclusion_button.setToolTip(
+            "取消后将回滚本次后台更新"
+            if can_cancel
+            else "正在完成事务安全边界，请稍候"
+        )
+
+    def set_exclusion_cancel_pending(self) -> None:
+        self.cancel_exclusion_button.setEnabled(False)
+        self.set_status("正在取消索引更新并回滚，请稍候...")
+
+    def _update_action_states(self) -> None:
+        busy = self.index_running or self.exclusion_running
+        scope = self.scope_tabs.currentIndex()
+        self.retry_button.setEnabled(scope == 0 and not busy)
+        self.exclude_button.setEnabled(scope == 0 and not busy)
+        self.restore_button.setEnabled(scope == 1 and not busy)
+        self.select_all.setEnabled(not self.exclusion_running)
+        self._update_force_complete_state()
+
+    def _update_force_complete_state(self) -> None:
+        blockers = len(self.rows_by_scope["blocking"])
+        ready = bool(self.readiness.get("ready", blockers == 0))
+        repairable = bool(self.readiness.get("repairable", blockers > 0))
+        reasons = [
+            str(value) for value in self.readiness.get("not_ready_reasons", [])
+        ]
+        enabled = (
+            not ready
+            and repairable
+            and not self.index_running
+            and not self.exclusion_running
+        )
+        self.force_complete_button.setEnabled(enabled)
+        if self.exclusion_running:
+            tooltip = "搜索索引正在后台更新，完成后可使用强力完成"
+        elif self.index_running:
+            tooltip = "索引任务正在运行，结束后可使用强力完成"
+        elif blockers:
+            tooltip = f"仍有 {blockers} 个阻断项，可执行最终重试并排除后开放搜索"
+        elif enabled:
+            labels = {
+                "unfinished_tasks": "残留解析任务",
+                "content_fts_dirty": "全文索引待发布",
+                "full_batch_incomplete": "完整批次未收敛",
+                "unready_root": "搜索范围未就绪",
+                "unpublished_candidate": "候选索引未发布",
+            }
+            detail = "、".join(labels.get(reason, reason) for reason in reasons)
+            tooltip = f"文件已处理完成，可修复：{detail or '索引状态未收敛'}"
+        elif ready:
+            tooltip = "当前索引已经就绪"
+        else:
+            tooltip = "当前状态暂不可修复，请查看未就绪原因"
+        self.force_complete_button.setToolTip(tooltip)
+
+    def visible_rows(self) -> list[dict[str, object]]:
         status = str(self.status_filter.currentData() or "")
         extension = str(self.extension_filter.currentData() or "")
         visible = []
@@ -1554,22 +2573,73 @@ class FailedPage(QWidget):
     def apply_filters(self) -> None:
         rows = self.visible_rows()
         self.table.setRowCount(len(rows))
+        selectable = self.scope_tabs.currentIndex() in {0, 1}
         for row_index, row in enumerate(rows):
             path = str(row["path"])
+            checkbox = QTableWidgetItem("")
+            checkbox.setData(Qt.ItemDataRole.UserRole, int(row["id"]))
+            if selectable:
+                checkbox.setFlags(
+                    Qt.ItemFlag.ItemIsEnabled
+                    | Qt.ItemFlag.ItemIsUserCheckable
+                    | Qt.ItemFlag.ItemIsSelectable
+                )
+                checkbox.setCheckState(Qt.CheckState.Unchecked)
+            else:
+                checkbox.setFlags(Qt.ItemFlag.ItemIsEnabled)
+            self.table.setItem(row_index, 0, checkbox)
+            reason = (
+                str(row.get("reason") or "")
+                if row.get("scope_category") == "excluded"
+                else str(row.get("parse_error_message") or row.get("parse_status") or "")
+            )
             values = [
-                Path(path).name,
+                str(row.get("filename") or Path(path).name),
                 path,
                 str(row["extension"] or ""),
-                str(row["parse_error_message"] or row["parse_status"]),
+                "人工排除" if row.get("scope_category") == "excluded" else str(row["parse_status"] or ""),
+                str(row["progress_phase"] or ""),
+                str(row["progress_cursor"] or ""),
+                reason,
+                str(row["recovery_advice"] or ""),
                 str(row["indexed_at"] or ""),
             ]
-            for col, value in enumerate(values):
+            for col, value in enumerate(values, start=1):
                 item = QTableWidgetItem(value)
                 item.setToolTip(value)
                 self.table.setItem(row_index, col, item)
             action_button = QPushButton("打开文件夹")
             action_button.clicked.connect(lambda _checked=False, value=path: self.open_folder_requested.emit(value))
-            self.table.setCellWidget(row_index, 5, action_button)
+            self.table.setCellWidget(row_index, 10, action_button)
+
+    def selected_file_ids(self) -> list[int]:
+        selected = []
+        for row_index in range(self.table.rowCount()):
+            item = self.table.item(row_index, 0)
+            if item is not None and item.checkState() == Qt.CheckState.Checked:
+                selected.append(int(item.data(Qt.ItemDataRole.UserRole)))
+        return selected
+
+    def _select_visible(self, checked: bool) -> None:
+        state = Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
+        for row_index in range(self.table.rowCount()):
+            item = self.table.item(row_index, 0)
+            if item is not None and item.flags() & Qt.ItemFlag.ItemIsUserCheckable:
+                item.setCheckState(state)
+
+    def _emit_exclude(self) -> None:
+        file_ids = self.selected_file_ids()
+        if not file_ids:
+            self.set_status("请先选择需要排除的阻断项")
+            return
+        self.exclude_requested.emit(file_ids)
+
+    def _emit_restore(self) -> None:
+        file_ids = self.selected_file_ids()
+        if not file_ids:
+            self.set_status("请先选择需要恢复纳入的文件")
+            return
+        self.restore_requested.emit(file_ids)
 
     def set_status(self, text: str) -> None:
         self.status.setText(text)
@@ -1825,14 +2895,13 @@ def format_elapsed(elapsed_ms: int) -> str:
     return f"{elapsed_ms / 60_000:.1f} 分钟"
 
 
-def format_remaining_range(lower_seconds: int, upper_seconds: int) -> str:
-    if upper_seconds <= 0:
-        return ""
-    if upper_seconds < 60:
-        return f"预计剩余 {max(1, lower_seconds)}-{max(1, upper_seconds)} 秒"
-    lower_minutes = max(1, lower_seconds // 60)
-    upper_minutes = max(lower_minutes, (upper_seconds + 59) // 60)
-    return f"预计剩余 {lower_minutes}-{upper_minutes} 分钟"
+def format_remaining_single(seconds: int, ready: bool) -> str:
+    if not ready:
+        return "正在估算…"
+    seconds = max(1, int(seconds))
+    if seconds < 60:
+        return f"预计剩余约 {seconds} 秒"
+    return f"预计剩余约 {(seconds + 59) // 60} 分钟"
 
 
 def format_active_duration(seconds: int) -> str:
@@ -1844,6 +2913,44 @@ def format_active_duration(seconds: int) -> str:
         return f"{minutes} 分 {remainder:02d} 秒"
     hours, minutes = divmod(minutes, 60)
     return f"{hours} 小时 {minutes:02d} 分"
+
+
+def scheduler_diagnostic_label(state: str) -> str:
+    return {
+        "reclaiming_no_progress": "正在回收无进展任务",
+        "terminating_worker": "正在终止 worker",
+        "rebuilding_pool": "正在重建解析进程池",
+        "checkpoint_resumed": "已从检查点恢复",
+        "same_stall_retry_stopped": "同一卡点重复发生，已停止自动重试",
+    }.get(str(state or ""), "")
+
+
+def format_active_phase(phase: str) -> str:
+    normalized = str(phase or "").strip().lower()
+    if not normalized:
+        return ""
+    rules = (
+        ("recognize_microbatch", "OCR 批量识别文字区域"),
+        ("recognize_original_regions", "OCR 识别原图文字区域"),
+        ("tile_detect", "OCR 分块检测文字区域"),
+        ("tile_recognize", "OCR 分块识别文字"),
+        ("ocr_detect", "OCR 检测文字区域"),
+        ("ocr_recognize", "OCR 识别文字"),
+        ("model_load", "正在加载 OCR 模型"),
+        ("pdf_native", "PDF 提取可复制正文"),
+        ("pdf_preview", "PDF 低分辨率预检"),
+        ("region_300dpi", "PDF 300 DPI 精细识别"),
+        ("region_200dpi", "PDF 200 DPI 区域识别"),
+        ("legacy_cache", "检查旧版 Office 转换缓存"),
+        ("legacy_convert", "转换旧版 Office 文件"),
+        ("xlsx_shared", "Excel 读取共享字符串"),
+        ("xlsx_sheet", "Excel 解析工作表"),
+        ("zip_member", "ZIP 解析成员文件"),
+    )
+    for marker, label in rules:
+        if marker in normalized:
+            return label
+    return normalized.replace("_", " ")
 
 
 def format_bytes(value: int) -> str:
@@ -1942,6 +3049,7 @@ def format_index_run_summary(payload: dict[str, object]) -> tuple[str, str]:
             "性能配置："
             f"普通 {performance_profile.get('normal_workers', 0)} · "
             f"Office {performance_profile.get('office_workers', 0)} · "
+            f"PDF {performance_profile.get('pdf_workers', performance_profile.get('pdf_parser_workers', 0))} · "
             f"ZIP {performance_profile.get('zip_member_workers', 0)} · "
             f"OCR {performance_profile.get('ocr_workers', 0)} · "
             f"内存 {performance_profile.get('memory_budget_mb', 0)} MB · "

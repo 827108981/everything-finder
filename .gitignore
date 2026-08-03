@@ -27,10 +27,13 @@ dist_result_grouped/
 checkpoint_timeout_validation_result.txt
 core_validation_result.txt
 index_ui_validation.png
+index_paused_ui_validation.png
 legacy_shutdown_validation_result.txt
 process_pool_validation_result.txt
 schema_v3_validation_result.txt
 schema_v4_validation_result.txt
+schema_v5_validation_result.txt
+schema_v6_validation_result.txt
 self_test_result.txt
 shutdown_validation_result.txt
 ui_validation.png
@@ -38,6 +41,10 @@ ui_validation_result.txt
 ocr_smoke.png
 ocr_validation_probe.png
 ui_snapshots/
+tmp/
+output/pdf/
+*_validation_result.json
+index_status_layout_screenshots/
 repair_validation/
 lockfix_validation/
 database_lock_validation_result.txt

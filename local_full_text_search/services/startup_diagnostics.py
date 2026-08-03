@@ -1,15 +1,20 @@
 from __future__ import annotations
 
 import ctypes
+import faulthandler
 import json
 import os
 import platform
+import sqlite3
 import sys
+import tempfile
 import threading
 import time
 import traceback
 from pathlib import Path
 from typing import TextIO
+
+from local_full_text_search.version import __version__
 
 
 class StartupDiagnostics:
@@ -19,13 +24,20 @@ class StartupDiagnostics:
         self,
         *,
         app_name: str = "LocalFullTextSearch",
+        app_version: str = __version__,
         timeout_seconds: float = 15.0,
         base_dir: Path | None = None,
+        settings_path: Path | None = None,
+        database_path: Path | None = None,
     ) -> None:
         root = base_dir or _default_base_dir(app_name)
+        self.app_name = app_name
+        self.app_version = app_version
         self.root = root
         self.log_path = root / "logs" / "startup.log"
         self.state_path = root / "logs" / "startup-state.json"
+        self.settings_path = settings_path or root / "config" / "settings.json"
+        self.database_path = database_path or root / "data" / "search_index.db"
         self.timeout_seconds = max(1.0, float(timeout_seconds))
         self.current_stage = "Python 初始化"
         self._started_at = time.perf_counter()
@@ -33,19 +45,18 @@ class StartupDiagnostics:
         self._timer: threading.Timer | None = None
         self._complete = False
         self._lock = threading.Lock()
+        self._fault_stream: TextIO | None = None
+        self._last_status = "created"
         self.previous_failure: dict[str, object] | None = None
 
     def begin(self) -> None:
         self._prepare_paths()
+        self._enable_faulthandler()
         self.previous_failure = self._read_incomplete_previous_state()
         self._write(
             "START",
             {
-                "executable": sys.executable,
                 "argv": sys.argv,
-                "cwd": os.getcwd(),
-                "frozen": bool(getattr(sys, "frozen", False)),
-                "platform": platform.platform(),
                 "python": sys.version,
             },
         )
@@ -83,6 +94,8 @@ class StartupDiagnostics:
                     "elapsed_ms": elapsed_ms,
                     "error_type": exc.__class__.__name__,
                     "error": str(exc),
+                    "error_code": classify_startup_error(exc, stage)[0],
+                    "suggestion": classify_startup_error(exc, stage)[1],
                     "traceback": "".join(traceback.format_exception(exc)),
                 },
             )
@@ -111,9 +124,12 @@ class StartupDiagnostics:
             self._write_state("complete")
 
     def format_error_message(self, exc: BaseException) -> str:
+        error_code, suggestion = classify_startup_error(exc, self.current_stage)
         return (
             f"启动失败：{self.current_stage}\n\n"
+            f"错误分类：{error_code}\n"
             f"{exc.__class__.__name__}: {str(exc) or '未提供详细信息'}\n\n"
+            f"建议：{suggestion}\n\n"
             f"诊断日志：{self.log_path}"
         )
 
@@ -129,12 +145,16 @@ class StartupDiagnostics:
     def _prepare_paths(self) -> None:
         try:
             self.log_path.parent.mkdir(parents=True, exist_ok=True)
+            with self.log_path.open("a", encoding="utf-8"):
+                pass
         except OSError:
-            fallback = Path(os.environ.get("TEMP") or Path.cwd()) / "LocalFullTextSearch"
+            fallback = Path(tempfile.gettempdir()) / "LocalFullTextSearch"
             self.root = fallback
             self.log_path = fallback / "startup.log"
             self.state_path = fallback / "startup-state.json"
             self.log_path.parent.mkdir(parents=True, exist_ok=True)
+            with self.log_path.open("a", encoding="utf-8"):
+                pass
 
     def _read_incomplete_previous_state(self) -> dict[str, object] | None:
         try:
@@ -167,12 +187,51 @@ class StartupDiagnostics:
             pass
 
     def _write(self, event: str, payload: dict[str, object]) -> None:
-        record = {"timestamp": time.time(), "event": event, **payload}
+        self._last_status = {
+            "START": "running",
+            "STAGE_STARTED": "running",
+            "STAGE_COMPLETED": "running",
+            "STAGE_SLOW": "slow",
+            "STAGE_FAILED": "failed",
+            "WINDOW_VISIBLE": "complete",
+            "STARTUP_COMPLETED": "complete",
+        }.get(event, self._last_status)
+        record = {
+            "timestamp": time.time(),
+            "event": event,
+            **self._common_metadata(),
+            **payload,
+        }
         try:
             with self.log_path.open("a", encoding="utf-8") as stream:
                 stream.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
         except OSError:
             pass
+
+    def _common_metadata(self) -> dict[str, object]:
+        return {
+            "app_name": self.app_name,
+            "app_version": self.app_version,
+            "executable": sys.executable,
+            "cwd": os.getcwd(),
+            "frozen": bool(getattr(sys, "frozen", False)),
+            "platform": platform.platform(),
+            "windows_version": platform.version() if os.name == "nt" else "",
+            "settings_path": str(self.settings_path),
+            "database_path": str(self.database_path),
+            "log_path": str(self.log_path),
+            "last_status": self._last_status,
+        }
+
+    def _enable_faulthandler(self) -> None:
+        try:
+            self._fault_stream = self.log_path.open("a", encoding="utf-8")
+            faulthandler.enable(file=self._fault_stream, all_threads=True)
+            self._write("FAULTHANDLER_ENABLED", {})
+        except (OSError, RuntimeError):
+            if self._fault_stream is not None:
+                self._fault_stream.close()
+                self._fault_stream = None
 
     def _install_exception_hooks(self) -> None:
         previous_sys_hook = sys.excepthook
@@ -216,3 +275,57 @@ class StartupDiagnostics:
 def _default_base_dir(app_name: str) -> Path:
     base = os.environ.get("LOCALAPPDATA")
     return Path(base) / app_name if base else Path.home() / f".{app_name}"
+
+
+def classify_startup_error(
+    exc: BaseException,
+    stage: str = "",
+) -> tuple[str, str]:
+    message = str(exc).lower()
+    stage_text = stage.lower()
+    if isinstance(exc, ModuleNotFoundError) or (
+        isinstance(exc, FileNotFoundError)
+        and any(word in stage_text for word in ("模块", "图形", "module", "qt"))
+    ):
+        return (
+            "CRITICAL_COMPONENT_MISSING",
+            "请重新解压完整程序目录，确保 EXE 与 _internal 未被拆分或拦截。",
+        )
+    if isinstance(exc, PermissionError) or (
+        any(word in message for word in ("permission denied", "access is denied", "只读"))
+        and any(word in stage_text for word in ("设置", "数据库", "data", "config"))
+    ):
+        return (
+            "USER_DATA_NOT_WRITABLE",
+            "请确认本机用户数据目录可写，并避免从只读目录或压缩包预览中运行。",
+        )
+    if isinstance(exc, sqlite3.Error) or "database" in message:
+        if any(word in message for word in ("locked", "busy", "占用")):
+            return (
+                "DATABASE_LOCKED",
+                "请关闭其他程序实例后重试，并将启动日志提供给支持人员。",
+            )
+        if any(
+            word in message
+            for word in ("malformed", "corrupt", "not a database", "disk image")
+        ):
+            return (
+                "DATABASE_CORRUPT",
+                "请保留数据库和日志以便恢复；不要直接删除现有索引文件。",
+            )
+        return (
+            "DATABASE_MIGRATION_FAILED",
+            "请保留数据库备份和启动日志，由支持人员检查迁移失败原因。",
+        )
+    if isinstance(exc, (ImportError, OSError)) and any(
+        word in message
+        for word in ("dll", "pyside", "qt", "platform plugin", "module")
+    ):
+        return (
+            "QT_OR_DLL_LOAD_FAILED",
+            "请确认程序目录完整，并检查安全软件是否隔离了 DLL 或 Qt 文件。",
+        )
+    return (
+        "UNKNOWN_STARTUP_ERROR",
+        "请保留当前提示和启动日志，并提供给支持人员进一步定位。",
+    )

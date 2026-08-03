@@ -9,6 +9,10 @@ class CancelledError(AppError):
     """Raised when a long running task is cancelled."""
 
 
+class PauseRequestedError(AppError):
+    """Raised at a parser safe point so the scheduler can persist and pause."""
+
+
 class ParserDependencyError(AppError):
     """Raised when a parser dependency is not installed."""
 
@@ -33,9 +37,21 @@ class ZipMemberContentChangedError(OSError):
     """Raised when a ZIP member's exact bytes change between planning and extraction."""
 
 
+class ZipMemberEncryptedError(AppError):
+    """Raised when a ZIP member requires a password."""
+
+
 class PartialParseError(AppError):
     """Raised when a parser can keep metadata but not extract body text."""
 
 
 class IndexNotReadyError(AppError):
     """Raised when search is attempted before the complete index is published."""
+
+
+class PlanningWorkerError(AppError):
+    """Raised when a recoverable planning worker fails."""
+
+
+class PlanningNoProgressError(PlanningWorkerError):
+    """Raised after a planning process stops making semantic progress."""

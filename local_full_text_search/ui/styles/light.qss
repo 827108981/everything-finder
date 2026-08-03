@@ -219,6 +219,12 @@ QPushButton#PrimaryButton:hover {
     border-color: #1D4ED8;
 }
 
+QPushButton#PrimaryButton:disabled {
+    color: #B0B7C3;
+    background: #F2F4F7;
+    border-color: #E4E7EC;
+}
+
 QPushButton#TextButton, QPushButton#IconButton {
     border: none;
     background: transparent;

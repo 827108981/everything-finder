@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import uuid
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -78,6 +79,68 @@ def sha256_file(path: Path) -> str:
     """Return a full raw-byte digest for exact cross-source deduplication."""
 
     return _sha256_file(path)
+
+
+def fingerprint_file_with_spool(
+    path: Path,
+    spool_dir: Path,
+) -> tuple[ContentFingerprint, Path | None, int]:
+    """Fingerprint a file and retain the same full-hash read for parsing."""
+
+    suffix = path.suffix.lower()
+    if suffix in OOXML_EXTENSIONS or suffix == ".zip":
+        try:
+            return _fingerprint_zip_directory(path, suffix), None, 0
+        except (OSError, zipfile.BadZipFile):
+            pass
+    stat = path.stat()
+    if suffix == ".mp4":
+        payload = f"metadata:{stat.st_size}:{stat.st_mtime_ns}:{path.name}".encode("utf-8")
+        return (
+            ContentFingerprint(
+                "metadata:" + hashlib.sha256(payload).hexdigest(),
+                0,
+                "metadata",
+            ),
+            None,
+            0,
+        )
+    if stat.st_size <= 64 * 1024 * 1024 or suffix in {".doc", ".xls", ".ppt"}:
+        digest, spool_path, bytes_read = sha256_file_to_spool(path, spool_dir)
+        return (
+            ContentFingerprint(f"sha256:{digest}", stat.st_size, "sha256"),
+            spool_path,
+            bytes_read,
+        )
+    return (
+        ContentFingerprint(
+            "sample:" + _sampled_sha256(path, stat.st_size),
+            stat.st_size,
+            "sampled_sha256",
+        ),
+        None,
+        0,
+    )
+
+
+def sha256_file_to_spool(path: Path, spool_dir: Path) -> tuple[str, Path, int]:
+    spool_dir.mkdir(parents=True, exist_ok=True)
+    target = spool_dir / f"{uuid.uuid4().hex}{path.suffix.lower()}"
+    temporary = target.with_suffix(target.suffix + ".tmp")
+    digest = hashlib.sha256()
+    bytes_read = 0
+    try:
+        with path.open("rb") as source, temporary.open("wb") as output:
+            for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                digest.update(chunk)
+                output.write(chunk)
+                bytes_read += len(chunk)
+        temporary.replace(target)
+        return digest.hexdigest(), target, bytes_read
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        target.unlink(missing_ok=True)
+        raise
 
 
 def _sampled_sha256(path: Path, size: int) -> str:

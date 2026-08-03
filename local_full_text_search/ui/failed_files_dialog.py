@@ -39,8 +39,21 @@ class FailedFilesDialog(QDialog):
         self.status_filter.currentIndexChanged.connect(self.apply_filters)
         self.extension_filter.currentIndexChanged.connect(self.apply_filters)
 
-        self.table = QTableWidget(0, 7)
-        self.table.setHorizontalHeaderLabels(["路径", "扩展名", "状态", "错误码", "原因", "解析器", "时间"])
+        self.table = QTableWidget(0, 10)
+        self.table.setHorizontalHeaderLabels(
+            [
+                "路径",
+                "扩展名",
+                "状态",
+                "错误码",
+                "任务阶段",
+                "安全游标",
+                "原因",
+                "恢复建议",
+                "解析器",
+                "时间",
+            ]
+        )
         self.apply_filters()
         self.export_summary_button = QPushButton("导出汇总")
         self.export_summary_button.clicked.connect(self.export_summary_csv)
@@ -92,7 +105,10 @@ class FailedFilesDialog(QDialog):
                 str(row["extension"] or ""),
                 str(row["parse_status"]),
                 str(row["parse_error_code"] or ""),
+                str(row["progress_phase"] or ""),
+                str(row["progress_cursor"] or ""),
                 str(row["parse_error_message"] or ""),
+                str(row["recovery_advice"] or ""),
                 str(row["parser_name"] or ""),
                 str(row["indexed_at"] or ""),
             ]
@@ -118,7 +134,20 @@ class FailedFilesDialog(QDialog):
         try:
             with Path(target).open("w", newline="", encoding="utf-8-sig") as handle:
                 writer = csv.writer(handle)
-                writer.writerow(["路径", "扩展名", "状态", "错误码", "原因", "解析器", "时间"])
+                writer.writerow(
+                    [
+                        "路径",
+                        "扩展名",
+                        "状态",
+                        "错误码",
+                        "任务阶段",
+                        "安全游标",
+                        "原因",
+                        "恢复建议",
+                        "解析器",
+                        "时间",
+                    ]
+                )
                 for row in rows:
                     writer.writerow(
                         [
@@ -126,7 +155,10 @@ class FailedFilesDialog(QDialog):
                             str(row["extension"] or ""),
                             str(row["parse_status"]),
                             str(row["parse_error_code"] or ""),
+                            str(row["progress_phase"] or ""),
+                            str(row["progress_cursor"] or ""),
                             str(row["parse_error_message"] or ""),
+                            str(row["recovery_advice"] or ""),
                             str(row["parser_name"] or ""),
                             str(row["indexed_at"] or ""),
                         ]

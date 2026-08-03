@@ -1,0 +1,42 @@
+{
+  "manifest_version": 1,
+  "engine": "PaddleOCR",
+  "model_family": "PP-OCRv4-mobile",
+  "models": [
+    "PP-OCRv4_mobile_det",
+    "PP-OCRv4_mobile_rec"
+  ],
+  "files": [
+    {
+      "path": "PP-OCRv4_mobile_det/inference.json",
+      "size": 229777,
+      "sha256": "05feef1acb00aa4cd7362b15f7f501fc4f99d7b1fa73c1c871e0c7b1504b0f5c"
+    },
+    {
+      "path": "PP-OCRv4_mobile_det/inference.pdiparams",
+      "size": 4692937,
+      "sha256": "54a85087b4d31fa3ea4e4aba100169a1ec3e3274cd3352b9068b3cfccbca7829"
+    },
+    {
+      "path": "PP-OCRv4_mobile_det/inference.yml",
+      "size": 956,
+      "sha256": "7a71be98abcc1038fb0d10fad3efb58407fcd5ac4ac3fb45a5544c143bc4763e"
+    },
+    {
+      "path": "PP-OCRv4_mobile_rec/inference.json",
+      "size": 217718,
+      "sha256": "30f78ace76b2cce756abba97eb17f4c79e776d88ad68dd44a787a3db84b407a7"
+    },
+    {
+      "path": "PP-OCRv4_mobile_rec/inference.pdiparams",
+      "size": 10766823,
+      "sha256": "948b8d2ca6ad4bd7b64c0ee3fb838a06db87d4cf57137173ce409c995df21012"
+    },
+    {
+      "path": "PP-OCRv4_mobile_rec/inference.yml",
+      "size": 60209,
+      "sha256": "018c94645678dc492754754291705c4999f35c6e5be854a42b4f918fefd06ab4"
+    }
+  ],
+  "combined_digest": "6398e3014373e452fdfb804fb56c28724dc2c0938d6dd01c46407de8d64cec93"
+}

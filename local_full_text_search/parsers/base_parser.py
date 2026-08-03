@@ -19,13 +19,16 @@ class BaseParser(ABC):
         self.last_status = "success"
         self.last_error_code: str | None = None
         self.last_error_message: str | None = None
+        self.last_diagnostics: list[dict[str, object]] = []
         self.resume_cursor = 0
+        self.runtime_content_digest = ""
         self._progress_callback: Callable[[dict[str, object]], None] | None = None
 
     def reset_status(self) -> None:
         self.last_status = "success"
         self.last_error_code = None
         self.last_error_message = None
+        self.last_diagnostics = []
 
     def set_status(self, status: str, error_code: str | None = None, message: str | None = None) -> None:
         self.last_status = status
@@ -36,9 +39,11 @@ class BaseParser(ABC):
         self,
         *,
         resume_cursor: int = 0,
+        content_digest: str = "",
         progress_callback: Callable[[dict[str, object]], None] | None = None,
     ) -> None:
         self.resume_cursor = max(0, int(resume_cursor))
+        self.runtime_content_digest = str(content_digest or "")
         self._progress_callback = progress_callback
 
     def report_progress(

@@ -26,6 +26,7 @@ REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
 
 class PptxStreamParser(BaseParser):
     name = "pptx_stream"
+    supports_resume = True
 
     def __init__(
         self,
@@ -63,8 +64,14 @@ class PptxStreamParser(BaseParser):
             if not slides:
                 raise ValueError("PPTX contains no slide parts")
             available = set(archive.namelist())
-            block_index = 0
+            resume_slide = min(
+                max(0, int(self.resume_cursor)),
+                len(slides),
+            )
             for slide_number, slide_part in enumerate(slides, start=1):
+                if slide_number <= resume_slide:
+                    continue
+                block_index = (slide_number - 1) * 2
                 texts = _paragraph_texts(archive, slide_part, cancel_token)
                 if texts:
                     yield self.make_block(
@@ -89,7 +96,14 @@ class PptxStreamParser(BaseParser):
                             slide_number=slide_number,
                             extra={"notes_part": notes_part},
                         )
-                        block_index += 1
+                self.report_progress(
+                    "pptx_slide",
+                    completed=slide_number,
+                    total=len(slides),
+                    unit_type="slide",
+                    cursor=slide_number,
+                    detail=f"第 {slide_number} 张幻灯片",
+                )
 
 
 def _paragraph_texts(

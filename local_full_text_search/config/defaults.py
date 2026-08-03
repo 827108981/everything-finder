@@ -7,7 +7,7 @@ from .constants import DEFAULT_EXCLUDED_DIRS, DEFAULT_EXCLUDED_FILE_PATTERNS
 
 @dataclass(slots=True)
 class AppSettings:
-    settings_version: int = 5
+    settings_version: int = 9
     default_search_mode: str = "exact"
     case_sensitive: bool = False
     auto_search: bool = False
@@ -18,11 +18,19 @@ class AppSettings:
     ocr_workers: int = 1
     slow_file_workers: int = 1
     process_parser_workers: int = 1
+    pdf_parser_workers: int = 1
     index_write_batch_size: int = 32
     normal_pending_tasks: int = 8
     ocr_pending_tasks: int = 2
+    ocr_microbatch_parent_jobs: int = 4
+    ocr_microbatch_max_requests: int = 64
+    ocr_microbatch_max_pixels: int = 8_000_000
+    ocr_microbatch_memory_mb: int = 256
+    ocr_microbatch_wait_ms: int = 30
     slow_pending_tasks: int = 2
     process_pending_tasks: int = 2
+    pdf_pending_tasks: int = 2
+    pdf_page_batch_size: int = 4
     max_pending_parse_tasks: int = 96
     large_office_process_min_bytes: int = 4 * 1024 * 1024
     process_max_tasks_per_child: int = 16
@@ -34,9 +42,12 @@ class AppSettings:
     process_memory_budget_mb: int = 768
     normal_inflight_bytes: int = 256 * 1024 * 1024
     office_inflight_bytes: int = 1024 * 1024 * 1024
+    pdf_inflight_bytes: int = 1024 * 1024 * 1024
     ocr_inflight_bytes: int = 256 * 1024 * 1024
     slow_inflight_bytes: int = 512 * 1024 * 1024
     fast_ooxml_enabled: bool = True
+    xlsx_sheet_workers: int = 2
+    xlsx_shared_strings_disk_threshold_bytes: int = 16 * 1024 * 1024
     enable_parse_cache: bool = True
     block_target_chars: int = 4096
     block_max_chars: int = 16384
@@ -56,6 +67,9 @@ class AppSettings:
     archive_no_progress_timeout_seconds: int = 900
     legacy_no_progress_timeout_seconds: int = 1800
     process_no_progress_timeout_seconds: int = 300
+    planning_no_progress_timeout_seconds: int = 300
+    planning_startup_timeout_seconds: int = 30
+    planning_discovery_batch_size: int = 128
     no_progress_max_retries: int = 3
     compute_full_hash: bool = False
     include_hidden_files: bool = False
@@ -90,7 +104,7 @@ class AppSettings:
         previous_version = int(data.get("settings_version", 0) or 0)
         if previous_version < 4 and data.get("max_ocr_image_side", 2400) == 2400:
             values["max_ocr_image_side"] = 960
-        values["settings_version"] = 5
+        values["settings_version"] = 9
         return cls(**values)
 
 

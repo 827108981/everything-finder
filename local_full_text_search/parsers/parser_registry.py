@@ -21,7 +21,12 @@ from local_full_text_search.ocr.ocr_engine import OcrEngine
 
 
 class ParserRegistry:
-    def __init__(self, settings: AppSettings) -> None:
+    def __init__(
+        self,
+        settings: AppSettings,
+        *,
+        shared_ocr: OcrEngine | None = None,
+    ) -> None:
         self.settings = settings
         docx_parser: BaseParser = DocxParser()
         pptx_parser: BaseParser = PptxParser()
@@ -29,16 +34,34 @@ class ParserRegistry:
         if settings.fast_ooxml_enabled:
             docx_parser = DocxStreamParser(fallback=docx_parser, defer_normalization=True)
             pptx_parser = PptxStreamParser(fallback=pptx_parser, defer_normalization=True)
-            xlsx_parser = XlsxStreamParser(fallback=xlsx_parser, defer_normalization=True)
-        shared_ocr = (
+            xlsx_parser = XlsxStreamParser(
+                fallback=xlsx_parser,
+                defer_normalization=True,
+                sheet_workers=settings.xlsx_sheet_workers,
+                shared_strings_disk_threshold_bytes=(
+                    settings.xlsx_shared_strings_disk_threshold_bytes
+                ),
+            )
+        shared_ocr = shared_ocr or (
             OcrEngine(
                 settings.ocr_language,
                 settings.ocr_cpu_threads,
                 det_limit_side_len=settings.max_ocr_image_side,
+                microbatch_max_requests=(
+                    settings.ocr_microbatch_max_requests
+                ),
+                microbatch_max_pixels=(
+                    settings.ocr_microbatch_max_pixels
+                ),
+                microbatch_memory_bytes=(
+                    settings.ocr_microbatch_memory_mb * 1024 * 1024
+                ),
+                microbatch_wait_ms=settings.ocr_microbatch_wait_ms,
             )
             if settings.enable_ocr and (settings.ocr_images or settings.ocr_scanned_pdf)
             else None
         )
+        self.shared_ocr = shared_ocr
         parsers: list[BaseParser] = [
             TextParser(),
             PdfParser(

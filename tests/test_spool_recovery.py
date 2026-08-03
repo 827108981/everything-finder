@@ -3,6 +3,7 @@ from __future__ import annotations
 import pickle
 import tempfile
 import unittest
+import errno
 from pathlib import Path
 from unittest.mock import patch
 
@@ -18,6 +19,9 @@ from local_full_text_search.core.index_manager import (
     parse_file_with_registry,
     parser_identity_for_path,
     partial_parse_path,
+    error_code_for_exception,
+    failed_parse_outcome,
+    user_message_for_exception,
     sha256_path,
 )
 from local_full_text_search.core.normalizer import normalize_text
@@ -29,6 +33,50 @@ from local_full_text_search.parsers.parser_registry import ParserRegistry
 
 
 class SpoolRecoveryTests(unittest.TestCase):
+    def test_process_result_publish_retries_transient_windows_file_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            source = base / "locked-result.txt"
+            source.write_text("LOCKED_RESULT_TEXT", encoding="utf-8")
+            settings = AppSettings(enable_ocr=False)
+            job = ParseJob(
+                file_id=6,
+                file_path=source,
+                parser_name="text",
+                lane="normal",
+            )
+            original_replace = Path.replace
+            result_attempts = 0
+
+            def transient_lock(path: Path, target: Path) -> Path:
+                nonlocal result_attempts
+                if Path(target).suffix != ".pickle":
+                    return original_replace(path, target)
+                result_attempts += 1
+                if result_attempts < 3:
+                    exc = PermissionError(errno.EACCES, "sharing violation")
+                    exc.winerror = 32
+                    raise exc
+                return original_replace(path, target)
+
+            with patch.object(Path, "replace", transient_lock):
+                result = parse_file_process_worker(job, settings, base / "spool")
+
+            self.assertEqual(result_attempts, 3)
+            self.assertTrue(result.spool_path.is_file())
+
+    def test_windows_sharing_violation_is_reported_as_file_in_use(self) -> None:
+        exc = PermissionError(errno.EACCES, "sharing violation")
+        exc.winerror = 32
+
+        self.assertEqual(error_code_for_exception(exc), "FILE_IN_USE")
+        self.assertEqual(user_message_for_exception(exc), "文件正被其他程序占用，请稍后重试")
+        outcome = failed_parse_outcome(
+            ParseJob(file_id=10, file_path=Path("locked.pdf")),
+            exc,
+        )
+        self.assertEqual(outcome.status, "failed_retryable")
+
     def test_process_parse_checkpoint_preserves_completed_text(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -82,6 +130,49 @@ class SpoolRecoveryTests(unittest.TestCase):
             self.assertTrue(result.spool_path.is_file())
             self.assertFalse(partial_parse_path(job, spool_dir).exists())
             result.spool_path.unlink()
+
+    def test_checkpoint_can_be_loaded_from_a_later_run_spool(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            source = base / "resume.txt"
+            source.write_text("PERSISTENT_CHECKPOINT_TEXT", encoding="utf-8")
+            checkpoint = base / "persistent" / "resume.partial.pickle"
+            settings = AppSettings(enable_ocr=False)
+            first = ParseJob(
+                file_id=9,
+                file_path=source,
+                parser_name="text",
+                parser_version="2",
+                content_key="sha256:persistent",
+                checkpoint_path=checkpoint,
+                queued_monotonic=1.0,
+                started_monotonic=1.0,
+            )
+            parse_file_with_registry(
+                first,
+                ParserRegistry(settings),
+                CancelToken(),
+                settings,
+                checkpoint_path=partial_parse_path(first, base / "run-one"),
+            )
+            second = ParseJob(
+                file_id=9,
+                file_path=source,
+                parser_name="text",
+                parser_version="2",
+                content_key="sha256:persistent",
+                checkpoint_path=checkpoint,
+            )
+
+            recovered = load_partial_parse_checkpoint(
+                second,
+                base / "different-run",
+                consume=False,
+            )
+
+            self.assertIsNotNone(recovered)
+            assert recovered is not None
+            self.assertIn("PERSISTENT_CHECKPOINT_TEXT", recovered.blocks[0].raw_text)
 
     def test_valid_spooled_artifact_is_written_without_reparsing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

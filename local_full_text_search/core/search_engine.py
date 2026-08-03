@@ -1,14 +1,16 @@
 from __future__ import annotations
 
+import copy
+import logging
 import re
 import sqlite3
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, replace
 from typing import Any
 
 from local_full_text_search.core.database import DatabaseManager
-from local_full_text_search.core.errors import IndexNotReadyError
+from local_full_text_search.core.errors import CancelledError, IndexNotReadyError
 from local_full_text_search.core.normalizer import (
     contains_cjk,
     count_hits,
@@ -19,6 +21,8 @@ from local_full_text_search.core.normalizer import (
 from local_full_text_search.core.task_manager import CancelToken
 from local_full_text_search.models.search_query import SearchQuery
 from local_full_text_search.models.search_result import SearchHit, SearchResult
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -31,21 +35,35 @@ class SearchPage:
     page_size: int
     available_results: int
     truncated: bool
+    partial: bool = False
 
 
 class SearchEngine:
     def __init__(self, db: DatabaseManager) -> None:
         self.db = db
+        self._trigram_tables: dict[str, bool] = {}
 
-    def search(self, query: SearchQuery, cancel_token: CancelToken | None = None) -> SearchPage:
+    def search(
+        self,
+        query: SearchQuery,
+        cancel_token: CancelToken | None = None,
+        *,
+        progress_callback: Callable[[dict[str, object]], None] | None = None,
+        partial_callback: Callable[[SearchPage], None] | None = None,
+    ) -> SearchPage:
         readiness = self.db.index_readiness()
         if not bool(readiness["ready"]):
             raise IndexNotReadyError(
                 "完整索引尚未完成："
-                f"{readiness['complete_files']}/{readiness['eligible_files']} 个文件完整成功，"
+                f"{readiness['complete_files']}/{readiness['eligible_files']} 个范围内文件完成，"
                 f"仍有 {readiness['blocking_files']} 个文件需要处理"
             )
-        if query.mode != "regex" and contains_cjk(query.text) and not query.ignore_spaces:
+        if (
+            query.mode != "regex"
+            and contains_cjk(query.text)
+            and any(character.isspace() for character in query.text)
+            and not query.ignore_spaces
+        ):
             query = replace(query, ignore_spaces=True)
         started = time.perf_counter()
         token = cancel_token or CancelToken()
@@ -67,28 +85,210 @@ class SearchEngine:
         search_filename, search_path, search_content = self._source_flags(query)
         confirmed_by_file: dict[int, SearchResult] = {}
         total_candidates = 0
-        rows = self._candidate_rows(
-            query,
-            normalized_terms,
-            token,
-            search_filename=search_filename,
-            search_path=search_path,
-            search_content=search_content,
+        full_scan = self._requires_full_scan(query)
+        total_to_scan = 0
+        metadata_strategy = ""
+        content_strategy = ""
+        if search_filename or search_path:
+            _sql, _params, metadata_strategy = self._metadata_query(
+                query,
+                normalized_terms,
+                search_filename,
+                search_path,
+            )
+        if search_content:
+            _sql, _params, content_strategy = self._content_query(
+                query,
+                normalized_terms,
+            )
+
+        def slow_reason(strategy: str) -> str:
+            if strategy == "like":
+                return "关键词较短，正在使用兼容搜索"
+            if strategy == "scan":
+                return "正在执行正则或兼容全文扫描"
+            return ""
+
+        if full_scan:
+            self._report_progress(
+                progress_callback,
+                stage="preparing_scan",
+                phase_label="正在计算需要扫描的范围...",
+                started=started,
+                progress_kind="busy",
+                can_cancel=True,
+            )
+            if search_filename or search_path:
+                sql, params, _strategy = self._metadata_query(
+                    query,
+                    normalized_terms,
+                    search_filename,
+                    search_path,
+                )
+                total_to_scan += self._count_query_rows(sql, params, token)
+            if search_content:
+                sql, params, _strategy = self._content_query(
+                    query,
+                    normalized_terms,
+                )
+                total_to_scan += self._count_query_rows(sql, params, token)
+
+        def consume(
+            rows: Iterator[sqlite3.Row],
+            *,
+            stage: str,
+            phase_label: str,
+            reason: str,
+        ) -> None:
+            nonlocal total_candidates
+            last_reported = total_candidates
+            for row in rows:
+                token.throw_if_cancelled()
+                total_candidates += 1
+                if self._matches(row, normalized_terms, query, regex_pattern):
+                    result = self._row_to_result(
+                        row,
+                        raw_terms,
+                        normalized_terms,
+                        query,
+                        regex_pattern,
+                    )
+                    existing = confirmed_by_file.get(result.file_id)
+                    if existing is None:
+                        confirmed_by_file[result.file_id] = result
+                    else:
+                        self._merge_result(existing, result)
+                if total_candidates - last_reported >= 256:
+                    self._report_progress(
+                        progress_callback,
+                        stage=stage,
+                        phase_label=phase_label,
+                        started=started,
+                        progress_kind="determinate" if full_scan else "busy",
+                        checked_candidates=total_candidates,
+                        total_candidates=total_to_scan if full_scan else 0,
+                        confirmed_files=len(confirmed_by_file),
+                        can_cancel=True,
+                        slow_reason=reason,
+                    )
+                    last_reported = total_candidates
+
+        if search_filename or search_path:
+            self._report_progress(
+                progress_callback,
+                stage="searching_metadata",
+                phase_label="正在搜索文件名和路径...",
+                started=started,
+                progress_kind="determinate" if full_scan else "busy",
+                checked_candidates=total_candidates,
+                total_candidates=total_to_scan if full_scan else 0,
+                confirmed_files=len(confirmed_by_file),
+                can_cancel=True,
+                slow_reason=slow_reason(metadata_strategy),
+            )
+            consume(
+                self._metadata_candidates(
+                    query,
+                    normalized_terms,
+                    token,
+                    search_filename,
+                    search_path,
+                ),
+                stage="searching_metadata",
+                phase_label="正在搜索文件名和路径...",
+                reason=slow_reason(metadata_strategy),
+            )
+            if partial_callback is not None and confirmed_by_file:
+                partial_callback(
+                    self._build_page(
+                        confirmed_by_file,
+                        query,
+                        total_candidates,
+                        started,
+                        partial=True,
+                    )
+                )
+
+        if search_content:
+            self._report_progress(
+                progress_callback,
+                stage="searching_content",
+                phase_label="正在搜索正文...",
+                started=started,
+                progress_kind="determinate" if full_scan else "busy",
+                checked_candidates=total_candidates,
+                total_candidates=total_to_scan if full_scan else 0,
+                confirmed_files=len(confirmed_by_file),
+                can_cancel=True,
+                slow_reason=(
+                    slow_reason(content_strategy)
+                ),
+            )
+            consume(
+                self._content_candidates(query, normalized_terms, token),
+                stage="scanning" if full_scan else "searching_content",
+                phase_label=(
+                    "正在扫描正文..." if full_scan else "正在搜索正文..."
+                ),
+                reason=slow_reason(content_strategy),
+            )
+
+        self._report_progress(
+            progress_callback,
+            stage="sorting",
+            phase_label="正在排序和整理结果...",
+            started=started,
+            progress_kind="busy",
+            checked_candidates=total_candidates,
+            total_candidates=total_to_scan if full_scan else 0,
+            confirmed_files=len(confirmed_by_file),
+            can_cancel=True,
         )
-        for row in rows:
-            token.throw_if_cancelled()
-            total_candidates += 1
-            if self._matches(row, normalized_terms, query, regex_pattern):
-                result = self._row_to_result(row, raw_terms, normalized_terms, query, regex_pattern)
-                existing = confirmed_by_file.get(result.file_id)
-                if existing is None:
-                    confirmed_by_file[result.file_id] = result
-                else:
-                    self._merge_result(existing, result)
-        confirmed = list(confirmed_by_file.values())
+        page = self._build_page(
+            confirmed_by_file,
+            query,
+            total_candidates,
+            started,
+            partial=False,
+        )
+        self._report_progress(
+            progress_callback,
+            stage="complete",
+            phase_label="搜索完成",
+            started=started,
+            progress_kind="determinate",
+            checked_candidates=total_candidates,
+            total_candidates=max(total_candidates, total_to_scan),
+            confirmed_files=page.total_confirmed,
+            can_cancel=False,
+        )
+        if page.elapsed_ms >= 2_000:
+            logger.warning(
+                "Slow search completed: mode=%s query_length=%s candidates=%s confirmed=%s elapsed_ms=%s full_scan=%s",
+                query.mode,
+                len(query.text),
+                total_candidates,
+                page.total_confirmed,
+                page.elapsed_ms,
+                full_scan,
+            )
+        return page
+
+    def _build_page(
+        self,
+        confirmed_by_file: dict[int, SearchResult],
+        query: SearchQuery,
+        total_candidates: int,
+        started: float,
+        *,
+        partial: bool,
+    ) -> SearchPage:
+        confirmed = copy.deepcopy(list(confirmed_by_file.values()))
         for result in confirmed:
             self._finalize_result(result)
-        confirmed.sort(key=lambda item: (-item.score, -item.modified_time, item.filename.lower()))
+        confirmed.sort(
+            key=lambda item: (-item.score, -item.modified_time, item.filename.lower())
+        )
         total_confirmed = len(confirmed)
         max_results = max(1, int(query.max_results or total_confirmed or 1))
         available_results = min(total_confirmed, max_results)
@@ -96,16 +296,16 @@ class SearchEngine:
         page = max(1, query.page)
         start = (page - 1) * query.page_size
         end = start + query.page_size
-        elapsed = int((time.perf_counter() - started) * 1000)
         return SearchPage(
             confirmed[start:end],
             total_candidates,
             total_confirmed,
-            elapsed,
+            int((time.perf_counter() - started) * 1000),
             page,
             query.page_size,
             available_results,
             total_confirmed > available_results,
+            partial,
         )
 
     def _compile_regex(self, query: SearchQuery) -> re.Pattern[str] | None:
@@ -148,11 +348,39 @@ class SearchEngine:
         normalized_terms: list[str],
         token: CancelToken,
     ) -> Iterator[sqlite3.Row]:
-        where: list[str] = ["f.is_deleted = 0"]
+        sql, params, _strategy = self._content_query(query, normalized_terms)
+        yield from self._stream_rows(sql, params, token)
+
+    def _content_query(
+        self,
+        query: SearchQuery,
+        normalized_terms: list[str],
+    ) -> tuple[str, list[Any], str]:
+        where: list[str] = [
+            "f.is_deleted = 0",
+            """NOT EXISTS (
+                SELECT 1 FROM index_scope_exclusions excluded
+                WHERE excluded.file_id = f.id
+                  AND excluded.revoked_at IS NULL
+                  AND excluded.invalidated_at IS NULL
+            )""",
+        ]
         params: list[Any] = []
-        if not self._requires_full_scan(query):
+        strategy = "scan"
+        if self._can_use_fts_match("content_fts", query, normalized_terms):
+            where.append("content_fts MATCH ?")
+            params.append(
+                self._fts_match_expression(
+                    normalized_terms,
+                    query.mode,
+                    column="normalized_text",
+                )
+            )
+            strategy = "fts_match"
+        elif not self._requires_full_scan(query):
             text_predicates = self._like_predicates(["ft.normalized_text"], query, normalized_terms, params)
             where.append("(" + text_predicates + ")")
+            strategy = "like"
         where.append("(cb.source_type IS NULL OR cb.source_type != 'metadata')")
         self._append_filters(where, params, query)
         if not query.include_ocr:
@@ -175,7 +403,7 @@ class SearchEngine:
             )
             WHERE {' AND '.join(where)}
         """
-        yield from self._stream_rows(sql, params, token)
+        return sql, params, strategy
 
     def _metadata_candidates(
         self,
@@ -185,7 +413,30 @@ class SearchEngine:
         search_filename: bool,
         search_path: bool,
     ) -> Iterator[sqlite3.Row]:
-        where: list[str] = ["f.is_deleted = 0"]
+        sql, params, _strategy = self._metadata_query(
+            query,
+            normalized_terms,
+            search_filename,
+            search_path,
+        )
+        yield from self._stream_rows(sql, params, token)
+
+    def _metadata_query(
+        self,
+        query: SearchQuery,
+        normalized_terms: list[str],
+        search_filename: bool,
+        search_path: bool,
+    ) -> tuple[str, list[Any], str]:
+        where: list[str] = [
+            "f.is_deleted = 0",
+            """NOT EXISTS (
+                SELECT 1 FROM index_scope_exclusions excluded
+                WHERE excluded.file_id = f.id
+                  AND excluded.revoked_at IS NULL
+                  AND excluded.invalidated_at IS NULL
+            )""",
+        ]
         params: list[Any] = []
         fields: list[str] = []
         if search_filename:
@@ -194,23 +445,161 @@ class SearchEngine:
             fields.append("LOWER(f.path)")
         if not fields:
             fields.append("LOWER(f.filename)")
-        if not self._requires_full_scan(query):
+        use_fts = self._can_use_fts_match("files_fts", query, normalized_terms)
+        strategy = "scan"
+        if use_fts:
+            if search_filename and not search_path:
+                column = "filename"
+            elif search_path and not search_filename:
+                column = "path"
+            else:
+                column = None
+            where.append("files_fts MATCH ?")
+            params.append(
+                self._fts_match_expression(
+                    normalized_terms,
+                    query.mode,
+                    column=column,
+                )
+            )
+            strategy = "fts_match"
+        elif not self._requires_full_scan(query):
             where.append("(" + self._like_predicates(fields, query, normalized_terms, params) + ")")
+            strategy = "like"
         self._append_filters(where, params, query)
+        if search_filename and search_path:
+            raw_expression = "f.filename || char(10) || f.path"
+        elif search_path:
+            raw_expression = "f.path"
+        else:
+            raw_expression = "f.filename"
+        from_clause = (
+            "FROM files_fts JOIN files f "
+            "ON f.id = CAST(files_fts.file_id AS INTEGER)"
+            if use_fts
+            else "FROM files f"
+        )
         sql = f"""
             SELECT
                 NULL AS block_id, f.id AS file_id, f.path, f.filename, f.extension,
                 f.size_bytes, f.modified_time, f.parse_status, '文件名/路径' AS location_text,
-                f.filename || char(10) || f.path AS raw_text,
-                f.filename || char(10) || f.path AS normalized_text,
+                {raw_expression} AS raw_text,
+                {raw_expression} AS normalized_text,
                 'metadata' AS source_type, NULL AS ocr_confidence
-            FROM files f
+            {from_clause}
             WHERE {' AND '.join(where)}
         """
-        yield from self._stream_rows(sql, params, token)
+        return sql, params, strategy
+
+    def _can_use_fts_match(
+        self,
+        table: str,
+        query: SearchQuery,
+        normalized_terms: list[str],
+    ) -> bool:
+        return (
+            not self._requires_full_scan(query)
+            and bool(normalized_terms)
+            and all(len(term) >= 3 for term in normalized_terms)
+            and self._fts_table_uses_trigram(table)
+        )
+
+    def _fts_table_uses_trigram(self, table: str) -> bool:
+        cached = self._trigram_tables.get(table)
+        if cached is not None:
+            return cached
+        with self.db.connect() as con:
+            row = con.execute(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+                (table,),
+            ).fetchone()
+        definition = str(row["sql"] or "") if row is not None else ""
+        available = "trigram" in definition.lower()
+        self._trigram_tables[table] = available
+        return available
+
+    @staticmethod
+    def _fts_match_expression(
+        normalized_terms: list[str],
+        mode: str,
+        *,
+        column: str | None,
+    ) -> str:
+        glue = " OR " if mode == "any" else " AND "
+        expressions: list[str] = []
+        for term in normalized_terms:
+            quoted = '"' + term.replace('"', '""') + '"'
+            expressions.append(f"{column} : {quoted}" if column else quoted)
+        return glue.join(expressions)
 
     def _requires_full_scan(self, query: SearchQuery) -> bool:
         return query.mode == "regex" or query.ignore_spaces or query.ignore_hyphens
+
+    def _count_query_rows(
+        self,
+        sql: str,
+        params: list[Any],
+        token: CancelToken,
+    ) -> int:
+        token.throw_if_cancelled()
+        try:
+            with self.db.connect() as con:
+                con.set_progress_handler(lambda: 1 if token.cancelled else 0, 2_000)
+                row = con.execute(
+                    f"SELECT COUNT(*) AS n FROM ({sql}) candidate_rows",
+                    params,
+                ).fetchone()
+                return int(row["n"] or 0)
+        except sqlite3.OperationalError as exc:
+            if token.cancelled and "interrupt" in str(exc).lower():
+                raise CancelledError("搜索已取消") from exc
+            raise
+
+    @staticmethod
+    def _report_progress(
+        callback: Callable[[dict[str, object]], None] | None,
+        *,
+        stage: str,
+        phase_label: str,
+        started: float,
+        progress_kind: str,
+        checked_candidates: int = 0,
+        total_candidates: int = 0,
+        confirmed_files: int = 0,
+        can_cancel: bool,
+        slow_reason: str = "",
+    ) -> None:
+        if callback is None:
+            return
+        if progress_kind == "determinate" and total_candidates > 0:
+            percent = min(
+                100,
+                int(max(0, checked_candidates) * 100 / total_candidates),
+            )
+        else:
+            percent = None
+        callback(
+            {
+                "stage": stage,
+                "phase_label": phase_label,
+                "elapsed_ms": int((time.perf_counter() - started) * 1000),
+                "metadata_candidates": (
+                    checked_candidates if stage == "searching_metadata" else 0
+                ),
+                "content_candidates": (
+                    checked_candidates
+                    if stage in {"searching_content", "scanning"}
+                    else 0
+                ),
+                "checked_candidates": checked_candidates,
+                "total_candidates": total_candidates,
+                "confirmed_files": confirmed_files,
+                "percent": percent,
+                "progress_kind": progress_kind,
+                "can_cancel": can_cancel,
+                "slow_reason": slow_reason,
+            }
+        )
 
     def _stream_rows(
         self,
@@ -220,16 +609,22 @@ class SearchEngine:
         *,
         batch_size: int = 512,
     ) -> Iterator[sqlite3.Row]:
-        with self.db.connect() as con:
-            cursor = con.execute(sql, params)
-            while True:
-                token.throw_if_cancelled()
-                rows = cursor.fetchmany(batch_size)
-                if not rows:
-                    return
-                for row in rows:
+        try:
+            with self.db.connect() as con:
+                con.set_progress_handler(lambda: 1 if token.cancelled else 0, 2_000)
+                cursor = con.execute(sql, params)
+                while True:
                     token.throw_if_cancelled()
-                    yield row
+                    rows = cursor.fetchmany(batch_size)
+                    if not rows:
+                        return
+                    for row in rows:
+                        token.throw_if_cancelled()
+                        yield row
+        except sqlite3.OperationalError as exc:
+            if token.cancelled and "interrupt" in str(exc).lower():
+                raise CancelledError("搜索已取消") from exc
+            raise
 
     def _like_predicates(
         self,

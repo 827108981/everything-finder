@@ -9,10 +9,30 @@ from unittest.mock import patch
 from PIL import Image
 
 from local_full_text_search.ocr.image_preprocess import preprocess_image
-from local_full_text_search.ocr.ocr_engine import OcrEngine, prepare_runtime_models_dir
+from local_full_text_search.ocr.ocr_engine import (
+    OcrEngine,
+    _adaptive_tile_plan,
+    _dedupe_polygons,
+    _polygon_covered_by_any,
+    _tile_plan,
+    prepare_runtime_models_dir,
+)
 
 
 class OcrRuntimeModelTests(unittest.TestCase):
+    def test_detection_metrics_do_not_mislabel_serial_queue_as_inference_batch(
+        self,
+    ) -> None:
+        metrics = OcrEngine().runtime_metrics_snapshot()
+
+        self.assertFalse(
+            metrics["detection_inference_batch_supported"]
+        )
+        self.assertEqual(
+            metrics["detection_batch_technical_note"],
+            "paddle_text_detection_single_image_api",
+        )
+
     def test_small_non_ascii_image_is_staged_to_an_ascii_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -168,8 +188,11 @@ class OcrRuntimeModelTests(unittest.TestCase):
                     }
                 ]
 
+        recognition_batch_sizes: list[int] = []
+
         class FakeRecognizer:
             def predict(self, crops: list[object]) -> list[dict[str, object]]:
+                recognition_batch_sizes.append(len(crops))
                 return [
                     {"rec_text": "低置信度文字", "rec_score": 0.42}
                     for _ in crops
@@ -191,8 +214,222 @@ class OcrRuntimeModelTests(unittest.TestCase):
             )
 
         self.assertTrue(result.extra["fallback_used"])
-        self.assertGreater(result.extra["tiles_processed"], 1)
-        self.assertTrue(any(phase == "tile" and completed > 0 for phase, completed, _ in progress))
+        self.assertGreaterEqual(result.extra["tiles_processed"], 1)
+        self.assertGreater(result.extra["adaptive_regions_split"], 0)
+        self.assertGreater(
+            result.extra["adaptive_regions_remaining_peak"],
+            0,
+        )
+        self.assertEqual(result.extra["adaptive_regions_remaining"], 0)
+        self.assertEqual(result.extra["coverage_ratio"], 1.0)
+        self.assertTrue(
+            any(
+                phase == "adaptive_region" and completed > 0
+                for phase, completed, _ in progress
+            )
+        )
+        self.assertGreaterEqual(result.extra["crop_dedup_hits"], 0)
+        self.assertEqual(len(recognition_batch_sizes), 2)
+        self.assertEqual(result.extra["preview_detect_calls"], 1)
+        self.assertGreater(result.extra["preview_detect_pixels"], 0)
+        self.assertGreater(result.extra["original_region_pixels"], 0)
+        self.assertGreater(result.extra["fallback_region_pixels"], 0)
+
+    def test_adaptive_ocr_recovers_unresolved_region_graph_from_checkpoint(self) -> None:
+        import numpy as np
+
+        class FakeDetector:
+            def predict(self, image: object) -> list[dict[str, object]]:
+                height, width = image.shape[:2]
+                return [
+                    {
+                        "dt_polys": np.asarray(
+                            [
+                                [
+                                    [20, 20],
+                                    [min(width - 1, 420), 20],
+                                    [min(width - 1, 420), 100],
+                                    [20, 100],
+                                ]
+                            ],
+                            dtype=np.float32,
+                        )
+                    }
+                ]
+
+        class FakeRecognizer:
+            def predict(self, crops: list[object]) -> list[dict[str, object]]:
+                return [
+                    {"rec_text": "低置信度文字", "rec_score": 0.42}
+                    for _ in crops
+                ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            source = base / "checkpoint-large.png"
+            checkpoint = base / "adaptive-checkpoint.json"
+            Image.new("RGB", (2400, 1600), "white").save(source)
+            first_engine = OcrEngine(det_limit_side_len=960)
+            first_engine._detector = FakeDetector()
+            first_engine._recognizer = FakeRecognizer()
+
+            def interrupt_after_saved_split(
+                phase: str,
+                _completed: int,
+                _total: int,
+                _detail: str,
+            ) -> None:
+                if phase == "adaptive_split":
+                    raise RuntimeError("simulated worker crash")
+
+            with self.assertRaisesRegex(RuntimeError, "simulated worker crash"):
+                first_engine.recognize_adaptive(
+                    source,
+                    checkpoint_path=checkpoint,
+                    progress_callback=interrupt_after_saved_split,
+                )
+            self.assertTrue(checkpoint.is_file())
+
+            resumed_engine = OcrEngine(det_limit_side_len=960)
+            resumed_engine._detector = FakeDetector()
+            resumed_engine._recognizer = FakeRecognizer()
+            result = resumed_engine.recognize_adaptive(
+                source,
+                checkpoint_path=checkpoint,
+            )
+
+        self.assertGreater(result.extra["checkpoint_regions_reused"], 0)
+        self.assertFalse(checkpoint.exists())
+        self.assertEqual(result.extra["adaptive_regions_remaining"], 0)
+
+    def test_adaptive_ocr_resumes_after_confirmed_recognition_batch(
+        self,
+    ) -> None:
+        import numpy as np
+
+        class FakeDetector:
+            def predict(self, image: object) -> list[dict[str, object]]:
+                height, width = image.shape[:2]
+                return [
+                    {
+                        "dt_polys": np.asarray(
+                            [
+                                [
+                                    [20, 20],
+                                    [min(width - 1, 360), 20],
+                                    [min(width - 1, 360), 100],
+                                    [20, 100],
+                                ]
+                            ],
+                            dtype=np.float32,
+                        )
+                    }
+                ]
+
+        first_calls: list[int] = []
+
+        class CrashingRecognizer:
+            def predict(
+                self,
+                crops: list[object],
+            ) -> list[dict[str, object]]:
+                first_calls.append(len(crops))
+                if len(first_calls) == 3:
+                    raise RuntimeError("crash after first tile batch")
+                return [
+                    {"rec_text": "低置信度批次文字", "rec_score": 0.42}
+                    for _ in crops
+                ]
+
+        resumed_calls: list[int] = []
+
+        class ResumedRecognizer:
+            def predict(
+                self,
+                crops: list[object],
+            ) -> list[dict[str, object]]:
+                resumed_calls.append(len(crops))
+                return [
+                    {"rec_text": "低置信度批次文字", "rec_score": 0.42}
+                    for _ in crops
+                ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            source = base / "recognition-checkpoint.png"
+            checkpoint = base / "adaptive-checkpoint.json"
+            image = np.random.default_rng(20260730).integers(
+                0,
+                256,
+                size=(1_200, 2_200, 3),
+                dtype=np.uint8,
+            )
+            Image.fromarray(image).save(source)
+            first_engine = OcrEngine(
+                det_limit_side_len=960,
+                microbatch_max_requests=2,
+                microbatch_wait_ms=0,
+            )
+            first_engine._detector = FakeDetector()
+            first_engine._recognizer = CrashingRecognizer()
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "crash after first tile batch",
+            ):
+                first_engine.recognize_adaptive(
+                    source,
+                    checkpoint_path=checkpoint,
+                )
+            self.assertTrue(checkpoint.is_file())
+
+            resumed_engine = OcrEngine(
+                det_limit_side_len=960,
+                microbatch_max_requests=2,
+                microbatch_wait_ms=0,
+            )
+            resumed_engine._detector = FakeDetector()
+            resumed_engine._recognizer = ResumedRecognizer()
+            result = resumed_engine.recognize_adaptive(
+                source,
+                checkpoint_path=checkpoint,
+            )
+
+        self.assertGreaterEqual(
+            result.extra["checkpoint_recognition_batches_reused"],
+            1,
+        )
+        self.assertLess(
+            sum(resumed_calls),
+            result.extra["tile_regions_recognized"] + 1,
+        )
+
+    def test_adaptive_tile_plan_prunes_only_blank_tiles_away_from_detection(self) -> None:
+        import numpy as np
+
+        image = np.full((2400, 3600, 3), 255, dtype=np.uint8)
+        anchors = [[[20.0, 20.0], [420.0, 20.0], [420.0, 100.0], [20.0, 100.0]]]
+
+        planned = _tile_plan(3600, 2400, 1280, 160)
+        selected = _adaptive_tile_plan(
+            image,
+            1280,
+            160,
+            anchors=anchors,
+        )
+
+        self.assertGreaterEqual(len(selected), 2)
+        self.assertLess(len(selected), len(planned))
+
+    def test_geometric_prefilter_keeps_nested_distinct_text_regions(self) -> None:
+        large = [[0.0, 0.0], [200.0, 0.0], [200.0, 80.0], [0.0, 80.0]]
+        nested = [[10.0, 10.0], [90.0, 10.0], [90.0, 40.0], [10.0, 40.0]]
+        near_duplicate = [[2.0, 1.0], [202.0, 1.0], [202.0, 81.0], [2.0, 81.0]]
+
+        self.assertFalse(_polygon_covered_by_any(nested, [large]))
+        self.assertTrue(_polygon_covered_by_any(near_duplicate, [large]))
+        self.assertEqual(len(_dedupe_polygons([large, nested])), 2)
+        self.assertEqual(len(_dedupe_polygons([large, near_duplicate])), 1)
 
 
 if __name__ == "__main__":

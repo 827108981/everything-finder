@@ -52,6 +52,7 @@ class IndexWriter:
         self._error: BaseException | None = None
         self._started = False
         self._aborted = threading.Event()
+        self._flushing = threading.Event()
 
     def start(self) -> None:
         if not self._started:
@@ -110,6 +111,12 @@ class IndexWriter:
         self._raise_if_failed()
         return self.summary
 
+    def is_idle(self) -> bool:
+        return self._queue.empty() and not self._flushing.is_set()
+
+    def queue_depth(self) -> int:
+        return self._queue.qsize()
+
     def _run(self) -> None:
         pending: list[Any] = []
         blocks = 0
@@ -153,33 +160,37 @@ class IndexWriter:
         if not artifacts:
             return
         started = time.perf_counter()
-        items = [self._to_item(artifact) for artifact in artifacts]
-        self.db.replace_document_blocks_many(items, update_fts=self.update_fts)
-        elapsed_ms = int((time.perf_counter() - started) * 1000)
-        batch_block_count = sum(len(getattr(item, "blocks", []) or []) for item in artifacts)
-        self.summary.artifacts += len(artifacts)
-        self.summary.blocks += batch_block_count
-        self.summary.text_bytes += sum(
-            len(block.raw_text.encode("utf-8"))
-            for artifact in artifacts
-            for block in (getattr(artifact, "blocks", []) or [])
-        )
-        self.summary.batches += 1
-        self.summary.write_ms += elapsed_ms
-        if elapsed_ms >= 5000:
-            logger.warning(
-                "Slow SQLite index batch: artifacts=%s blocks=%s write_ms=%s update_fts=%s",
-                len(artifacts),
-                batch_block_count,
-                elapsed_ms,
-                self.update_fts,
+        self._flushing.set()
+        try:
+            items = [self._to_item(artifact) for artifact in artifacts]
+            self.db.replace_document_blocks_many(items, update_fts=self.update_fts)
+            elapsed_ms = int((time.perf_counter() - started) * 1000)
+            batch_block_count = sum(len(getattr(item, "blocks", []) or []) for item in artifacts)
+            self.summary.artifacts += len(artifacts)
+            self.summary.blocks += batch_block_count
+            self.summary.text_bytes += sum(
+                len(block.raw_text.encode("utf-8"))
+                for artifact in artifacts
+                for block in (getattr(artifact, "blocks", []) or [])
             )
-        for artifact in artifacts:
-            spool_path = getattr(artifact, "spool_path", None)
-            if spool_path:
-                Path(spool_path).unlink(missing_ok=True)
-        if self.on_written is not None:
-            self.on_written(artifacts, elapsed_ms)
+            self.summary.batches += 1
+            self.summary.write_ms += elapsed_ms
+            if elapsed_ms >= 5000:
+                logger.warning(
+                    "Slow SQLite index batch: artifacts=%s blocks=%s write_ms=%s update_fts=%s",
+                    len(artifacts),
+                    batch_block_count,
+                    elapsed_ms,
+                    self.update_fts,
+                )
+            for artifact in artifacts:
+                spool_path = getattr(artifact, "spool_path", None)
+                if spool_path:
+                    Path(spool_path).unlink(missing_ok=True)
+            if self.on_written is not None:
+                self.on_written(artifacts, elapsed_ms)
+        finally:
+            self._flushing.clear()
 
     @staticmethod
     def _to_item(artifact: Any) -> dict[str, Any]:
@@ -196,6 +207,9 @@ class IndexWriter:
             "status": artifact.status,
             "error_code": artifact.error_code,
             "error_message": artifact.error_message,
+            "diagnostics": list(
+                getattr(artifact, "diagnostics", []) or []
+            ),
             "content_key": getattr(artifact, "content_key", None),
             "content_hash_full": getattr(artifact, "content_hash_full", None),
             "task_id": getattr(artifact, "task_id", None),
