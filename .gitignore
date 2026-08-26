@@ -44,6 +44,7 @@ ui_snapshots/
 tmp/
 temp/
 tmp-frozen-check/
+tmp-frozen-runtime-check/
 tmp-test-data*/
 tmp-test-temp/
 output/pdf/

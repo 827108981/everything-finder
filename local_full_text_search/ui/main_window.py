@@ -1342,12 +1342,19 @@ class MainWindow(QMainWindow):
         if not isinstance(payload, dict):
             return
         self.refresh_search_availability_during_scan()
-        if payload.get("stage") == "performance_profile":
+        stage = str(payload.get("stage") or "")
+        if stage == "starting":
+            phase_label = str(payload.get("phase_label") or "正在启动更新…")
+            self._scan_progress_text = phase_label
+            self.top_bar.set_index_status(phase_label, is_running=True)
+            self.index_page.set_scan_starting(phase_label)
+            return
+        if stage == "performance_profile":
             profile = payload.get("performance_profile")
             if isinstance(profile, dict):
                 self.index_page.set_performance_profile(profile)
                 self.top_bar.set_index_status(
-                    self._scan_progress_text, is_running=True
+                    "正在检查文件变化…", is_running=True
                 )
             return
         pause_state = str(payload.get("pause_state") or "")
@@ -1369,7 +1376,7 @@ class MainWindow(QMainWindow):
         completed = int(payload.get("completed_files") or indexed)
         failed = int(payload.get("failed") or 0)
         current = str(payload.get("current_file") or "")
-        stage = str(payload.get("stage") or "indexing")
+        stage = stage or "indexing"
         phase_label = str(payload.get("phase_label") or "正在索引")
         eta_seconds = int(payload.get("eta_seconds") or 0)
         eta_ready = bool(payload.get("eta_ready"))
@@ -1461,6 +1468,11 @@ class MainWindow(QMainWindow):
     def on_scan_failed(self, message: str) -> None:
         self.index_page.set_task_running(False)
         if self.closing:
+            return
+        self._scan_refresh_pending = True
+        if str(message).startswith("更新启动失败："):
+            self.index_page.show_run_summary(str(message), str(message))
+            self.top_bar.set_index_status(str(message), is_error=True)
             return
         self.top_bar.set_index_status("索引已保留进度，等待继续", is_error=True)
         self.index_page.task_label.setText(
@@ -2921,12 +2933,20 @@ class IndexPage(QWidget):
         ocr = int(profile.get("ocr_workers") or 0)
         memory = int(profile.get("memory_budget_mb") or 0)
         disk = str(profile.get("disk_class") or "unknown")
-        self.task_label.setText(
-            "性能模式已应用 · "
+        self.task_label.setText("正在检查文件变化…")
+        self.task_label.setToolTip(
+            "性能模式配置已应用："
             f"普通 {normal} / Office {office} / PDF {pdf} / ZIP {zip_workers} / OCR {ocr} "
             f"· 内存 {memory} MB · {disk}"
         )
-        self.task_label.setToolTip(str(profile))
+
+    def set_scan_starting(self, label: str = "正在启动更新…") -> None:
+        self.task_label.setText(label)
+        self.task_file.clear()
+        self.task_runtime.setText("启动检查")
+        self.task_phase.setText("等待扫描")
+        self.task_units.clear()
+        self.task_progress.setRange(0, 0)
 
     def set_roots(self, roots: list[object], stats: dict[int, dict[str, int]]) -> None:
         clear_layout(self.list_layout)

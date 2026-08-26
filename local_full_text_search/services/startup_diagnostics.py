@@ -17,6 +17,59 @@ from typing import TextIO
 from local_full_text_search.version import __version__
 
 
+def frozen_runtime_issues() -> list[str]:
+    """Return missing files that would prevent a frozen child process from starting.
+
+    PyInstaller's multiprocessing child starts in the bootloader, before Python
+    logging is available.  A partially copied or cleaned one-folder package can
+    therefore only show the generic ``Failed to start embedded python
+    interpreter`` dialog.  Checking the small set of boot-critical artifacts in
+    the parent process lets the UI report an actionable error instead.
+    """
+
+    if not bool(getattr(sys, "frozen", False)):
+        return []
+    issues: list[str] = []
+    executable = Path(sys.executable).resolve()
+    if not executable.is_file():
+        issues.append(f"主程序 {executable.name}")
+    runtime_dir_value = getattr(sys, "_MEIPASS", None)
+    runtime_dir = Path(runtime_dir_value).resolve() if runtime_dir_value else None
+    if runtime_dir is None or not runtime_dir.is_dir():
+        issues.append("冻结运行目录 _internal")
+        return issues
+    required = [
+        (runtime_dir / "base_library.zip", "Python 标准库"),
+        (runtime_dir / "local_full_text_search", "应用模块"),
+        (runtime_dir / "PySide6", "Qt 运行库"),
+    ]
+    python_runtime = next(
+        (
+            candidate
+            for candidate in (
+                runtime_dir / "python311.dll",
+                runtime_dir / "python3.dll",
+            )
+            if candidate.is_file()
+        ),
+        None,
+    )
+    if python_runtime is None:
+        issues.append("Python 嵌入运行库")
+    for path, label in required:
+        if not path.exists():
+            issues.append(label)
+    return issues
+
+
+def frozen_runtime_error_message(issues: list[str]) -> str:
+    missing = "、".join(issues) if issues else "关键运行组件"
+    return (
+        "更新启动失败：冻结版运行组件不完整，缺少 "
+        f"{missing}。请退出程序并重新安装完整发布目录，不要只复制 EXE。"
+    )
+
+
 class StartupDiagnostics:
     """Record startup progress before Qt and application dependencies are ready."""
 

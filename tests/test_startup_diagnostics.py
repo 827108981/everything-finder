@@ -8,6 +8,8 @@ from unittest.mock import patch
 from local_full_text_search.services.startup_diagnostics import (
     StartupDiagnostics,
     classify_startup_error,
+    frozen_runtime_error_message,
+    frozen_runtime_issues,
 )
 
 
@@ -123,3 +125,26 @@ def test_current_schema_fast_start_does_not_rebuild_fts(tmp_path: Path) -> None:
     database.initialize()
     database.initialize(startup_fast=True)
     assert database._startup_fast_path_ready()
+
+
+def test_frozen_runtime_check_reports_missing_boot_artifacts(
+    tmp_path: Path,
+) -> None:
+    runtime = tmp_path / "_internal"
+    runtime.mkdir()
+    (tmp_path / "app.exe").write_bytes(b"exe")
+    with patch("local_full_text_search.services.startup_diagnostics.sys.frozen", True, create=True), patch(
+        "local_full_text_search.services.startup_diagnostics.sys.executable",
+        str(tmp_path / "app.exe"),
+    ), patch(
+        "local_full_text_search.services.startup_diagnostics.sys._MEIPASS",
+        str(runtime),
+        create=True,
+    ):
+        issues = frozen_runtime_issues()
+
+    assert "Python 嵌入运行库" in issues
+    assert "Python 标准库" in issues
+    assert "应用模块" in issues
+    assert "Qt 运行库" in issues
+    assert "请退出程序并重新安装完整发布目录" in frozen_runtime_error_message(issues)

@@ -17,6 +17,10 @@ from local_full_text_search.core.hardware_profile import (
 )
 from local_full_text_search.core.index_manager import IndexManager
 from local_full_text_search.core.task_manager import CancelToken
+from local_full_text_search.services.startup_diagnostics import (
+    frozen_runtime_error_message,
+    frozen_runtime_issues,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +56,15 @@ class ScanWorker(QObject):
     @Slot()
     def run(self) -> None:
         try:
+            self.progress.emit(
+                {
+                    "stage": "starting",
+                    "phase_label": "正在启动更新并检查运行组件…",
+                }
+            )
+            runtime_issues = frozen_runtime_issues()
+            if runtime_issues:
+                raise RuntimeError(frozen_runtime_error_message(runtime_issues))
             db = DatabaseManager(self.db_path)
             # A current-schema database is already usable by the GUI.  Avoid
             # rebuilding a large FTS table before an incremental run; legacy
