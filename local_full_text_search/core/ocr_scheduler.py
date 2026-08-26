@@ -211,6 +211,7 @@ class OcrRequestRepository:
         worker_id: str,
         result_spool_path: Path,
         result_digest: str,
+        timeout_seconds: float = 30.0,
     ) -> None:
         if not result_spool_path.is_file():
             raise ValueError("OCR result spool is missing")
@@ -219,7 +220,7 @@ class OcrRequestRepository:
         ).hexdigest()
         if actual_digest != str(result_digest):
             raise ValueError("OCR result spool digest mismatch")
-        with self.database.connect() as con:
+        with self.database.connect(timeout_seconds=timeout_seconds) as con:
             updated = con.execute(
                 """
                 UPDATE ocr_requests
@@ -290,8 +291,9 @@ class OcrRequestRepository:
         request_id: int,
         *,
         checkpoint_cursor: str = "",
+        timeout_seconds: float = 30.0,
     ) -> None:
-        with self.database.connect() as con:
+        with self.database.connect(timeout_seconds=timeout_seconds) as con:
             con.execute(
                 """
                 UPDATE ocr_requests
@@ -308,8 +310,10 @@ class OcrRequestRepository:
         request_id: int,
         error_code: str,
         message: str,
+        *,
+        timeout_seconds: float = 30.0,
     ) -> None:
-        with self.database.connect() as con:
+        with self.database.connect(timeout_seconds=timeout_seconds) as con:
             con.execute(
                 """
                 UPDATE ocr_requests

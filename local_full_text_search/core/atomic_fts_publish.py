@@ -11,6 +11,7 @@ from local_full_text_search.core.database import (
     DatabaseManager,
     utc_now,
 )
+from local_full_text_search.core.foreground_activity import wait_for_search_idle
 
 
 class IndexPublishError(RuntimeError):
@@ -113,6 +114,9 @@ class IndexVersionPublisher:
         golden_query_gate: Callable[[sqlite3.Connection], bool],
         failpoint: str = "",
     ) -> IndexPublishResult:
+        # Publication replaces the active projection. It must wait for the
+        # foreground read lease instead of competing with a live search.
+        wait_for_search_idle(None)
         failed_gates = self._failed_gates(
             int(version_id),
             writer_idle=writer_idle,
@@ -311,6 +315,16 @@ class IndexVersionPublisher:
                 _set_state(con, "active_index_version", str(int(version_id)))
                 _set_state(con, "content_fts_dirty", "0")
                 _set_state(con, "full_batch_incomplete", "0")
+                _set_state(con, "partial_search_projection_active", "0")
+                con.execute(
+                    """
+                    INSERT INTO index_state(key, value)
+                    VALUES ('search_projection_generation', '1')
+                    ON CONFLICT(key) DO UPDATE SET
+                        value = CAST(COALESCE(index_state.value, '0') AS INTEGER) + 1
+                    """
+                )
+                _set_state(con, "search_projection_updated_at", now)
                 if version["root_id"] is not None:
                     con.execute(
                         """

@@ -27,3 +27,4 @@ class SearchQuery:
     max_results: int = 1000
     page: int = 1
     cursor: str | None = None
+    sort_by: str = "relevance"

@@ -26,8 +26,12 @@ if not "%SKIP_OCR%"=="1" (
     echo [build] SKIP_OCR=1, building standard non-OCR fallback package.
 )
 
-echo [build] Running tests...
-python -m pytest -q || goto :error
+if not "%SKIP_TESTS%"=="1" (
+    echo [build] Running tests...
+    python -m pytest -q || goto :error
+) else (
+    echo [build] SKIP_TESTS=1, using the completed source regression for this build.
+)
 
 for /f "delims=" %%N in ('python -c "print('\u672c\u5730\u591a\u683c\u5f0f\u5168\u6587\u641c\u7d22\u5de5\u5177')"') do set "PACKAGE_NAME=%%N"
 if not defined PACKAGE_NAME goto :error

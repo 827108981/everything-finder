@@ -8,8 +8,10 @@ from pathlib import Path
 import pytest
 
 from app import seed_failure_fallback_demo
+from local_full_text_search.config.defaults import AppSettings
 from local_full_text_search.core.atomic_fts_publish import IndexVersionPublisher
-from local_full_text_search.core.database import DatabaseManager
+from local_full_text_search.core.database import SCHEMA_VERSION, DatabaseManager
+from local_full_text_search.core.index_manager import IndexManager
 from local_full_text_search.core.search_engine import SearchEngine
 from local_full_text_search.models.content_block import ContentBlock
 from local_full_text_search.models.index_metrics import IndexRunMetrics
@@ -80,7 +82,7 @@ def test_fts_02r_schema_v8_has_scope_exclusion_history(tmp_path: Path) -> None:
             )
         }
 
-    assert version == 8
+    assert version == SCHEMA_VERSION
     assert "index_scope_exclusions" in tables
 
 
@@ -403,6 +405,40 @@ def test_zero_blocker_force_complete_repairs_residual_state(
     ).total_confirmed == 1
 
 
+def test_clean_force_complete_skips_full_fts_rebuild(
+    tmp_path: Path,
+) -> None:
+    """A no-op repair must not rebuild the complete FTS projection."""
+
+    database, _root_id, file_id, source = _database_with_file(
+        tmp_path,
+        filename="already-indexed.txt",
+    )
+    _store_success(
+        database,
+        file_id,
+        source,
+        token="CLEAN_PROJECTION_VISIBLE_TOKEN",
+    )
+
+    progress: list[dict[str, object]] = []
+    result = database.force_complete_current_scope(
+        reason="no-op repair regression",
+        operation_source="test_clean_force_complete",
+        progress_callback=progress.append,
+    )
+
+    assert result["excluded_files"] == 0
+    assert not any(
+        event.get("stage") in {"rebuilding_content_fts", "updating_filename_fts"}
+        for event in progress
+    )
+    assert database.index_readiness()["ready"] is True
+    assert SearchEngine(database).search(
+        SearchQuery(text="CLEAN_PROJECTION_VISIBLE_TOKEN", mode="exact")
+    ).total_confirmed == 1
+
+
 def test_last_exclusion_auto_converges_successful_file_stale_task(
     tmp_path: Path,
 ) -> None:
@@ -494,6 +530,105 @@ def test_fts_02r_source_change_invalidates_exact_version_exclusion(
     assert len(history) == 1
     assert history[0]["invalidated_at"]
     assert history[0]["invalidation_reason"] == "source_identity_changed"
+
+
+def test_manual_excluded_unchanged_file_is_not_requeued_by_retry_update(
+    tmp_path: Path,
+) -> None:
+    database, root_id, file_id, source = _database_with_file(tmp_path)
+    database.record_failure(file_id, "PARSER_ERROR", "failure")
+    database.exclude_files_from_index(
+        [file_id],
+        reason="keep this exact source version excluded",
+        operation_source="test",
+    )
+
+    returned_id, changed = database.upsert_file_metadata(
+        root_id,
+        source,
+        retry_failed_files=True,
+        parser_version="new-parser-version",
+    )
+
+    assert returned_id == file_id
+    assert changed is False
+    assert len(database.excluded_files()) == 1
+    with database.connect() as connection:
+        row = connection.execute(
+            "SELECT parse_status, parser_version FROM files WHERE id = ?",
+            (file_id,),
+        ).fetchone()
+    assert row["parse_status"] == "failed"
+    assert row["parser_version"] != "new-parser-version"
+
+
+def test_incremental_update_skips_unchanged_manual_exclusion(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    source = root / "broken.zip"
+    source.write_bytes(b"not a zip archive")
+    database = DatabaseManager(tmp_path / "index.db")
+    database.initialize()
+    root_id = database.add_root(root)
+    manager = IndexManager(database, AppSettings(retry_failed_files=True))
+
+    first = manager.index_root(root_id)
+    assert first.failed == 1
+    file_id = int(database.failed_files()[0]["id"])
+    database.exclude_files_from_index(
+        [file_id],
+        reason="exclude unchanged failure",
+        operation_source="test",
+    )
+
+    second = manager.index_root(root_id)
+
+    assert second.failed == 0
+    assert second.indexed == 0
+    assert second.skipped == 1
+    assert len(database.excluded_files()) == 1
+
+
+def test_terminal_failure_requires_explicit_retry_request(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    source = root / "broken.txt"
+    source.write_text("broken", encoding="utf-8")
+    database = DatabaseManager(tmp_path / "index.db")
+    database.initialize()
+    root_id = database.add_root(root)
+    file_id, _ = database.upsert_file_metadata(root_id, source)
+    database.record_failure(
+        file_id,
+        "PARSE_FAILED",
+        "broken",
+        parser_name="text",
+    )
+
+    _same_id, changed = database.upsert_file_metadata(
+        root_id,
+        source,
+        retry_failed_files=False,
+    )
+    assert changed is False
+
+    queued = database.queue_files_for_retry([file_id])
+    assert queued == 1
+    with database.connect() as connection:
+        status = connection.execute(
+            "SELECT parse_status FROM files WHERE id = ?",
+            (file_id,),
+        ).fetchone()["parse_status"]
+    assert status == "pending"
+
+    _same_id, changed = database.upsert_file_metadata(
+        root_id,
+        source,
+        retry_failed_files=False,
+    )
+    assert changed is True
 
 
 def test_fts_02r_restore_reincludes_file_and_keeps_audit_history(

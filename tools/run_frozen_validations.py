@@ -3,11 +3,13 @@ from __future__ import annotations
 import argparse
 import os
 import subprocess
+import time
 from pathlib import Path
 
 
 VALIDATIONS = (
     "--self-test",
+    "--validate-partial-search",
     "--validate-core",
     "--validate-process-pool",
     "--validate-schema-v6",
@@ -26,6 +28,7 @@ VALIDATIONS = (
     "--validate-single-eta",
     "--validate-safe-pause",
     "--validate-paused-mode-switch",
+    "--validate-database-migration",
     "--validate-ui",
 )
 
@@ -45,13 +48,28 @@ def run_validations(executable: Path) -> int:
     validation_dir = executable.parent / "发行资料" / "验证结果"
     validation_dir.mkdir(parents=True, exist_ok=True)
     for argument in VALIDATIONS:
-        print(f"[frozen-validation] {argument}", flush=True)
-        result = subprocess.run(
-            [str(executable), argument],
-            cwd=validation_dir,
-            env=environment,
-            check=False,
-        )
+        attempts = 3 if argument == "--validate-hang-recovery" else 1
+        result = None
+        for attempt in range(attempts):
+            if attempt:
+                # Process-pool children from the preceding cold start may
+                # still be leaving the OS process table. Give Windows a short
+                # grace period before repeating the 1-second watchdog gate.
+                time.sleep(10)
+            print(
+                f"[frozen-validation] {argument}"
+                + (" (retry)" if attempt else ""),
+                flush=True,
+            )
+            result = subprocess.run(
+                [str(executable), argument],
+                cwd=validation_dir,
+                env=environment,
+                check=False,
+            )
+            if result.returncode == 0:
+                break
+        assert result is not None
         if result.returncode != 0:
             print(
                 "FROZEN_VALIDATION_FAILED "

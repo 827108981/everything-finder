@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "application_version": "1.5.0",
+  "render_size": [
+    1280,
+    800
+  ],
+  "font_family": "Microsoft YaHei UI",
+  "data_notice": "当前版本真实界面组件，内容为演示数据",
+  "files": [
+    {
+      "name": "search_results.png",
+      "bytes": 61639,
+      "sha256": "a74940a50bc4abcf6731897e893c708c541c1f0e870075867961c289c13e18bd"
+    },
+    {
+      "name": "index_running.png",
+      "bytes": 39542,
+      "sha256": "c5558694851ed93be9e50e68e5ecd90fc7c9d5d3fcfdbd7432f0ba11ccc7d6b8"
+    },
+    {
+      "name": "index_paused.png",
+      "bytes": 38054,
+      "sha256": "d6b5c2cd5f1d1e865b9ec075597253aa9aa656198b3667c0addb667cb95b79a2"
+    },
+    {
+      "name": "failed_files.png",
+      "bytes": 63672,
+      "sha256": "b13c4280338472eedea7d1448f8feb9645bc92b6da37331ed456aaf1391d28b2"
+    },
+    {
+      "name": "settings_database.png",
+      "bytes": 48449,
+      "sha256": "8f7d376ddc23825c66409f60ec4975ce9f2a6f6141518c7e7d10d52563373ece"
+    },
+    {
+      "name": "search_controls.png",
+      "bytes": 11668,
+      "sha256": "3b05c4a5eb6eb31ff42e1066bc85762126da43dfc3932f3ca257a8922a8500a2"
+    },
+    {
+      "name": "index_status.png",
+      "bytes": 16566,
+      "sha256": "3ef4194febdfea21735c855cc373a71c5439d51dda1e894b45ef42b75fb52386"
+    },
+    {
+      "name": "database_settings_detail.png",
+      "bytes": 25022,
+      "sha256": "431ce02f38bb51c8408fbf140f34e069981ab3568099f8d4c438bd62c84dfc6c"
+    }
+  ]
+}

@@ -8,6 +8,10 @@ from PySide6.QtCore import QObject, Signal, Slot
 
 from local_full_text_search.core.database import DatabaseManager
 from local_full_text_search.core.errors import CancelledError
+from local_full_text_search.core.foreground_activity import (
+    SearchLease,
+    acquire_search_lease,
+)
 from local_full_text_search.core.search_engine import SearchEngine
 from local_full_text_search.core.task_manager import CancelToken
 from local_full_text_search.models.search_query import SearchQuery
@@ -21,6 +25,7 @@ class SearchWorker(QObject):
     progress = Signal(object)
     cancelled = Signal()
     failed = Signal(str)
+    lease_status = Signal(str)
 
     def __init__(self, db_path: Path, query: SearchQuery) -> None:
         super().__init__()
@@ -29,10 +34,23 @@ class SearchWorker(QObject):
         self.token = CancelToken()
         self._database: DatabaseManager | None = None
         self._database_lock = threading.Lock()
+        self._lease: SearchLease | None = None
 
     @Slot()
     def run(self) -> None:
         try:
+            self.lease_status.emit("waiting")
+            if self.token.cancelled:
+                raise CancelledError("搜索已取消")
+            try:
+                self._lease = acquire_search_lease(
+                    f"search:{id(self)}",
+                    cancel_event=None,
+                    max_wait_seconds=2.0,
+                )
+            except TimeoutError as exc:
+                raise CancelledError("正在等待上一搜索结束") from exc
+            self.lease_status.emit("active")
             db = DatabaseManager(self.db_path)
             with self._database_lock:
                 self._database = db
@@ -51,6 +69,11 @@ class SearchWorker(QObject):
             logger.exception("Search failed")
             self.failed.emit(str(exc) or exc.__class__.__name__)
         finally:
+            lease = self._lease
+            self._lease = None
+            if lease is not None:
+                lease.release()
+                self.lease_status.emit("released")
             with self._database_lock:
                 self._database = None
 

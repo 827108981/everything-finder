@@ -314,6 +314,31 @@ def test_main_window_background_exclusion_cleans_thread_state(
     window.close()
 
 
+def test_index_failure_is_reported_without_modal_dialog(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _app()
+    database = DatabaseManager(tmp_path / "index.db")
+    database.initialize()
+    window = MainWindow(
+        database,
+        AppSettings(monitor_file_changes=False),
+        SettingsService(tmp_path / "settings.json"),
+    )
+    critical_messages: list[str] = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "critical",
+        lambda _parent, _title, message: critical_messages.append(str(message)),
+    )
+
+    window.on_scan_failed("injected recoverable index failure")
+
+    assert critical_messages == []
+    window.close()
+
+
 def test_main_window_cancel_and_failure_restore_controls(
     tmp_path: Path,
     monkeypatch,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import fnmatch
 import hashlib
+import logging
 import os
 import time
 import uuid
@@ -22,6 +23,8 @@ from local_full_text_search.core.content_fingerprint import (
     OOXML_EXTENSIONS,
 )
 from local_full_text_search.core.errors import (
+    CancelledError,
+    PauseRequestedError,
     ZipMemberContentChangedError,
     ZipMemberDirectoryChangedError,
     ZipMemberEncryptedError,
@@ -38,6 +41,18 @@ from local_full_text_search.parsers.zip_parser import (
 )
 
 
+def _sqlite_int64_or_zero(value: object) -> int:
+    """Normalize Windows unsigned identifiers before crossing into SQLite."""
+
+    try:
+        numeric = int(value or 0)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+    if -(1 << 63) <= numeric <= (1 << 63) - 1:
+        return numeric
+    return 0
+
+
 @dataclass(frozen=True, slots=True)
 class PreparedFileMetadata:
     path: str
@@ -47,6 +62,7 @@ class PreparedFileMetadata:
     modified_time_ns: int
     content_hash: str | None = None
     worker_pid: int = 0
+    file_reference: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,6 +112,19 @@ class PreparedZipMemberResult:
     worker_pid: int
     image_width: int = 0
     image_height: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedZipMemberBatchItem:
+    request_index: int
+    result: PreparedZipMemberResult | None = None
+    error_type: str = ""
+    error_message: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedZipMemberBatchResult:
+    items: tuple[PreparedZipMemberBatchItem, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -299,6 +328,9 @@ def stat_file_batch(
                     modified_time_ns=int(stat.st_mtime_ns),
                     content_hash=content_hash,
                     worker_pid=os.getpid(),
+                    file_reference=_sqlite_int64_or_zero(
+                        getattr(stat, "st_ino", 0)
+                    ),
                 )
             )
         except Exception as exc:
@@ -327,6 +359,7 @@ def fingerprint_source(
     force_full_hash: bool = False,
     token: ProcessRunControlToken | None = None,
     retain_spool: bool = True,
+    prefer_low_cost: bool = False,
 ) -> FingerprintSourceResult:
     """Fingerprint one source with byte-semantic progress and atomic spool."""
 
@@ -397,12 +430,40 @@ def fingerprint_source(
             image_width=image_width,
             image_height=image_height,
         )
+    if prefer_low_cost and not force_full_hash and stat_before.st_size <= 64 * 1024 * 1024:
+        metadata_payload = (
+            f"metadata:{path}:{stat_before.st_size}:{stat_before.st_mtime_ns}"
+        ).encode("utf-8", errors="surrogatepass")
+        metadata_key = hashlib.sha256(metadata_payload).hexdigest()
+        reporter.advance(
+            phase="content_hash",
+            completed=1,
+            total=1,
+            cursor="metadata:1",
+            checkpoint_version=1,
+            detail=str(path),
+        )
+        return FingerprintSourceResult(
+            source_path=str(path),
+            fingerprint=ContentFingerprint(
+                f"metadata:{metadata_key}",
+                int(stat_before.st_size),
+                "metadata",
+            ),
+            spool_path=None,
+            bytes_read=0,
+            source_size=int(stat_before.st_size),
+            source_modified_time_ns=int(stat_before.st_mtime_ns),
+            worker_pid=os.getpid(),
+            image_width=image_width,
+            image_height=image_height,
+        )
     if (
         force_full_hash
         or stat_before.st_size <= 64 * 1024 * 1024
         or suffix in {".doc", ".xls", ".ppt"}
     ):
-        if retain_spool:
+        if retain_spool or force_full_hash:
             digest, spool_path, bytes_read = _sha256_to_spool_with_progress(
                 reporter,
                 path,
@@ -505,6 +566,7 @@ def fingerprint_source_batch(
                 bool(force_full_hash),
                 token,
                 retain_spool,
+                True,
             )
             results.append(result)
             byte_offset += result.bytes_read
@@ -667,6 +729,132 @@ def prepare_zip_member_task(
         temporary.unlink(missing_ok=True)
         target.unlink(missing_ok=True)
         raise
+
+
+def prepare_zip_member_batch_task(
+    reporter: PlanningProgressReporter,
+    archive_path: Path,
+    requests: tuple[tuple[int, str, int, int, str], ...],
+    spool_dir: Path,
+    validation_hang: bool = False,
+    control_dir: Path | None = None,
+) -> PreparedZipMemberBatchResult:
+    """Prepare several members while keeping one outer ZIP handle open.
+
+    A request is ``(member_index, internal_path, expected_size, expected_crc32,
+    suffix)``. Errors are isolated to the member so one damaged entry cannot
+    abort the rest of the planning batch. Cancellation remains fatal to the
+    process and is handled by the existing recoverable runner.
+    """
+
+    archive_path = Path(archive_path)
+    spool_dir = Path(spool_dir)
+    spool_dir.mkdir(parents=True, exist_ok=True)
+    token = (
+        ProcessRunControlToken(control_dir, pause_behavior="block")
+        if control_dir is not None
+        else None
+    )
+    if validation_hang:
+        _hang_for_validation()
+    results: list[PreparedZipMemberBatchItem] = []
+    with zipfile.ZipFile(archive_path) as archive:
+        infos = archive.infolist()
+        for request_index, request in enumerate(requests):
+            member_index, internal_path, expected_size, expected_crc32, suffix = request
+            target = spool_dir / f"{uuid.uuid4().hex}{str(suffix).lower()}"
+            temporary = target.with_suffix(target.suffix + ".tmp")
+            digest = hashlib.sha256()
+            bytes_read = 0
+            try:
+                reporter.advance(
+                    phase="zip_member_prepare",
+                    total=max(0, int(expected_size)),
+                    cursor="offset:0",
+                    detail=str(internal_path),
+                )
+                if member_index < 0 or member_index >= len(infos):
+                    raise ZipMemberDirectoryChangedError(
+                        "ZIP member directory changed during indexing"
+                    )
+                info = infos[member_index]
+                if info.is_dir():
+                    raise ZipMemberDirectoryChangedError(
+                        "ZIP member directory changed during indexing"
+                    )
+                if info.flag_bits & 0x1:
+                    raise ZipMemberEncryptedError("ZIP member is encrypted")
+                decoded_name = decoded_zip_member_name(info)
+                if safe_zip_member_name(decoded_name) != internal_path:
+                    raise ZipMemberDirectoryChangedError(
+                        "ZIP member directory changed during indexing"
+                    )
+                if int(info.file_size) != int(expected_size):
+                    raise ZipMemberSizeChangedError(
+                        "ZIP member size changed during indexing"
+                    )
+                if int(info.CRC) != int(expected_crc32):
+                    raise ZipMemberContentChangedError(
+                        "ZIP member content changed during indexing"
+                    )
+                with archive.open(info) as source, temporary.open("wb") as output:
+                    for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                        _planning_safe_point(
+                            token,
+                            task_id=(
+                                "planning:zip_member_prepare_batch:"
+                                f"{archive_path}:{internal_path}"
+                            ),
+                            phase="zip_member_prepare",
+                            cursor=f"offset:{bytes_read}",
+                            checkpoint_version=bytes_read,
+                            checkpoint_checksum=digest.copy().hexdigest(),
+                        )
+                        digest.update(chunk)
+                        output.write(chunk)
+                        bytes_read += len(chunk)
+                        reporter.advance(
+                            phase="zip_member_prepare",
+                            completed=bytes_read,
+                            total=max(0, int(expected_size)),
+                            cursor=f"offset:{bytes_read}",
+                            bytes_read=bytes_read,
+                            checkpoint_version=bytes_read,
+                            detail=str(internal_path),
+                        )
+                temporary.replace(target)
+                image_width, image_height = _planning_image_dimensions(
+                    target,
+                    target.suffix.lower(),
+                )
+                results.append(
+                    PreparedZipMemberBatchItem(
+                        request_index=request_index,
+                        result=PreparedZipMemberResult(
+                            spool_path=target,
+                            sha256=digest.hexdigest(),
+                            bytes_read=bytes_read,
+                            worker_pid=os.getpid(),
+                            image_width=image_width,
+                            image_height=image_height,
+                        ),
+                    )
+                )
+            except (CancelledError, PauseRequestedError):
+                temporary.unlink(missing_ok=True)
+                target.unlink(missing_ok=True)
+                raise
+            except BaseException as exc:
+                temporary.unlink(missing_ok=True)
+                target.unlink(missing_ok=True)
+                results.append(
+                    PreparedZipMemberBatchItem(
+                        request_index=request_index,
+                        error_type=type(exc).__name__,
+                        error_message=str(exc),
+                    )
+                )
+    return PreparedZipMemberBatchResult(items=tuple(results))
 
 
 def scan_pdf_document_task(
@@ -982,7 +1170,10 @@ def _single_directory_walk(root_path: Path):
 
 
 def _raise_walk_error(error: OSError) -> None:
-    raise error
+    logging.getLogger(__name__).warning(
+        "Skipping inaccessible directory during discovery: %s",
+        error,
+    )
 
 
 def _is_hidden(path: Path) -> bool:

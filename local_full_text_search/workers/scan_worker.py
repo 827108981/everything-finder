@@ -4,6 +4,7 @@ import logging
 import threading
 import time
 from pathlib import Path
+from collections.abc import Sequence
 
 from PySide6.QtCore import QObject, Signal, Slot
 
@@ -25,11 +26,21 @@ class ScanWorker(QObject):
     finished = Signal(object)
     failed = Signal(str)
 
-    def __init__(self, db_path: Path, settings: AppSettings, *, performance_mode: bool = False) -> None:
+    def __init__(
+        self,
+        db_path: Path,
+        settings: AppSettings,
+        *,
+        performance_mode: bool = False,
+        root_ids: Sequence[int] | None = None,
+        file_ids: Sequence[int] | None = None,
+    ) -> None:
         super().__init__()
         self.db_path = db_path
         self.settings = settings
         self.performance_mode = performance_mode
+        self.root_ids = tuple(int(root_id) for root_id in (root_ids or ()))
+        self.file_ids = tuple(int(file_id) for file_id in (file_ids or ()))
         self.token = CancelToken()
         self.manager: IndexManager | None = None
         self._pause_monitor_lock = threading.Lock()
@@ -42,7 +53,13 @@ class ScanWorker(QObject):
     def run(self) -> None:
         try:
             db = DatabaseManager(self.db_path)
-            db.initialize()
+            # A current-schema database is already usable by the GUI.  Avoid
+            # rebuilding a large FTS table before an incremental run; legacy
+            # databases still take the full migration path in this worker.
+            if db._startup_fast_path_ready():
+                db.initialize(startup_fast=True)
+            else:
+                db.initialize()
             scan_started_at = utc_now()
             effective_settings = self.settings
             profile_payload: dict[str, object] | None = None
@@ -87,7 +104,12 @@ class ScanWorker(QObject):
             )
             if self.token.paused:
                 self.manager.request_pause()
-            summary = self.manager.index_enabled_roots(self.token, self.progress.emit)
+            summary = self.manager.index_enabled_roots(
+                self.token,
+                self.progress.emit,
+                root_ids=self.root_ids or None,
+                file_ids=self.file_ids or None,
+            )
             run_reports = db.recent_index_runs_since(scan_started_at)
             self.finished.emit(
                 {

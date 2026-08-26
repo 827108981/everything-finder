@@ -99,3 +99,27 @@ def test_startup_error_categories_are_actionable(tmp_path: Path) -> None:
     )
     assert "DATABASE_LOCKED" in message
     assert str(diagnostics.log_path) in message
+
+
+def test_slow_stage_only_records_diagnostics_without_modal_dialog(tmp_path: Path) -> None:
+    diagnostics = StartupDiagnostics(base_dir=tmp_path, timeout_seconds=1)
+    diagnostics.begin()
+    diagnostics.stage_started("初始化索引数据库")
+    with patch.object(diagnostics, "show_native_error") as show_error:
+        diagnostics._report_slow_stage("初始化索引数据库")
+    show_error.assert_not_called()
+    records = [
+        json.loads(line)
+        for line in diagnostics.log_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert any(record["event"] == "STAGE_SLOW" for record in records)
+
+
+def test_current_schema_fast_start_does_not_rebuild_fts(tmp_path: Path) -> None:
+    from local_full_text_search.core.database import DatabaseManager
+
+    path = tmp_path / "search.db"
+    database = DatabaseManager(path)
+    database.initialize()
+    database.initialize(startup_fast=True)
+    assert database._startup_fast_path_ready()

@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import csv
+import logging
 import os
+import shutil
+import sqlite3
 import time
 from collections.abc import Callable
 from pathlib import Path
 
 from PySide6.QtCore import QTimer, QThread, Qt, Signal
-from PySide6.QtGui import QAction, QCloseEvent, QKeySequence, QShortcut
+from PySide6.QtGui import QAction, QCloseEvent, QGuiApplication, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -42,18 +45,34 @@ from local_full_text_search.config.constants import APP_DISPLAY_NAME, FILE_TYPE_
 from local_full_text_search.config.defaults import AppSettings
 from local_full_text_search.core.database import DatabaseManager
 from local_full_text_search.core.file_monitor import FileMonitor
-from local_full_text_search.core.open_location import open_file, open_parent_folder
+from local_full_text_search.core.open_location import (
+    open_file,
+    open_file_at_location,
+    open_parent_folder,
+)
 from local_full_text_search.core.search_time_estimator import SearchEstimateContext, SearchTimeEstimator
 from local_full_text_search.models.search_query import SearchQuery
 from local_full_text_search.services.settings_service import SettingsService
+from local_full_text_search.services.database_location_service import (
+    DatabaseLocationService,
+)
 from local_full_text_search.ui.preview_panel import PreviewPanel
-from local_full_text_search.ui.result_view import ResultView
+from local_full_text_search.ui.result_view import ResultView, result_hits
 from local_full_text_search.workers.scan_worker import ScanWorker
 from local_full_text_search.workers.scope_exclusion_worker import ScopeExclusionWorker
+from local_full_text_search.workers.root_removal_worker import RootRemovalWorker
+from local_full_text_search.workers.database_migration_worker import (
+    DatabaseMigrationWorker,
+)
+from local_full_text_search.workers.database_snapshot_worker import (
+    DatabaseSnapshotWorker,
+)
 from local_full_text_search.workers.search_worker import SearchWorker
+from local_full_text_search.workers.search_history_worker import SearchHistoryWorker
 
 
 PAGE_INDEX = {"search": 0, "index": 1, "failed": 2, "settings": 3}
+logger = logging.getLogger(__name__)
 
 
 def performance_mode_notice() -> str:
@@ -74,8 +93,21 @@ def format_index_scope_status(readiness: dict[str, object]) -> str:
         details.append(f"已人工排除 {excluded} 个")
     if video:
         details.append(f"排除视频 {video} 个")
+    task_state = str(readiness.get("background_task_state") or "")
+    unfinished = int(readiness.get("unfinished_tasks") or 0)
+    if task_state == "running":
+        details.append(f"后台任务运行中 {unfinished} 个")
+    elif task_state == "residual":
+        details.append(f"后台任务有残留 {unfinished} 个")
+    elif task_state == "converged":
+        details.append("后台任务已收敛")
     if bool(readiness.get("ready")):
         text = f"当前范围完成 {complete}/{eligible}"
+    elif bool(readiness.get("search_available")):
+        text = (
+            f"部分索引可搜索 {complete}/{eligible}"
+            f" · 待处理 {blocking}"
+        )
     else:
         if blocking:
             text = f"索引未完成 {complete}/{eligible} · 待处理 {blocking}"
@@ -102,17 +134,39 @@ class MainWindow(QMainWindow):
 
     file_change_detected = Signal(str)
 
-    def __init__(self, db: DatabaseManager, settings: AppSettings, settings_service: SettingsService) -> None:
+    def __init__(
+        self,
+        db: DatabaseManager,
+        settings: AppSettings,
+        settings_service: SettingsService,
+        *,
+        database_location_service: DatabaseLocationService | None = None,
+        defer_initial_refresh: bool = False,
+    ) -> None:
         super().__init__()
         self.db = db
         self.settings = settings
         self.settings_service = settings_service
+        self.database_location_service = (
+            database_location_service or DatabaseLocationService()
+        )
         self.search_thread: QThread | None = None
         self.search_worker: SearchWorker | None = None
+        self.search_priority_active = False
+        self.search_history_thread: QThread | None = None
+        self.search_history_worker: SearchHistoryWorker | None = None
         self.scan_thread: QThread | None = None
         self.scan_worker: ScanWorker | None = None
         self.exclusion_thread: QThread | None = None
         self.exclusion_worker: ScopeExclusionWorker | None = None
+        self.database_migration_thread: QThread | None = None
+        self.database_migration_worker: DatabaseMigrationWorker | None = None
+        self.database_snapshot_thread: QThread | None = None
+        self.database_snapshot_worker: DatabaseSnapshotWorker | None = None
+        self._snapshot_refresh_pending = False
+        self.root_removal_thread: QThread | None = None
+        self.root_removal_worker: RootRemovalWorker | None = None
+        self.database_migration_outcome: tuple[str, object] | None = None
         self.exclusion_outcome: tuple[str, object] | None = None
         self.exclusion_progress_payload: dict[str, object] = {}
         self.exclusion_started_at = 0.0
@@ -120,6 +174,23 @@ class MainWindow(QMainWindow):
         self.pending_monitor_scan = False
         self.force_complete_after_retry = False
         self.pending_force_complete_confirmation = False
+        self.force_complete_file_ids: list[int] = []
+        self.last_search_readiness_refresh = 0.0
+        self._scan_refresh_pending = False
+        self._scan_progress_text = "已完成 0/0"
+        self._startup_snapshot_ready = not defer_initial_refresh
+        self._startup_scan_requested = False
+        # A snapshot completion also occurs after every scan. Keep the startup
+        # request one-shot so that completion snapshots cannot start another
+        # full enabled-root scan on every launch cycle.
+        self._startup_scan_in_flight = False
+        self._startup_scan_consumed = False
+        self._scan_generation = 0
+        self._active_scan_generation = 0
+        self._pending_scan_root_ids: set[int] = set()
+        self._pending_scan_all_roots = False
+        self._pending_scan_performance = False
+        self._latest_readiness: dict[str, object] = {}
         self.closing = False
         self.page = 1
         self.total_confirmed = 0
@@ -133,14 +204,26 @@ class MainWindow(QMainWindow):
         self.exclusion_heartbeat_timer.timeout.connect(
             self.on_exclusion_heartbeat
         )
+        self.startup_scan_timer = QTimer(self)
+        self.startup_scan_timer.setSingleShot(True)
+        self.startup_scan_timer.timeout.connect(self._start_startup_incremental_scan)
+        self.monitor_scan_timer = QTimer(self)
+        self.monitor_scan_timer.setSingleShot(True)
+        self.monitor_scan_timer.timeout.connect(self._start_pending_monitor_scan)
 
         self.setWindowTitle(APP_DISPLAY_NAME)
         self.resize(1440, 900)
         self.setMinimumSize(1100, 700)
         self._build_shell()
+        self.settings_page.set_database_info(self.db.db_path)
         self._install_shortcuts()
         self.file_change_detected.connect(self.on_monitored_file_changed)
-        self.refresh_all()
+        if defer_initial_refresh:
+            # The first aggregate queries can scan a large SQLite database.
+            # Run them after the window is paintable and off the Qt UI thread.
+            QTimer.singleShot(0, self.start_database_snapshot)
+        else:
+            self.refresh_all()
 
     def _build_shell(self) -> None:
         central = QWidget()
@@ -176,6 +259,7 @@ class MainWindow(QMainWindow):
         self.preview_panel.setVisible(False)
         self.preview_panel.open_file_requested.connect(self.open_path)
         self.preview_panel.open_folder_requested.connect(self.open_folder_path)
+        self.preview_panel.open_location_requested.connect(self.open_location)
         self.preview_panel.close_requested.connect(self.hide_preview)
         self.search_splitter.addWidget(self.preview_panel)
         self.search_splitter.setSizes([980, 0])
@@ -195,6 +279,7 @@ class MainWindow(QMainWindow):
         self.search_page.next_page_requested.connect(self.next_page_search)
         self.search_page.open_requested.connect(self.open_path)
         self.search_page.open_folder_requested.connect(self.open_folder_path)
+        self.search_page.open_location_requested.connect(self.open_location)
         self.search_page.reindex_requested.connect(self.reindex_file)
         self.search_page.result_selected.connect(self.show_preview)
         self.search_page.clear_history_requested.connect(self.clear_search_history)
@@ -202,6 +287,9 @@ class MainWindow(QMainWindow):
         self.index_page.add_root_requested.connect(self.add_root)
         self.index_page.scan_requested.connect(self.start_scan)
         self.index_page.performance_scan_requested.connect(
+            self.confirm_performance_scan
+        )
+        self.index_page.scope_performance_scan_requested.connect(
             self.confirm_performance_scan
         )
         self.index_page.pause_requested.connect(lambda: self.scan_worker.pause() if self.scan_worker else None)
@@ -215,7 +303,7 @@ class MainWindow(QMainWindow):
         self.index_page.open_folder_requested.connect(self.open_path)
         self.index_page.failed_requested.connect(lambda: self.switch_page("failed"))
 
-        self.failed_page.retry_requested.connect(self.start_scan)
+        self.failed_page.retry_requested.connect(self.retry_failed_files)
         self.failed_page.open_folder_requested.connect(self.open_folder_path)
         self.failed_page.refresh_requested.connect(self.refresh_failed_page)
         self.failed_page.export_requested.connect(self.export_failed_rows)
@@ -233,6 +321,12 @@ class MainWindow(QMainWindow):
         )
 
         self.settings_page.save_requested.connect(self.save_settings)
+        self.settings_page.database_migration_requested.connect(
+            self.request_database_migration
+        )
+        self.settings_page.database_migration_cancel_requested.connect(
+            self.cancel_database_migration
+        )
 
     def _install_shortcuts(self) -> None:
         QShortcut(QKeySequence("Ctrl+F"), self, activated=self.search_page.focus_search)
@@ -263,26 +357,200 @@ class MainWindow(QMainWindow):
         }
         self.top_bar.set_title(title_map[key], subtitle_map[key])
         self.sidebar.set_active(key)
-        if key == "failed" and self.exclusion_thread is None:
-            self.refresh_failed_page()
+        if (
+            key == "failed"
+            and self.exclusion_thread is None
+        ):
+            self.request_failed_snapshot_refresh()
 
     def refresh_all(self) -> None:
         roots = self.db.list_roots()
         stats = self.db.stats()
         readiness = self.db.index_readiness()
+        self._latest_readiness = dict(readiness)
         self.search_page.set_roots(roots)
         self.search_page.set_stats(stats, has_roots=bool(roots))
-        self.search_page.set_index_ready(bool(readiness["ready"]), readiness)
+        self.search_page.set_index_ready(
+            bool(readiness.get("search_available", readiness["ready"])),
+            readiness,
+        )
+        self.sidebar.set_failed_alert(
+            0
+            if self.scan_thread is not None
+            or not bool(readiness.get("failure_alert_ready", False))
+            else int(stats.get("blocking_files") or 0)
+        )
         self.index_page.set_roots(roots, self.root_stats_by_id())
         self.index_page.set_readiness(readiness)
-        self.refresh_failed_page()
+        if self.stack.currentIndex() == PAGE_INDEX["failed"]:
+            self.request_failed_snapshot_refresh()
         self.update_index_status()
         self.search_page.set_history(self.db.search_history())
         self.refresh_file_monitor()
 
+    def start_database_snapshot(self) -> None:
+        if self.closing or self.database_snapshot_thread is not None:
+            return
+        self.database_snapshot_thread = QThread()
+        self.database_snapshot_worker = DatabaseSnapshotWorker(
+            self.db.db_path,
+            page_size=self.failed_page.page_size,
+            page_offsets={
+                "blocking": self.failed_page.page_offset("blocking"),
+                "excluded": self.failed_page.page_offset("excluded"),
+                "metadata": self.failed_page.page_offset("metadata"),
+            },
+        )
+        self.database_snapshot_worker.moveToThread(self.database_snapshot_thread)
+        self.database_snapshot_thread.started.connect(
+            self.database_snapshot_worker.run
+        )
+        self.database_snapshot_worker.quick_ready.connect(
+            self.on_database_snapshot_quick_ready
+        )
+        self.database_snapshot_worker.finished.connect(
+            self.on_database_snapshot_finished
+        )
+        self.database_snapshot_worker.failed.connect(
+            self.on_database_snapshot_failed
+        )
+        self.database_snapshot_worker.cancelled.connect(
+            self.database_snapshot_thread.quit
+        )
+        self.database_snapshot_worker.finished.connect(
+            self.database_snapshot_thread.quit
+        )
+        self.database_snapshot_worker.failed.connect(
+            self.database_snapshot_thread.quit
+        )
+        self.database_snapshot_thread.finished.connect(
+            self.cleanup_database_snapshot
+        )
+        self.database_snapshot_thread.start()
+
+    def request_failed_snapshot_refresh(self) -> None:
+        """Refresh failure-page data without running database queries on UI."""
+
+        if self.closing:
+            return
+        if self.database_snapshot_thread is not None:
+            self._snapshot_refresh_pending = True
+            return
+        self.failed_page.set_snapshot_loading(True)
+        self.failed_page.set_status("正在加载未成功索引…")
+        self.start_database_snapshot()
+
+    def on_database_snapshot_quick_ready(self, payload: object) -> None:
+        if not isinstance(payload, dict) or self.closing:
+            return
+        roots = list(payload.get("roots") or [])
+        readiness = dict(payload.get("readiness") or {})
+        self._latest_readiness = readiness
+        self.search_page.set_roots(roots)
+        self.search_page.set_stats(readiness, has_roots=bool(roots))
+        self.sidebar.set_failed_alert(
+            0
+            if self.scan_thread is not None
+            or not bool(readiness.get("failure_alert_ready", False))
+            else int(readiness.get("blocking_files") or 0)
+        )
+        self.search_page.set_index_ready(
+            bool(readiness.get("search_available")),
+            readiness,
+        )
+        self.index_page.set_roots(roots, {})
+        self.index_page.set_readiness(readiness)
+        self.update_index_status(readiness)
+        self.top_bar.set_index_status("正在加载索引统计…", is_running=True)
+
+    def on_database_snapshot_finished(self, payload: object) -> None:
+        if not isinstance(payload, dict) or self.closing:
+            return
+        roots = list(payload.get("roots") or [])
+        stats = dict(payload.get("stats") or {})
+        readiness = dict(payload.get("readiness") or stats)
+        self._latest_readiness = readiness
+        self.search_page.set_roots(roots)
+        self.search_page.set_stats(stats, has_roots=bool(roots))
+        self.sidebar.set_failed_alert(
+            0
+            if self.scan_thread is not None
+            or not bool(readiness.get("failure_alert_ready", False))
+            else int(stats.get("blocking_files") or 0)
+        )
+        self.search_page.set_index_ready(
+            bool(readiness.get("search_available", readiness.get("ready"))),
+            readiness,
+        )
+        self.index_page.set_roots(
+            roots,
+            dict(payload.get("root_stats_by_id") or {}),
+        )
+        self.index_page.set_readiness(readiness)
+        self.failed_page.set_rows(
+            list(payload.get("failed_rows") or []),
+            list(payload.get("excluded_rows") or []),
+            list(payload.get("metadata_rows") or []),
+            totals=dict(payload.get("failed_counts") or {}),
+        )
+        self.failed_page.set_readiness(readiness)
+        self.failed_page.set_snapshot_loading(False)
+        self.search_page.set_history(list(payload.get("history") or []))
+        self.sidebar.set_failed_alert(
+            0
+            if self.scan_thread is not None
+            or not bool(readiness.get("failure_alert_ready", False))
+            else int((payload.get("failed_counts") or {}).get("blocking", 0))
+        )
+        self.update_index_status(readiness)
+        self.refresh_file_monitor()
+        self._startup_snapshot_ready = True
+        if (
+            self._startup_scan_requested
+            and not self._startup_scan_consumed
+            and not self._startup_scan_in_flight
+            and not self.startup_scan_timer.isActive()
+            and not self.closing
+        ):
+            self.startup_scan_timer.start(0)
+
+    def on_database_snapshot_failed(self, message: str) -> None:
+        if self.closing:
+            return
+        logger.warning("后台加载索引统计失败：%s", message)
+        self.failed_page.set_snapshot_loading(False)
+        self._startup_snapshot_ready = True
+        self.update_index_status(self._latest_readiness or None)
+        if (
+            self._startup_scan_requested
+            and not self._startup_scan_consumed
+            and not self._startup_scan_in_flight
+            and not self.startup_scan_timer.isActive()
+        ):
+            self.startup_scan_timer.start(0)
+
+    def cleanup_database_snapshot(self) -> None:
+        self.database_snapshot_thread = None
+        self.database_snapshot_worker = None
+        if self._snapshot_refresh_pending and not self.closing:
+            self._snapshot_refresh_pending = False
+            QTimer.singleShot(0, self.start_database_snapshot)
+        if (
+            self.pending_monitor_scan
+            and self.scan_thread is None
+            and self.exclusion_thread is None
+            and not self.closing
+        ):
+            self.monitor_scan_timer.start(0)
+        self._finish_close_if_idle()
+
     def refresh_file_monitor(self) -> None:
         self.file_monitor.stop()
-        if self.closing or not self.settings.monitor_file_changes:
+        if (
+            self.closing
+            or self.database_migration_thread is not None
+            or not self.settings.monitor_file_changes
+        ):
             return
         roots = [
             Path(str(row["path"]))
@@ -297,26 +565,135 @@ class MainWindow(QMainWindow):
             return
         self.pending_monitor_scan = True
         if self.scan_thread is None and self.exclusion_thread is None:
-            self.top_bar.set_index_status("检测到文件变化，点击更新", is_pending=True)
+            self.top_bar.set_index_status("检测到文件变化，后台准备增量更新", is_pending=True)
+            self.monitor_scan_timer.start(800)
+
+    def _start_startup_incremental_scan(self) -> None:
+        if (
+            self.closing
+            or self.scan_thread is not None
+            or not self._startup_snapshot_ready
+            or self._startup_scan_in_flight
+            or self._startup_scan_consumed
+        ):
+            return
+        # Consume the one-shot request before any database or scheduling work.
+        # A later snapshot callback can therefore never replay the same launch
+        # scan even if it arrives while the worker is being created.
+        self._startup_scan_requested = False
+        self._startup_scan_consumed = True
+        if not self.db.list_roots(enabled_only=True):
+            return
+        self._startup_scan_in_flight = True
+        # Changes already observed before this scan are covered by its own
+        # discovery/USN pass and must not immediately create a second scan.
+        self.pending_monitor_scan = False
+        self.start_scan()
+
+    def schedule_startup_incremental_scan(self) -> None:
+        """Queue the first background refresh after the window is visible."""
+
+        if (
+            self.closing
+            or self._startup_scan_in_flight
+            or self._startup_scan_consumed
+        ):
+            return
+        self._startup_scan_requested = True
+        if (
+            self._startup_snapshot_ready
+            and self.db.list_roots(enabled_only=True)
+            and not self.startup_scan_timer.isActive()
+        ):
+            self.startup_scan_timer.start(0)
+
+    def _start_pending_monitor_scan(self) -> None:
+        if self.closing or not self.pending_monitor_scan:
+            return
+        if (
+            self.scan_thread is not None
+            or self.exclusion_thread is not None
+            or self.database_snapshot_thread is not None
+        ):
+            return
+        root_ids = (
+            None
+            if self._pending_scan_all_roots or not self._pending_scan_root_ids
+            else tuple(sorted(self._pending_scan_root_ids))
+        )
+        performance_mode = self._pending_scan_performance
+        self._pending_scan_root_ids.clear()
+        self._pending_scan_all_roots = False
+        self._pending_scan_performance = False
+        self.pending_monitor_scan = False
+        self.start_scan(root_ids, performance_mode=performance_mode)
 
     def clear_search_history(self) -> None:
-        self.db.clear_search_history()
-        self.search_page.set_history([])
+        if self.database_migration_thread is not None:
+            self.search_page.set_status("数据库正在迁移，请等待完成")
+            return
+        self._start_search_history_update(clear=True)
+        self.search_page.set_status("正在清理搜索历史...")
+
+    def _start_search_history_update(
+        self,
+        query_text: str = "",
+        *,
+        clear: bool = False,
+    ) -> None:
+        if self.closing or self.search_history_thread is not None:
+            return
+        thread = QThread()
+        worker = SearchHistoryWorker(
+            self.db.db_path,
+            query_text=query_text,
+            clear=clear,
+        )
+        self.search_history_thread = thread
+        self.search_history_worker = worker
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self.on_search_history_finished)
+        worker.failed.connect(self.on_search_history_failed)
+        worker.finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        worker.failed.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self.cleanup_search_history_thread)
+        thread.start()
+
+    def on_search_history_finished(self, histories: object) -> None:
+        if isinstance(histories, list):
+            self.search_page.set_history([str(item) for item in histories])
+
+    def on_search_history_failed(self, message: str) -> None:
+        # Search history is ancillary state. It must never make a completed
+        # foreground search look failed or show a blocking error dialog.
+        logger.warning("Search history update failed: %s", message)
+
+    def cleanup_search_history_thread(self) -> None:
+        self.search_history_thread = None
+        self.search_history_worker = None
+        self._finish_close_if_idle()
 
     def refresh_failed_page(self) -> None:
-        readiness = self.db.index_readiness()
-        self.failed_page.set_rows(
-            self.db.failed_files(limit=2000),
-            self.db.excluded_files(limit=2000),
-            self.db.metadata_only_files(limit=2000),
-        )
-        self.failed_page.set_readiness(readiness)
+        self.request_failed_snapshot_refresh()
 
-    def update_index_status(self) -> None:
+    def update_index_status(
+        self,
+        readiness: dict[str, object] | None = None,
+    ) -> None:
+        if self.database_migration_thread is not None:
+            self.top_bar.set_index_status("正在迁移索引数据库...", is_running=True)
+            return
         if self.exclusion_thread is not None:
             self.top_bar.set_index_status("正在更新搜索索引...", is_running=True)
             return
-        readiness = self.db.index_readiness()
+        readiness = dict(readiness or self._latest_readiness)
+        if not readiness:
+            readiness = self.db.index_readiness()
+            self._latest_readiness = dict(readiness)
         if self.pending_monitor_scan and self.scan_thread is None:
             self.top_bar.set_index_status("检测到文件变化，点击更新", is_pending=True)
             return
@@ -328,19 +705,28 @@ class MainWindow(QMainWindow):
             return
         self.top_bar.set_index_status(
             format_index_scope_status(readiness),
-            is_running=self.scan_thread is not None,
-            is_error=self.scan_thread is None and blocking > 0,
-            is_pending=self.scan_thread is None and blocking == 0,
+            is_running=(
+                self.scan_thread is not None
+                or str(readiness.get("background_task_state") or "") == "running"
+            ),
+            is_error=(
+                self.scan_thread is None
+                and blocking > 0
+                and str(readiness.get("background_task_state") or "") != "running"
+            ),
+            is_pending=(
+                self.scan_thread is None
+                and blocking == 0
+                and str(readiness.get("background_task_state") or "") != "running"
+            ),
         )
 
     def exclude_failed_files(self, file_ids: list[int]) -> None:
+        if self.database_migration_thread is not None:
+            self.failed_page.set_status("数据库正在迁移，请等待完成")
+            return
         if self.exclusion_thread is not None:
             self.failed_page.set_status("搜索索引正在后台更新，请勿重复操作")
-            return
-        if self.scan_thread is not None:
-            self.failed_page.set_status(
-                "索引任务仍在运行，请先暂停并等待安全点"
-            )
             return
         selected = {
             int(row["id"]): row
@@ -387,8 +773,8 @@ class MainWindow(QMainWindow):
     def start_scope_exclusion(self, file_ids: list[int], reason: str) -> None:
         self._start_scope_update(file_ids, reason=reason, force_complete=False)
 
-    def start_scope_repair(self, reason: str) -> None:
-        self._start_scope_update([], reason=reason, force_complete=True)
+    def start_scope_repair(self, file_ids: list[int], reason: str) -> None:
+        self._start_scope_update(file_ids, reason=reason, force_complete=True)
 
     def _start_scope_update(
         self,
@@ -397,11 +783,11 @@ class MainWindow(QMainWindow):
         reason: str,
         force_complete: bool,
     ) -> None:
+        if self.database_migration_thread is not None:
+            self.failed_page.set_status("数据库正在迁移，请等待完成")
+            return
         if self.exclusion_thread is not None:
             self.failed_page.set_status("搜索索引正在后台更新，请勿重复操作")
-            return
-        if self.scan_thread is not None:
-            self.failed_page.set_status("索引任务仍在运行，请先等待当前任务结束")
             return
         self.pending_search = False
         if self.search_thread is not None:
@@ -534,7 +920,31 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "排除失败", message)
         self._finish_close_if_idle()
 
+    def retry_failed_files(self, file_ids: list[int]) -> None:
+        if self.database_migration_thread is not None:
+            self.failed_page.set_status("数据库正在迁移，请等待完成")
+            return
+        if self.exclusion_thread is not None or self.scan_thread is not None:
+            self.failed_page.set_status("当前索引任务仍在运行，请等待完成或安全暂停")
+            return
+        if not file_ids:
+            self._prompt_select_failed_files()
+            return
+        queued = self.db.queue_files_for_retry(file_ids)
+        if queued <= 0:
+            self.failed_page.set_status("所选文件当前不需要重新尝试")
+            self.refresh_failed_page()
+            return
+        self.failed_page.set_status(f"已选择 {queued} 个文件，正在重新尝试")
+        self.start_scan(
+            self.db.root_ids_for_files(file_ids),
+            file_ids=file_ids,
+        )
+
     def restore_excluded_files(self, file_ids: list[int]) -> None:
+        if self.database_migration_thread is not None:
+            self.failed_page.set_status("数据库正在迁移，请等待完成")
+            return
         if self.exclusion_thread is not None:
             self.failed_page.set_status("搜索索引正在后台更新，请稍候")
             return
@@ -565,54 +975,54 @@ class MainWindow(QMainWindow):
                 reason="用户恢复纳入并重试",
                 operation_source="ui",
             )
+            self.db.queue_files_for_retry(file_ids)
         except Exception as exc:
             self.failed_page.set_status(f"恢复失败：{exc}")
             return
         self.refresh_all()
         self.failed_page.scope_tabs.setCurrentIndex(0)
         self.failed_page.set_status(f"已恢复 {changed} 个文件，正在重新尝试")
-        self.start_scan()
+        self.start_scan(
+            self.db.root_ids_for_files(file_ids),
+            file_ids=file_ids,
+        )
 
     def request_force_complete(self) -> None:
+        if self.database_migration_thread is not None:
+            self.failed_page.set_status("数据库正在迁移，请等待完成")
+            return
         if self.exclusion_thread is not None:
             self.failed_page.set_status("搜索索引正在后台更新，请稍候")
             return
         if self.scan_thread is not None:
             self.failed_page.set_status("索引任务仍在运行，请先等待当前任务结束")
             return
+        selected_ids = self.failed_page.selected_file_ids()
+        if not selected_ids:
+            self._prompt_select_failed_files()
+            return
         readiness = self.db.index_readiness()
         if bool(readiness.get("ready")):
             self.refresh_all()
             self.failed_page.set_status("当前索引已经就绪，无需修复")
             return
-        blockers = self.db.failed_files(limit=2000)
+        selected_set = set(selected_ids)
+        blockers = [
+            row
+            for row in self.db.failed_files(limit=None)
+            if int(row["id"]) in selected_set
+        ]
         if not blockers:
-            reasons = ", ".join(
-                str(value) for value in readiness.get("not_ready_reasons", [])
-            ) or "索引状态尚未收敛"
-            dialog = QMessageBox(self)
-            dialog.setWindowTitle("修复并开放搜索")
-            dialog.setIcon(QMessageBox.Icon.Warning)
-            dialog.setText("文件已经全部处理，但搜索索引状态仍未完成。")
-            dialog.setInformativeText(
-                "程序将后台清理残留任务、重建全文索引并重新开放搜索；源文件不会被修改。"
-            )
-            dialog.setDetailedText(f"未就绪原因：{reasons}")
-            dialog.setStandardButtons(
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel
-            )
-            dialog.setDefaultButton(QMessageBox.StandardButton.Cancel)
-            if dialog.exec() == QMessageBox.StandardButton.Yes:
-                self.start_scope_repair("用户确认修复零阻断但未就绪的索引状态")
+            self.failed_page.set_status("所选文件当前不是未成功索引项，请刷新后重新选择")
             return
         dialog = QMessageBox(self)
-        dialog.setWindowTitle("强力完成本次索引")
+        dialog.setWindowTitle("保底完成并开放搜索")
         dialog.setIcon(QMessageBox.Icon.Warning)
         dialog.setText(
-            f"先对剩余 {len(blockers)} 个阻断项执行最后一次恢复重试。"
+            f"将先对剩余 {len(blockers)} 个阻断项进行最后一次重试，不会立即排除文件。"
         )
         dialog.setInformativeText(
-            "如果仍无法完成，系统会再次列出文件并请你确认排除；不会删除源文件。"
+            "如果仍无法完成，程序会再次列出文件并请你确认排除；源文件不会被删除。"
         )
         dialog.setStandardButtons(
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel
@@ -621,21 +1031,38 @@ class MainWindow(QMainWindow):
         if dialog.exec() != QMessageBox.StandardButton.Yes:
             return
         self.force_complete_after_retry = True
+        self.force_complete_file_ids = list(selected_ids)
+        self.db.queue_files_for_retry(
+            [int(row["id"]) for row in blockers]
+        )
         self.failed_page.set_status("正在执行最后一次恢复重试")
-        self.start_scan()
+        self.start_scan(
+            self.db.root_ids_for_files(selected_ids),
+            file_ids=selected_ids,
+        )
 
     def confirm_force_complete_remaining(self) -> None:
         if self.exclusion_thread is not None:
             self.failed_page.set_status("搜索索引正在后台更新，请稍候")
             return
-        blockers = self.db.failed_files(limit=2000)
+        selected_ids = list(self.force_complete_file_ids or self.failed_page.selected_file_ids())
+        if not selected_ids:
+            self._prompt_select_failed_files()
+            return
+        selected_set = set(selected_ids)
+        blockers = [
+            row
+            for row in self.db.failed_files(limit=None)
+            if int(row["id"]) in selected_set
+        ]
         readiness = self.db.index_readiness()
         if bool(readiness["ready"]):
+            self.force_complete_file_ids = []
             self.refresh_all()
             self.failed_page.set_status("最后一次恢复重试已成功，索引现已完成")
             return
         if not blockers:
-            self.start_scope_repair("最后一次恢复后修复残留索引状态")
+            self.start_scope_repair(selected_ids, "最后一次恢复后修复选中项状态")
             return
         dialog = QMessageBox(self)
         dialog.setWindowTitle("确认排除并开放搜索")
@@ -644,7 +1071,8 @@ class MainWindow(QMainWindow):
             f"最后一次恢复后仍有 {len(blockers)} 个文件无法完成。是否排除这些文件并开放搜索？"
         )
         dialog.setInformativeText(
-            "被排除文件的文件名、路径和正文不会进入搜索结果；可在“已人工排除”中恢复重试。"
+            "确认排除后将开放其他文件的搜索；源文件不会删除，但这些文件的文件名、路径和正文"
+            "不会出现在搜索结果中。可在“已人工排除”中恢复重试。"
         )
         dialog.setDetailedText(
             "\n".join(
@@ -658,9 +1086,16 @@ class MainWindow(QMainWindow):
         )
         dialog.setDefaultButton(QMessageBox.StandardButton.Cancel)
         if dialog.exec() != QMessageBox.StandardButton.Yes:
-            self.failed_page.set_status("已取消强力完成，索引仍保持未完成状态")
+            self.failed_page.set_status("已取消保底完成，索引仍保持未完成状态")
             return
-        self.start_scope_repair("用户确认多次恢复后排除剩余阻断项并开放搜索")
+        self.start_scope_repair(selected_ids, "用户确认多次恢复后排除选中项并开放搜索")
+
+    def _prompt_select_failed_files(self) -> None:
+        QMessageBox.information(
+            self,
+            "需要选择未成功索引项",
+            "请先勾选需要处理的未成功索引项。",
+        )
 
     def root_stats_by_id(self) -> dict[int, dict[str, int]]:
         data: dict[int, dict[str, int]] = {}
@@ -680,6 +1115,9 @@ class MainWindow(QMainWindow):
         return data
 
     def add_root(self) -> None:
+        if self.database_migration_thread is not None:
+            self.index_page.task_label.setText("数据库正在迁移，请等待完成")
+            return
         if self.exclusion_thread is not None:
             self.index_page.task_label.setText("搜索索引正在后台更新，请稍候")
             return
@@ -692,39 +1130,124 @@ class MainWindow(QMainWindow):
         self.index_page.task_label.setText("已添加搜索范围，请选择更新方式")
 
     def remove_root(self, root_id: int) -> None:
+        if self.database_migration_thread is not None:
+            self.index_page.task_label.setText("数据库正在迁移，请等待完成")
+            return
         if self.exclusion_thread is not None:
             self.index_page.task_label.setText("搜索索引正在后台更新，请稍候")
             return
+        if self.scan_thread is not None:
+            self.index_page.task_label.setText("索引正在运行，请先安全暂停后再删除搜索范围")
+            return
+        if self.root_removal_thread is not None:
+            return
         if QMessageBox.question(self, "删除搜索范围", "只删除索引和配置，不会删除原文件。确认继续？") != QMessageBox.StandardButton.Yes:
             return
-        self.db.remove_root(root_id)
+        self.file_monitor.stop()
+        self.root_removal_thread = QThread()
+        self.root_removal_worker = RootRemovalWorker(self.db.db_path, root_id)
+        self.root_removal_worker.moveToThread(self.root_removal_thread)
+        self.root_removal_thread.started.connect(self.root_removal_worker.run)
+        self.root_removal_worker.progress.connect(self.on_root_removal_progress)
+        self.root_removal_worker.finished.connect(self.on_root_removal_finished)
+        self.root_removal_worker.failed.connect(self.on_root_removal_failed)
+        self.root_removal_worker.finished.connect(self.root_removal_thread.quit)
+        self.root_removal_worker.failed.connect(self.root_removal_thread.quit)
+        self.root_removal_thread.finished.connect(self.cleanup_root_removal)
+        self.index_page.set_database_update_running(True)
+        self.top_bar.set_index_status("正在删除搜索范围索引...", is_running=True)
+        self.root_removal_thread.start()
+
+    def on_root_removal_progress(self, payload: object) -> None:
+        if isinstance(payload, dict):
+            label = str(payload.get("phase_label") or "正在删除搜索范围索引")
+            self.index_page.set_database_update_progress(label)
+            self.top_bar.set_index_status(label, is_running=True)
+
+    def on_root_removal_finished(self, _payload: object) -> None:
+        self.refresh_all()
+
+    def on_root_removal_failed(self, message: str) -> None:
+        self.index_page.set_task_running(False)
+        self.index_page.task_label.setText("删除搜索范围失败，原索引已保留")
+        self.index_page.task_label.setToolTip(str(message))
+
+    def cleanup_root_removal(self) -> None:
+        self.root_removal_thread = None
+        self.root_removal_worker = None
+        self.index_page.set_database_update_running(False)
         self.refresh_all()
 
     def toggle_root(self, root_id: int, enabled: bool) -> None:
+        if self.database_migration_thread is not None:
+            self.index_page.task_label.setText("数据库正在迁移，请等待完成")
+            return
         if self.exclusion_thread is not None:
             self.index_page.task_label.setText("搜索索引正在后台更新，请稍候")
             return
         self.db.set_root_enabled(root_id, enabled)
         self.refresh_all()
 
-    def start_scan(self, *, performance_mode: bool = False) -> None:
+    def start_scan(
+        self,
+        root_ids: object = None,
+        *,
+        performance_mode: bool = False,
+        file_ids: object = None,
+    ) -> None:
+        if self.database_migration_thread is not None:
+            self.index_page.task_label.setText("数据库正在迁移，请等待完成")
+            return
         if self.exclusion_thread is not None:
             self.index_page.task_label.setText("搜索索引正在后台更新，请稍候")
             self.top_bar.set_index_status("正在更新搜索索引...", is_running=True)
             return
+        if root_ids is None:
+            selected_root_ids: tuple[int, ...] = ()
+        elif isinstance(root_ids, int):
+            selected_root_ids = (int(root_ids),)
+        else:
+            try:
+                selected_root_ids = tuple(int(root_id) for root_id in root_ids)  # type: ignore[union-attr]
+            except TypeError:
+                selected_root_ids = ()
         if self.scan_thread is not None:
+            # Manual, startup and monitor refreshes share one scheduler. Merge
+            # a request that arrives during the active generation instead of
+            # losing it or starting another worker for the same root.
+            self.pending_monitor_scan = True
+            if selected_root_ids:
+                self._pending_scan_root_ids.update(selected_root_ids)
+            else:
+                self._pending_scan_all_roots = True
+                self._pending_scan_root_ids.clear()
+            self._pending_scan_performance = (
+                self._pending_scan_performance or performance_mode
+            )
+            self.index_page.task_label.setText(
+                "更新请求已合并，将在当前任务完成后检查变化"
+            )
             self.switch_page("index")
             return
         self.pending_monitor_scan = False
-        if self.search_thread is not None:
-            self.pending_search = False
-            self.cancel_search()
+        self._pending_scan_root_ids.clear()
+        self._pending_scan_all_roots = False
+        self._pending_scan_performance = False
+        self._scan_generation += 1
+        self._active_scan_generation = self._scan_generation
+        self._scan_progress_text = "已完成 0/0"
+        readiness = dict(self._latest_readiness)
+        if not readiness:
+            readiness = self.db.quick_index_readiness()
+            self._latest_readiness = dict(readiness)
         self.search_page.set_index_ready(
-            False,
+            bool(readiness.get("search_available", readiness["ready"])),
             {
-                **self.db.index_readiness(),
+                **readiness,
                 "active_runs": 1,
                 "ready": False,
+                "index_complete": False,
+                "search_is_partial": bool(readiness.get("search_available")),
             },
         )
         self.hide_preview()
@@ -733,6 +1256,8 @@ class MainWindow(QMainWindow):
             self.db.db_path,
             self.settings,
             performance_mode=performance_mode,
+            root_ids=selected_root_ids,
+            file_ids=tuple(int(file_id) for file_id in (file_ids or ())),
         )
         self.scan_worker.moveToThread(self.scan_thread)
         self.scan_thread.started.connect(self.scan_worker.run)
@@ -743,15 +1268,12 @@ class MainWindow(QMainWindow):
         self.scan_worker.failed.connect(self.scan_thread.quit)
         self.scan_thread.finished.connect(self.cleanup_scan_thread)
         self.index_page.set_performance_mode(performance_mode)
-        self.top_bar.set_index_status(
-            "正在准备性能模式..." if performance_mode else "正在索引...",
-            is_running=True,
-        )
+        self.top_bar.set_index_status(self._scan_progress_text, is_running=True)
         self.index_page.set_task_running(True)
         self.failed_page.set_index_running(True)
         self.scan_thread.start()
 
-    def confirm_performance_scan(self) -> None:
+    def confirm_performance_scan(self, root_ids: object = None) -> None:
         answer = QMessageBox.question(
             self,
             "启用性能模式",
@@ -761,7 +1283,7 @@ class MainWindow(QMainWindow):
             QMessageBox.StandardButton.Cancel,
         )
         if answer == QMessageBox.StandardButton.Yes:
-            self.start_scan(performance_mode=True)
+            self.start_scan(root_ids, performance_mode=True)
 
     def request_scan_mode_switch(self, performance_mode: bool) -> None:
         if self.scan_worker is None:
@@ -783,14 +1305,50 @@ class MainWindow(QMainWindow):
         if self.scan_worker is not None:
             self.scan_worker.cancel(force=force)
 
+    def refresh_search_availability_during_scan(self, *, force: bool = False) -> None:
+        now = time.monotonic()
+        if not force and now - self.last_search_readiness_refresh < 1.5:
+            return
+        self.last_search_readiness_refresh = now
+        readiness = dict(self._latest_readiness)
+        if not readiness:
+            return
+        readiness = {
+            **readiness,
+            "active_runs": max(1, int(readiness.get("active_runs") or 0)),
+            "ready": False,
+            "index_complete": False,
+            "search_is_partial": bool(readiness.get("search_available")),
+        }
+        self.search_page.set_stats(
+            {
+                key: int(readiness.get(key) or 0)
+                for key in (
+                    "complete_files",
+                    "eligible_files",
+                    "blocking_files",
+                    "video_excluded",
+                    "manual_excluded_files",
+                )
+            },
+            has_roots=bool(readiness.get("enabled_roots")),
+        )
+        self.search_page.set_index_ready(
+            bool(readiness.get("search_available")),
+            readiness,
+        )
+
     def on_scan_progress(self, payload: object) -> None:
         if not isinstance(payload, dict):
             return
+        self.refresh_search_availability_during_scan()
         if payload.get("stage") == "performance_profile":
             profile = payload.get("performance_profile")
             if isinstance(profile, dict):
                 self.index_page.set_performance_profile(profile)
-                self.top_bar.set_index_status("性能模式正在索引...", is_running=True)
+                self.top_bar.set_index_status(
+                    self._scan_progress_text, is_running=True
+                )
             return
         pause_state = str(payload.get("pause_state") or "")
         if pause_state:
@@ -803,10 +1361,7 @@ class MainWindow(QMainWindow):
                 self.index_page.set_performance_profile(profile)
             phase_label = str(payload.get("phase_label") or "")
             self.index_page.set_pause_state(pause_state, phase_label)
-            self.top_bar.set_index_status(
-                phase_label or self.index_page.pause_state_text(),
-                is_running=True,
-            )
+            self.top_bar.set_index_status(self._scan_progress_text, is_running=True)
             return
         indexed = int(payload.get("indexed") or 0)
         scanned = int(payload.get("scanned") or 0)
@@ -820,6 +1375,11 @@ class MainWindow(QMainWindow):
         eta_ready = bool(payload.get("eta_ready"))
         eta_text = format_remaining_single(eta_seconds, eta_ready)
         active_elapsed = int(payload.get("active_elapsed_seconds") or 0)
+        if not eta_ready and eta_seconds > 0 and active_elapsed >= 20:
+            # The estimator already has a conservative static prior before its
+            # first samples. Expose that single-value estimate after a short
+            # warm-up instead of leaving the user on "正在估算…" indefinitely.
+            eta_text = format_remaining_single(eta_seconds, True)
         active_queue = str(
             payload.get("queue") or payload.get("active_queue") or ""
         )
@@ -827,6 +1387,14 @@ class MainWindow(QMainWindow):
         active_phase = str(payload.get("active_phase") or "")
         active_completed = int(payload.get("active_completed_units") or 0)
         active_total = int(payload.get("active_total_units") or 0)
+        planning_phase = str(payload.get("planning_phase") or "")
+        planning_completed = int(payload.get("planning_completed") or 0)
+        planning_total = int(payload.get("planning_total") or 0)
+        discovered_files = int(
+            payload.get("discovered_files")
+            or payload.get("scanned")
+            or 0
+        )
         no_progress = int(payload.get("no_progress_seconds") or 0)
         retry_count = int(payload.get("retry_count") or 0)
         excluded_video = int(payload.get("excluded_video") or 0)
@@ -841,11 +1409,17 @@ class MainWindow(QMainWindow):
         other_recent_progress_seconds = int(
             payload.get("other_recent_progress_seconds") or 0
         )
-        text = f"{phase_label} {completed:,} / {max(total, completed):,}"
+        dynamic_total = max(total, discovered_files, completed, 1)
+        text = f"已完成 {completed:,}/{dynamic_total:,}"
+        if failed:
+            text += f" · 失败 {failed:,}"
+        if excluded_video:
+            text += f" · 排除视频 {excluded_video:,}"
+        self._scan_progress_text = text
         self.top_bar.set_index_status(text, is_running=True)
         self.index_page.set_scan_progress(
             completed,
-            total,
+            dynamic_total,
             failed,
             current,
             phase_label=phase_label,
@@ -856,6 +1430,10 @@ class MainWindow(QMainWindow):
             active_phase=active_phase,
             active_completed_units=active_completed,
             active_total_units=active_total,
+            planning_phase=planning_phase,
+            planning_completed=planning_completed,
+            planning_total=planning_total,
+            discovered_files=discovered_files,
             no_progress_seconds=no_progress,
             retry_count=retry_count,
             excluded_video=excluded_video,
@@ -872,7 +1450,7 @@ class MainWindow(QMainWindow):
         self.index_page.set_task_running(False)
         if self.closing:
             return
-        self.refresh_all()
+        self._scan_refresh_pending = True
         summary_text, summary_tooltip = format_index_run_summary(payload)
         if summary_text:
             self.index_page.show_run_summary(summary_text, summary_tooltip)
@@ -884,25 +1462,38 @@ class MainWindow(QMainWindow):
         self.index_page.set_task_running(False)
         if self.closing:
             return
-        self.top_bar.set_index_status("索引任务失败", is_error=True)
-        QMessageBox.critical(self, "索引任务失败", message)
+        self.top_bar.set_index_status("索引已保留进度，等待继续", is_error=True)
+        self.index_page.task_label.setText(
+            "索引遇到基础设施错误，已保留完成进度；请点击更新继续"
+        )
+        self.index_page.task_label.setToolTip(str(message))
         if self.force_complete_after_retry:
             self.force_complete_after_retry = False
             self.pending_force_complete_confirmation = True
 
     def cleanup_scan_thread(self) -> None:
+        # The one-shot guard is cleared when the worker exits; no second scan
+        # is scheduled from this cleanup path.
+        self._startup_scan_in_flight = False
+        self._active_scan_generation = 0
         self.scan_thread = None
         self.scan_worker = None
         self.index_page.set_task_running(False)
         self.failed_page.set_index_running(False)
-        self.refresh_failed_page()
-        self.update_index_status()
+        if self._scan_refresh_pending and not self.closing:
+            self._scan_refresh_pending = False
+            self.start_database_snapshot()
+        else:
+            self.update_index_status()
         if self.pending_force_complete_confirmation and not self.closing:
             self.pending_force_complete_confirmation = False
             QTimer.singleShot(0, self.confirm_force_complete_remaining)
         self._finish_close_if_idle()
 
     def request_search(self) -> None:
+        if self.database_migration_thread is not None:
+            self.search_page.set_status("数据库正在迁移，请等待完成")
+            return
         if self.exclusion_thread is not None:
             self.search_page.set_status("索引正在更新，请稍候")
             return
@@ -940,6 +1531,7 @@ class MainWindow(QMainWindow):
             page_size=min(max(self.settings.page_size, 10), 100),
             max_results=self.settings.max_results,
             page=self.page,
+            sort_by=self.search_page.sort_value(),
         )
         self.search_thread = QThread()
         self.search_worker = SearchWorker(self.db.db_path, query)
@@ -950,6 +1542,7 @@ class MainWindow(QMainWindow):
         self.search_worker.progress.connect(self.on_search_progress)
         self.search_worker.cancelled.connect(self.on_search_cancelled)
         self.search_worker.failed.connect(self.on_search_failed)
+        self.search_worker.lease_status.connect(self.on_search_lease_status)
         self.search_worker.finished.connect(self.search_thread.quit)
         self.search_worker.cancelled.connect(self.search_thread.quit)
         self.search_worker.failed.connect(self.search_thread.quit)
@@ -961,12 +1554,38 @@ class MainWindow(QMainWindow):
         if self.search_worker is not None:
             self.search_worker.cancel()
 
+    def on_search_lease_status(self, status: str) -> None:
+        if self.closing:
+            return
+        state = str(status or "")
+        if state == "waiting":
+            self.search_priority_active = False
+            self.search_page.set_status(
+                "搜索优先，正在等待索引到达安全检查点…"
+            )
+            self.top_bar.set_index_status(
+                "搜索优先，索引已暂缓，搜索完成后自动继续",
+                is_running=True,
+            )
+        elif state == "active":
+            self.search_priority_active = True
+            self.search_page.set_status(
+                "搜索优先，索引已暂缓，搜索完成后自动继续"
+            )
+            self.top_bar.set_index_status(
+                "搜索优先，索引已暂缓，搜索完成后自动继续",
+                is_running=True,
+            )
+        elif state == "released":
+            self.search_priority_active = False
+            if self.scan_thread is None:
+                self.update_index_status()
+
     def on_search_finished(self, page: object) -> None:
         self.total_confirmed = page.available_results
         self.search_page.set_results(page)
         if self.settings.save_search_history and self.search_worker is not None:
-            self.db.add_search_history(self.search_worker.query.text)
-            self.search_page.set_history(self.db.search_history())
+            self._start_search_history_update(self.search_worker.query.text)
         if page.total_confirmed <= 0:
             self.hide_preview()
 
@@ -1041,7 +1660,17 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self.search_page.set_status(f"打开文件夹失败：{exc}")
 
+    def open_location(self, path: str, hit: object) -> None:
+        try:
+            message = open_file_at_location(path, hit)
+            self.search_page.set_status(message)
+        except Exception as exc:
+            self.search_page.set_status(f"打开命中位置失败：{exc}")
+
     def reindex_file(self, path: str) -> None:
+        if self.database_migration_thread is not None:
+            self.search_page.set_status("数据库正在迁移，请等待完成")
+            return
         if self.exclusion_thread is not None:
             self.search_page.set_status("索引正在更新，请稍候")
             return
@@ -1106,12 +1735,201 @@ class MainWindow(QMainWindow):
         self.refresh_file_monitor()
         self.search_page.set_status("设置已保存")
 
+    def request_database_migration(self, target_directory: str) -> None:
+        if self.database_migration_thread is not None:
+            return
+        if (
+            self.scan_thread is not None
+            or self.search_thread is not None
+            or self.exclusion_thread is not None
+        ):
+            QMessageBox.information(
+                self,
+                "暂时不能迁移",
+                "请先停止当前搜索、索引或失败文件处理任务，等待任务完全结束后再迁移数据库。",
+            )
+            return
+        target = Path(target_directory).expanduser().resolve()
+        source = self.db.db_path.resolve()
+        if target == source.parent:
+            QMessageBox.information(self, "无需迁移", "目标目录与当前数据库目录相同。")
+            return
+        source_size = source.stat().st_size if source.is_file() else 0
+        target_path = target / source.name
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle("确认迁移索引数据库")
+        dialog.setIcon(QMessageBox.Icon.Warning)
+        dialog.setText(
+            f"将索引数据库迁移到：\n{target_path}"
+        )
+        dialog.setInformativeText(
+            f"当前数据库：{source}\n"
+            f"数据库大小：{format_bytes(source_size)}\n\n"
+            "迁移期间搜索和索引将暂停。目标数据库完成完整性校验后才会切换；"
+            "原数据库会改名为带时间戳的回滚备份。旧版本程序不得与新版本同时运行。"
+        )
+        dialog.setStandardButtons(
+            QMessageBox.StandardButton.Yes
+            | QMessageBox.StandardButton.Cancel
+        )
+        dialog.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        if dialog.exec() != QMessageBox.StandardButton.Yes:
+            return
+
+        self.file_monitor.stop()
+        self.hide_preview()
+        self.pending_search = False
+        self.database_migration_outcome = None
+        self.database_migration_thread = QThread()
+        self.database_migration_worker = DatabaseMigrationWorker(
+            source,
+            target,
+            self.database_location_service,
+        )
+        self.database_migration_worker.moveToThread(
+            self.database_migration_thread
+        )
+        self.database_migration_thread.started.connect(
+            self.database_migration_worker.run
+        )
+        self.database_migration_worker.progress.connect(
+            self.on_database_migration_progress
+        )
+        self.database_migration_worker.finished.connect(
+            self.on_database_migration_finished
+        )
+        self.database_migration_worker.cancelled.connect(
+            self.on_database_migration_cancelled
+        )
+        self.database_migration_worker.failed.connect(
+            self.on_database_migration_failed
+        )
+        self.database_migration_worker.finished.connect(
+            self.database_migration_thread.quit
+        )
+        self.database_migration_worker.cancelled.connect(
+            self.database_migration_thread.quit
+        )
+        self.database_migration_worker.failed.connect(
+            self.database_migration_thread.quit
+        )
+        self.database_migration_thread.finished.connect(
+            self.cleanup_database_migration_thread
+        )
+        self.settings_page.set_database_migration_running(True)
+        self.failed_page.set_database_migration_running(True)
+        self.search_page.set_index_ready(
+            False,
+            {
+                **self.db.index_readiness(),
+                "index_update_running": True,
+                "ready": False,
+            },
+        )
+        self.top_bar.set_index_status("正在迁移索引数据库...", is_running=True)
+        self.database_migration_thread.start()
+
+    def on_database_migration_progress(self, payload: object) -> None:
+        if not isinstance(payload, dict):
+            return
+        self.settings_page.set_database_migration_progress(payload)
+        label = str(payload.get("phase_label") or "正在迁移索引数据库")
+        self.top_bar.set_index_status(label, is_running=True)
+
+    def on_database_migration_finished(self, payload: object) -> None:
+        self.database_migration_outcome = ("finished", payload)
+
+    def on_database_migration_cancelled(self) -> None:
+        self.database_migration_outcome = ("cancelled", None)
+
+    def on_database_migration_failed(self, message: str) -> None:
+        self.database_migration_outcome = ("failed", message)
+
+    def cancel_database_migration(self) -> None:
+        if self.database_migration_worker is not None:
+            self.settings_page.set_database_migration_cancel_pending()
+            self.database_migration_worker.cancel()
+
+    def cleanup_database_migration_thread(self) -> None:
+        outcome = self.database_migration_outcome or (
+            "failed",
+            "数据库迁移任务异常结束，请查看日志",
+        )
+        self.database_migration_thread = None
+        self.database_migration_worker = None
+        self.database_migration_outcome = None
+        self.settings_page.set_database_migration_running(False)
+        self.failed_page.set_database_migration_running(False)
+        if self.closing:
+            self._finish_close_if_idle()
+            return
+
+        kind, payload = outcome
+        if kind == "finished" and isinstance(payload, dict):
+            source_path = self.db.db_path.resolve()
+            try:
+                new_path = Path(str(payload["database_path"])).resolve()
+                new_database = DatabaseManager(new_path)
+                new_database.initialize()
+                self.db = new_database
+                self.settings_page.set_database_info(new_path)
+                self.settings_page.set_database_migration_completed(payload)
+                self.refresh_all()
+            except Exception as exc:
+                backup_path = Path(
+                    str(payload.get("previous_database_backup") or "")
+                )
+                try:
+                    if backup_path.is_file() and not source_path.exists():
+                        os.replace(backup_path, source_path)
+                    self.database_location_service.restore_verified(source_path)
+                    self.db = DatabaseManager(source_path)
+                    self.db.initialize()
+                except Exception:
+                    pass
+                self.settings_page.set_database_migration_failed(str(exc))
+                QMessageBox.critical(
+                    self,
+                    "数据库重新打开失败",
+                    "迁移文件已经生成，但程序未能重新打开目标数据库。"
+                    f"\n\n{exc}\n\n程序已尝试恢复迁移前数据库，请保留迁移日志。",
+                )
+                self.settings_page.set_database_info(self.db.db_path)
+                self.refresh_all()
+                self.refresh_file_monitor()
+                return
+            QMessageBox.information(
+                self,
+                "数据库迁移完成",
+                f"当前数据库：{self.db.db_path}\n"
+                f"大小：{format_bytes(int(payload.get('database_size_bytes') or 0))}\n"
+                "完整性和关键记录数量校验已通过，现有索引可以继续使用。",
+            )
+        elif kind == "cancelled":
+            self.settings_page.set_database_migration_cancelled()
+            self.refresh_all()
+        else:
+            message = str(payload or "未知错误")
+            self.settings_page.set_database_migration_failed(message)
+            self.refresh_all()
+            QMessageBox.critical(
+                self,
+                "数据库迁移失败",
+                message + "\n\n程序继续使用迁移前数据库。",
+            )
+        self.refresh_file_monitor()
+        self._finish_close_if_idle()
+
     def closeEvent(self, event: QCloseEvent) -> None:
         self.file_monitor.stop()
         if (
             self.scan_thread is None
             and self.search_thread is None
+            and self.search_history_thread is None
             and self.exclusion_thread is None
+            and self.database_migration_thread is None
+            and self.database_snapshot_thread is None
+            and self.root_removal_thread is None
         ):
             event.accept()
             return
@@ -1124,6 +1942,9 @@ class MainWindow(QMainWindow):
         self.cancel_scan(force=True)
         self.cancel_search()
         self.cancel_scope_exclusion()
+        self.cancel_database_migration()
+        if self.database_snapshot_worker is not None:
+            self.database_snapshot_worker.cancel()
         self.hide()
         self.force_close_timer.start()
         event.ignore()
@@ -1133,7 +1954,11 @@ class MainWindow(QMainWindow):
             self.closing
             and self.scan_thread is None
             and self.search_thread is None
+            and self.search_history_thread is None
             and self.exclusion_thread is None
+            and self.database_migration_thread is None
+            and self.database_snapshot_thread is None
+            and self.root_removal_thread is None
         ):
             self._force_exit()
 
@@ -1222,6 +2047,21 @@ class Sidebar(QFrame):
             button.style().unpolish(button)
             button.style().polish(button)
 
+    def set_failed_alert(self, count: int) -> None:
+        button = self.buttons.get("failed")
+        if button is None:
+            return
+        count = max(0, int(count))
+        button.setText(f"未成功索引  ·  {count:,}" if count else "未成功索引")
+        button.setProperty("alert", bool(count))
+        button.setToolTip(
+            f"有 {count:,} 个文件未成功索引，打开查看处理方式"
+            if count
+            else "查看未成功索引"
+        )
+        button.style().unpolish(button)
+        button.style().polish(button)
+
 
 class SearchPage(QWidget):
     search_requested = Signal()
@@ -1231,6 +2071,7 @@ class SearchPage(QWidget):
     next_page_requested = Signal()
     open_requested = Signal(str)
     open_folder_requested = Signal(str)
+    open_location_requested = Signal(str, object)
     reindex_requested = Signal(str)
     result_selected = Signal(object)
     clear_history_requested = Signal()
@@ -1278,6 +2119,18 @@ class SearchPage(QWidget):
             self.file_type_combo.addItem("全部格式" if label == "全部" else label, label)
         self.scope_combo = chip_combo()
         self.scope_combo.addItem("全部范围", None)
+        self.sort_combo = chip_combo()
+        for label, value in (
+            ("相关性", "relevance"),
+            ("修改时间（最新）", "modified_desc"),
+            ("修改时间（最早）", "modified_asc"),
+            ("文件大小（从大到小）", "size_desc"),
+            ("文件大小（从小到大）", "size_asc"),
+            ("文件名（升序）", "filename_asc"),
+            ("文件名（降序）", "filename_desc"),
+        ):
+            self.sort_combo.addItem(label, value)
+        self.sort_combo.setToolTip("仅对当前搜索结果排序，不改变索引内容")
         self.more_button = QPushButton("筛选")
         self.more_button.setObjectName("FilterButton")
         self.more_button.setCheckable(True)
@@ -1301,6 +2154,8 @@ class SearchPage(QWidget):
         status_row = QHBoxLayout()
         status_row.setContentsMargins(0, 0, 0, 0)
         status_row.addWidget(self.status_label, 1)
+        status_row.addWidget(QLabel("排序"))
+        status_row.addWidget(self.sort_combo)
         status_row.addWidget(self.timing_label)
         layout.addLayout(status_row)
 
@@ -1315,6 +2170,7 @@ class SearchPage(QWidget):
         self.result_view = ResultView()
         self.result_view.open_requested.connect(self.open_requested.emit)
         self.result_view.open_folder_requested.connect(self.open_folder_requested.emit)
+        self.result_view.open_location_requested.connect(self.open_location_requested.emit)
         self.result_view.reindex_requested.connect(self.reindex_requested.emit)
         self.result_view.selected_result_changed.connect(self.result_selected.emit)
         self.content_stack.addWidget(self.empty_state)
@@ -1341,6 +2197,7 @@ class SearchPage(QWidget):
         self.file_type_combo.currentIndexChanged.connect(self._filter_changed)
         self.mode_combo.currentIndexChanged.connect(self._filter_changed)
         self.scope_combo.currentIndexChanged.connect(self._filter_changed)
+        self.sort_combo.currentIndexChanged.connect(self._filter_changed)
         for checkbox in (
             self.advanced.search_filename,
             self.advanced.search_path,
@@ -1417,6 +2274,7 @@ class SearchPage(QWidget):
             self.mode_combo,
             self.file_type_combo,
             self.scope_combo,
+            self.sort_combo,
             self.more_button,
             self.advanced,
         ):
@@ -1429,6 +2287,12 @@ class SearchPage(QWidget):
 
     def index_ready(self) -> bool:
         return self._index_ready
+
+    def index_complete(self) -> bool:
+        return bool(self._readiness.get("index_complete", self._readiness.get("ready")))
+
+    def index_readiness(self) -> dict[str, object]:
+        return dict(self._readiness)
 
     def focus_search(self) -> None:
         self.search_box.input.setFocus()
@@ -1451,6 +2315,9 @@ class SearchPage(QWidget):
     def extensions(self) -> list[str]:
         label = str(self.file_type_combo.currentData())
         return sorted(FILE_TYPE_GROUPS.get(label, set()))
+
+    def sort_value(self) -> str:
+        return str(self.sort_combo.currentData() or "relevance")
 
     def search_filename(self) -> bool:
         return self.advanced.search_filename.isChecked()
@@ -1505,12 +2372,19 @@ class SearchPage(QWidget):
         if progress_kind == "determinate" and total > 0:
             self.search_progress.setRange(0, total)
             self.search_progress.setValue(min(checked, total))
-            detail = f"{checked:,}/{total:,} · 已找到 {confirmed:,} 个文件"
+            detail = f"校验索引记录 {checked:,}/{total:,} · 已找到 {confirmed:,} 个文件"
         else:
             self.search_progress.setRange(0, 0)
-            detail = f"候选 {checked:,} · 已找到 {confirmed:,} 个文件" if checked else ""
+            detail = f"校验索引记录 {checked:,} · 已找到 {confirmed:,} 个文件" if checked else ""
         if elapsed_ms >= 2_000:
             slow_reason = str(payload.get("slow_reason") or "")
+            if "关键词较短" in slow_reason:
+                # The generic estimator is trained on ordinary searches and
+                # can show a stale multi-minute range for a two-character
+                # compatibility scan. Keep the live phase visible without
+                # presenting an ungrounded ETA.
+                self.timing_label.setText("两字关键词兼容检索中")
+                self.timing_label.setVisible(True)
             suffix = f" · {detail}" if detail else ""
             if slow_reason:
                 suffix += f" · {slow_reason}"
@@ -1527,8 +2401,10 @@ class SearchPage(QWidget):
         self.content_stack.setCurrentWidget(self.result_view)
         self.result_view.set_results(page.results, self.text())
         self.pager.setVisible(False)
+        scope_notice = self._partial_scope_notice()
         self.set_status(
             f"已先找到 {page.total_confirmed} 个文件名/路径结果，正在继续搜索正文..."
+            f"{scope_notice}"
         )
 
     def set_results(self, page: object) -> None:
@@ -1538,10 +2414,21 @@ class SearchPage(QWidget):
             self._active_estimate_context = None
         self.page_label.setText(f"第 {page.page} 页")
         if page.truncated:
-            count_text = f"找到 {page.total_confirmed} 条结果，仅显示前 {page.available_results} 条"
+            count_text = (
+                f"找到 {page.total_confirmed} 个文件，仅显示前 {page.available_results} 条，"
+                "可能还有更多"
+            )
         else:
-            count_text = f"找到 {page.total_confirmed} 条结果"
-        self.set_status(f"{count_text} · 候选 {page.total_candidates}")
+            count_text = f"找到 {page.total_confirmed} 个文件"
+        text_hits, ocr_hits, fuzzy_hits = self._hit_breakdown(page.results)
+        breakdown = (
+            f"当前页正文命中 {text_hits:,} · OCR 命中 {ocr_hits:,} · "
+            f"OCR 疑似 {fuzzy_hits:,}"
+        )
+        self.set_status(
+            f"{count_text} · {breakdown} · 校验索引记录 {page.total_candidates:,} 条"
+            f"{self._partial_scope_notice()}"
+        )
         self.timing_label.setText(f"实际用时 {format_elapsed(int(page.elapsed_ms))}")
         self.timing_label.setVisible(True)
         if page.total_confirmed <= 0:
@@ -1550,6 +2437,29 @@ class SearchPage(QWidget):
         self.content_stack.setCurrentWidget(self.result_view)
         self.result_view.set_results(page.results, self.text())
         self.pager.setVisible(page.available_results > page.page_size)
+
+    def _partial_scope_notice(self) -> str:
+        if not bool(self._readiness.get("search_is_partial")):
+            return ""
+        complete = int(self._readiness.get("complete_files") or 0)
+        eligible = int(self._readiness.get("eligible_files") or 0)
+        return f" · 部分索引 {complete:,}/{eligible:,}，结果可能不完整"
+
+    @staticmethod
+    def _hit_breakdown(results: list[object]) -> tuple[int, int, int]:
+        text_hits = 0
+        ocr_hits = 0
+        fuzzy_hits = 0
+        for result in results:
+            for hit in result_hits(result):
+                count = max(1, int(hit.hit_count or 0))
+                if hit.source_type == "ocr":
+                    ocr_hits += count
+                    if hit.is_fuzzy:
+                        fuzzy_hits += count
+                elif hit.source_type != "metadata":
+                    text_hits += count
+        return text_hits, ocr_hits, fuzzy_hits
 
     def apply_settings(self, settings: AppSettings) -> None:
         self.auto_search_enabled = bool(settings.auto_search)
@@ -1611,14 +2521,21 @@ class SearchPage(QWidget):
         else:
             complete = self._stats.get("complete_files", 0)
             eligible = self._stats.get("eligible_files", 0)
+            blocking = self._stats.get("blocking_files", 0)
             video = self._stats.get("video_excluded", 0)
             excluded = self._stats.get("manual_excluded_files", 0)
             video_text = f"，另排除视频 {video:,} 个" if video else ""
             excluded_text = f"，已人工排除 {excluded:,} 个" if excluded else ""
+            partial = bool(self._readiness.get("search_is_partial"))
             self.empty_state.set_content(
-                "输入关键词开始搜索",
+                "部分索引可搜索" if partial else "输入关键词开始搜索",
                 "支持搜索 PDF、Word、Excel、PowerPoint、文本、日志和图片中的文字\n"
-                f"当前范围完成 {complete:,}/{eligible:,}{excluded_text}{video_text}",
+                + (
+                    f"当前已完成 {complete:,}/{eligible:,}，仍有 {blocking:,} 个文件待处理；搜索结果可能不完整"
+                    if partial
+                    else f"当前范围完成 {complete:,}/{eligible:,}"
+                )
+                + f"{excluded_text}{video_text}",
                 "",
                 None,
             )
@@ -1671,7 +2588,11 @@ class SearchPage(QWidget):
                     details.append(f"未发布全文索引 {unpublished} 个")
                 if bool(self._readiness.get("content_fts_dirty")):
                     details.append("全文索引待发布")
-                subtitle = "文件已经全部处理，但" + "、".join(details) + "。请在“未成功索引”中执行强力完成。"
+                subtitle = (
+                    "文件已经全部处理，但"
+                    + "、".join(details)
+                    + "。请在“未成功索引”中执行保底完成并开放搜索。"
+                )
             else:
                 subtitle = "搜索范围尚未完成首次索引，请先在“索引管理”中更新全部。"
         else:
@@ -1763,6 +2684,12 @@ class AdvancedFilters(QFrame):
         self.include_ocr = QCheckBox("包含 OCR")
         self.case_sensitive = QCheckBox("大小写敏感")
         self.ocr_fuzzy = QCheckBox("显示 OCR 疑似命中")
+        self.search_filename.setToolTip("匹配文件名；文件名命中会优先快速显示")
+        self.search_path.setToolTip("匹配文件夹路径和文件名所在路径")
+        self.search_content.setToolTip("匹配已建立的正文索引")
+        self.include_ocr.setToolTip("包含图片和扫描 PDF 的 OCR 文字")
+        self.ocr_fuzzy.setToolTip("纳入低置信度 OCR 候选；结果会标记为疑似命中")
+        self.case_sensitive.setToolTip("区分英文字母大小写")
         for checkbox in (self.search_filename, self.search_path, self.search_content, self.include_ocr):
             checkbox.setChecked(True)
         layout = QGridLayout(self)
@@ -1824,8 +2751,9 @@ class EmptyState(QFrame):
 
 class IndexPage(QWidget):
     add_root_requested = Signal()
-    scan_requested = Signal()
+    scan_requested = Signal(object)
     performance_scan_requested = Signal()
+    scope_performance_scan_requested = Signal(object)
     pause_requested = Signal()
     resume_requested = Signal()
     mode_switch_requested = Signal(bool)
@@ -1873,8 +2801,10 @@ class IndexPage(QWidget):
         self.task_progress = QProgressBar()
         self.task_progress.setTextVisible(False)
         self.task_progress.setFixedWidth(160)
-        self.start_button = QPushButton("更新全部")
-        self.performance_button = QPushButton("性能模式更新")
+        self.start_button = QPushButton("更新全部范围")
+        self.start_button.setToolTip("使用普通模式更新所有已启用搜索范围")
+        self.performance_button = QPushButton("性能模式 · 更新全部范围")
+        self.performance_button.setToolTip("使用性能模式更新所有已启用搜索范围")
         self.pause_button = QPushButton("暂停")
         self.cancel_button = QPushButton("取消")
         self.start_button.clicked.connect(self._normal_mode_clicked)
@@ -1896,8 +2826,14 @@ class IndexPage(QWidget):
         detail_layout.setSpacing(12)
         self.task_file = QLabel("")
         self.task_file.setObjectName("MutedText")
-        self.task_file.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self.task_file.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.MinimumExpanding
+        )
         self.task_file.setMinimumWidth(80)
+        self.task_file.setWordWrap(True)
+        self.task_file.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
         self.task_runtime = QLabel("")
         self.task_runtime.setObjectName("MutedText")
         self.task_runtime.setMinimumWidth(118)
@@ -2002,6 +2938,9 @@ class IndexPage(QWidget):
             for row in roots:
                 card = RootCard(row, stats.get(int(row["id"]), {}))
                 card.scan_requested.connect(self.scan_requested.emit)
+                card.performance_scan_requested.connect(
+                    self.scope_performance_scan_requested.emit
+                )
                 card.toggle_requested.connect(self.toggle_root_requested.emit)
                 card.remove_requested.connect(self.remove_root_requested.emit)
                 card.open_requested.connect(self.open_folder_requested.emit)
@@ -2037,8 +2976,8 @@ class IndexPage(QWidget):
             self.paused = False
             self.pause_state = "idle"
             self.performance_mode = False
-            self.start_button.setText("更新全部")
-            self.performance_button.setText("性能模式更新")
+            self.start_button.setText("更新全部范围")
+            self.performance_button.setText("性能模式 · 更新全部范围")
         elif not was_running:
             self.paused = False
             self.pause_state = "running"
@@ -2067,7 +3006,7 @@ class IndexPage(QWidget):
             if self.pause_state == "paused":
                 self.mode_switch_requested.emit(False)
             return
-        self.scan_requested.emit()
+        self.scan_requested.emit(None)
 
     def _performance_mode_clicked(self) -> None:
         if self.running:
@@ -2121,6 +3060,10 @@ class IndexPage(QWidget):
         active_phase: str = "",
         active_completed_units: int = 0,
         active_total_units: int = 0,
+        planning_phase: str = "",
+        planning_completed: int = 0,
+        planning_total: int = 0,
+        discovered_files: int = 0,
         no_progress_seconds: int = 0,
         retry_count: int = 0,
         excluded_video: int = 0,
@@ -2134,10 +3077,9 @@ class IndexPage(QWidget):
         self.set_task_running(True)
         if self.pause_state not in {"pausing", "paused"}:
             self.set_pause_state("running")
-        current_name = Path(current).name if current else ""
-        current_display = compact_text(current_name, 44)
+        current_display = str(current or "")
         self.task_file.setText(current_display)
-        self.task_file.setToolTip(current)
+        self.task_file.setToolTip(current_display)
         runtime_text = ""
         phase_text = ""
         units_text = ""
@@ -2188,13 +3130,28 @@ class IndexPage(QWidget):
             phase_text += f" · 另 {other_active_lane_count} 车道有进展"
         self.task_phase.setText(phase_text)
         self.task_phase.setToolTip("；".join(dict.fromkeys(phase_tooltip_parts)))
-        self.task_units.setText(units_text)
         mode_label = "性能模式" if getattr(self, "performance_mode", False) else "普通模式"
         video_suffix = f"·排除视频 {excluded_video}" if excluded_video else ""
-        self.task_label.setText(
-            f"{mode_label}·总体 {completed:,}/{max(total, completed):,}"
-            f"·失败 {failed}{video_suffix}"
-        )
+        # Once a parser has reported a real active phase, show that file and
+        # phase. A late planning event must not overwrite an active parse and
+        # make the UI look stuck on discovery.
+        planning_active = bool(planning_phase) and not active_phase and not diagnostic_state
+        if planning_active:
+            dynamic_total = max(total, discovered_files, completed, 1)
+            self.task_label.setText(
+                f"{mode_label} · 已完成 {completed:,}/{dynamic_total:,}"
+                f" · 失败 {failed}{video_suffix}"
+            )
+            if planning_total > 0:
+                units_text = f"规划 {planning_completed:,}/{planning_total:,}"
+            elif discovered_files > 0:
+                units_text = f"发现 {discovered_files:,}"
+        else:
+            self.task_label.setText(
+                f"{mode_label}·总体 {completed:,}/{max(total, completed):,}"
+                f"·失败 {failed}{video_suffix}"
+            )
+        self.task_units.setText(units_text)
         self.task_eta.setText(eta_text)
         if indeterminate:
             self.task_progress.setRange(0, 0)
@@ -2204,7 +3161,8 @@ class IndexPage(QWidget):
 
 
 class RootCard(QFrame):
-    scan_requested = Signal()
+    scan_requested = Signal(object)
+    performance_scan_requested = Signal(object)
     toggle_requested = Signal(int, bool)
     remove_requested = Signal(int)
     open_requested = Signal(str)
@@ -2230,8 +3188,20 @@ class RootCard(QFrame):
         detail = QLabel(scope_detail(stats))
         detail.setObjectName("MutedText")
 
-        update_button = QPushButton("更新")
-        update_button.clicked.connect(self.scan_requested.emit)
+        update_button = QPushButton("更新此范围")
+        update_button.setEnabled(enabled)
+        update_button.setToolTip("只扫描并更新当前搜索范围" if enabled else "已禁用的范围不会自动或手动更新")
+        update_button.clicked.connect(lambda: self.scan_requested.emit(self.root_id))
+        performance_button = QPushButton("性能模式 · 更新此范围")
+        performance_button.setEnabled(enabled)
+        performance_button.setToolTip(
+            "使用性能模式只更新当前搜索范围"
+            if enabled
+            else "已禁用的范围不会自动或手动更新"
+        )
+        performance_button.clicked.connect(
+            lambda: self.performance_scan_requested.emit(self.root_id)
+        )
         more_button = QPushButton("更多")
         more_button.clicked.connect(lambda: self._show_menu(more_button, enabled))
 
@@ -2240,6 +3210,7 @@ class RootCard(QFrame):
         top.addWidget(title, 1)
         top.addWidget(status)
         top.addWidget(update_button)
+        top.addWidget(performance_button)
         top.addWidget(more_button)
         secondary = QHBoxLayout()
         secondary.setContentsMargins(0, 0, 0, 0)
@@ -2268,7 +3239,7 @@ class RootCard(QFrame):
 
 
 class FailedPage(QWidget):
-    retry_requested = Signal()
+    retry_requested = Signal(list)
     refresh_requested = Signal()
     export_requested = Signal(list)
     open_folder_requested = Signal(str)
@@ -2286,9 +3257,22 @@ class FailedPage(QWidget):
             "excluded": [],
             "metadata": [],
         }
+        self.page_size = 200
+        self.page_by_scope: dict[str, int] = {
+            "blocking": 0,
+            "excluded": 0,
+            "metadata": 0,
+        }
+        self.total_by_scope: dict[str, int] = {
+            "blocking": 0,
+            "excluded": 0,
+            "metadata": 0,
+        }
         self.index_running = False
         self.exclusion_running = False
-        self.readiness: dict[str, object] = {"ready": True, "repairable": False}
+        self.database_migration_running = False
+        self.snapshot_loading = False
+        self.readiness: dict[str, object] = {"ready": False, "repairable": False}
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 20, 24, 20)
         layout.setSpacing(14)
@@ -2302,14 +3286,80 @@ class FailedPage(QWidget):
         self.scope_tabs.addTab("仅元数据完成 0")
         layout.addWidget(self.scope_tabs)
 
-        filters = QHBoxLayout()
+        self.guide = QFrame()
+        self.guide.setObjectName("FailedActionGuide")
+        guide_layout = QGridLayout(self.guide)
+        guide_layout.setContentsMargins(14, 10, 14, 10)
+        guide_layout.setHorizontalSpacing(18)
+        guide_layout.setVerticalSpacing(4)
+        guide_title = QLabel("如何处理未成功索引")
+        guide_title.setObjectName("SectionTitle")
+        guide_layout.addWidget(guide_title, 0, 0, 1, 3)
+        guide_items = (
+            (
+                "1. 重新尝试",
+                "文件已修复、解密或相关软件已恢复时使用；只重新解析，不会排除文件。",
+            ),
+            (
+                "2. 从当前索引范围排除",
+                "确认选中的文件不需要搜索时使用；源文件不会被删除，之后可以恢复纳入。",
+            ),
+            (
+                "3. 保底完成并开放搜索",
+                "保底完成并开放搜索针对整个未完成索引：先做最后一次重试，仍失败时确认排除，开放其他文件搜索。",
+            ),
+        )
+        self.guide_labels: list[QLabel] = []
+        for column, (title, body) in enumerate(guide_items):
+            item = QWidget()
+            item_layout = QVBoxLayout(item)
+            item_layout.setContentsMargins(0, 2, 0, 2)
+            item_layout.setSpacing(3)
+            title_label = QLabel(title)
+            title_label.setObjectName("FailedActionGuideTitle")
+            body_label = QLabel(body)
+            body_label.setObjectName("FailedActionGuideText")
+            body_label.setWordWrap(True)
+            body_label.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+            body_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+            item_layout.addWidget(title_label)
+            item_layout.addWidget(body_label)
+            guide_layout.addWidget(item, 1, column)
+            guide_layout.setColumnStretch(column, 1)
+            self.guide_labels.append(body_label)
+        layout.addWidget(self.guide)
+
+        self.risk_banner = QLabel("")
+        self.risk_banner.setObjectName("FailedRiskBanner")
+        self.risk_banner.setWordWrap(True)
+        self.risk_banner.setVisible(False)
+        layout.addWidget(self.risk_banner)
+
+        self.recommendation_label = QLabel("")
+        self.recommendation_label.setObjectName("FailedActionRecommendation")
+        self.recommendation_label.setWordWrap(True)
+        self.status = QLabel("")
+        self.status.setObjectName("InlineStatus")
+        recommendation_row = QHBoxLayout()
+        recommendation_row.setContentsMargins(0, 0, 0, 0)
+        recommendation_row.setSpacing(12)
+        recommendation_row.addWidget(self.recommendation_label, 1)
+        recommendation_row.addWidget(
+            self.status, 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        layout.addLayout(recommendation_row)
+
+        self.filter_group = QWidget()
+        filters = QHBoxLayout(self.filter_group)
+        filters.setContentsMargins(0, 0, 0, 0)
+        filters.setSpacing(10)
         self.status_filter = chip_combo()
         self.extension_filter = chip_combo()
-        self.select_all = QCheckBox("全选当前筛选")
+        self.select_all = QCheckBox("全选当前页")
         self.retry_button = QPushButton("重新尝试")
         self.exclude_button = QPushButton("从当前索引范围排除")
         self.restore_button = QPushButton("恢复纳入并重试")
-        self.force_complete_button = QPushButton("强力完成本次索引")
+        self.force_complete_button = QPushButton("保底完成并开放搜索")
         self.export_button = QPushButton("导出明细")
         self.open_log_button = QPushButton("打开日志目录")
         self.exclusion_progress = QProgressBar()
@@ -2318,14 +3368,11 @@ class FailedPage(QWidget):
         self.exclusion_progress.setVisible(False)
         self.cancel_exclusion_button = QPushButton("取消索引更新")
         self.cancel_exclusion_button.setVisible(False)
-        self.retry_button.setObjectName("PrimaryButton")
         self.force_complete_button.setObjectName("PrimaryButton")
-        self.retry_button.clicked.connect(self.retry_requested.emit)
+        self.retry_button.clicked.connect(self._emit_retry)
         self.exclude_button.clicked.connect(self._emit_exclude)
         self.restore_button.clicked.connect(self._emit_restore)
-        self.force_complete_button.clicked.connect(
-            self.force_complete_requested.emit
-        )
+        self.force_complete_button.clicked.connect(self._emit_force_complete)
         self.cancel_exclusion_button.clicked.connect(
             self.cancel_exclusion_requested.emit
         )
@@ -2336,22 +3383,43 @@ class FailedPage(QWidget):
         filters.addWidget(self.status_filter)
         filters.addWidget(self.extension_filter)
         filters.addWidget(self.select_all)
-        filters.addStretch(1)
-        layout.addLayout(filters)
+        self.filter_group.setSizePolicy(
+            QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed
+        )
 
-        actions = QHBoxLayout()
-        self.status = QLabel("")
-        self.status.setObjectName("InlineStatus")
-        actions.addWidget(self.status, 1)
+        self.action_group = QWidget()
+        actions = QHBoxLayout(self.action_group)
+        actions.setContentsMargins(0, 0, 0, 0)
+        actions.setSpacing(10)
         actions.addWidget(self.exclusion_progress)
         actions.addWidget(self.cancel_exclusion_button)
         actions.addWidget(self.retry_button)
         actions.addWidget(self.exclude_button)
         actions.addWidget(self.restore_button)
         actions.addWidget(self.force_complete_button)
+        actions.addSpacing(10)
+        action_separator = QFrame()
+        action_separator.setObjectName("FailedActionSeparator")
+        action_separator.setFrameShape(QFrame.Shape.VLine)
+        action_separator.setFrameShadow(QFrame.Shadow.Sunken)
+        actions.addWidget(action_separator)
         actions.addWidget(self.export_button)
         actions.addWidget(self.open_log_button)
-        layout.addLayout(actions)
+        self.action_group.setSizePolicy(
+            QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed
+        )
+
+        self.action_toolbar = QFrame()
+        self.action_toolbar.setObjectName("FailedActionToolbar")
+        self.action_toolbar_layout = QGridLayout(self.action_toolbar)
+        self.action_toolbar_layout.setContentsMargins(0, 0, 0, 0)
+        self.action_toolbar_layout.setHorizontalSpacing(16)
+        self.action_toolbar_layout.setVerticalSpacing(10)
+        self.action_toolbar_layout.setColumnStretch(0, 1)
+        self.action_toolbar_layout.setColumnStretch(1, 0)
+        self._toolbar_compact: bool | None = None
+        self._set_action_toolbar_compact(True)
+        layout.addWidget(self.action_toolbar)
 
         self.table = QTableWidget(0, 11)
         self.table.setObjectName("FailedTable")
@@ -2378,26 +3446,125 @@ class FailedPage(QWidget):
         self.table.setAlternatingRowColors(False)
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         layout.addWidget(self.table, 1)
+
+        self.page_toolbar = QWidget()
+        page_layout = QHBoxLayout(self.page_toolbar)
+        page_layout.setContentsMargins(0, 0, 0, 0)
+        page_layout.setSpacing(8)
+        self.previous_page_button = QPushButton("上一页")
+        self.next_page_button = QPushButton("下一页")
+        self.page_label = QLabel("第 1/1 页")
+        self.page_label.setObjectName("MutedText")
+        self.previous_page_button.clicked.connect(lambda: self._change_page(-1))
+        self.next_page_button.clicked.connect(lambda: self._change_page(1))
+        page_layout.addStretch(1)
+        page_layout.addWidget(self.previous_page_button)
+        page_layout.addWidget(self.page_label)
+        page_layout.addWidget(self.next_page_button)
+        layout.addWidget(self.page_toolbar)
         self.scope_tabs.currentChanged.connect(self._scope_changed)
         self.status_filter.currentIndexChanged.connect(self.apply_filters)
         self.extension_filter.currentIndexChanged.connect(self.apply_filters)
         self.select_all.toggled.connect(self._select_visible)
+        self.table.itemChanged.connect(self._table_item_changed)
+
+    def resizeEvent(self, event: object) -> None:
+        super().resizeEvent(event)
+        if hasattr(self, "action_toolbar_layout"):
+            self._set_action_toolbar_compact(self._toolbar_should_compact())
+
+    def _toolbar_should_compact(self) -> bool:
+        available_width = max(0, self.width() - 48)
+        required_width = (
+            self.filter_group.sizeHint().width()
+            + self.action_group.sizeHint().width()
+            + self.action_toolbar_layout.horizontalSpacing()
+        )
+        return available_width < required_width
+
+    def _set_action_toolbar_compact(self, compact: bool) -> None:
+        compact = bool(compact)
+        if self._toolbar_compact == compact:
+            return
+        self.action_toolbar_layout.removeWidget(self.filter_group)
+        self.action_toolbar_layout.removeWidget(self.action_group)
+        if compact:
+            self.action_toolbar_layout.addWidget(
+                self.filter_group,
+                0,
+                0,
+                1,
+                2,
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+            )
+            self.action_toolbar_layout.addWidget(
+                self.action_group,
+                1,
+                0,
+                1,
+                2,
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+            )
+        else:
+            self.action_toolbar_layout.addWidget(
+                self.filter_group,
+                0,
+                0,
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+            )
+            self.action_toolbar_layout.addWidget(
+                self.action_group,
+                0,
+                1,
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+            )
+        self._toolbar_compact = compact
+        self.action_toolbar.updateGeometry()
 
     def set_rows(
         self,
         blocking: list[object],
         excluded: list[object] | None = None,
         metadata: list[object] | None = None,
+        *,
+        totals: dict[str, int] | None = None,
     ) -> None:
         self.rows_by_scope = {
             "blocking": [self._normalize_row(row, "blocking") for row in blocking],
             "excluded": [self._normalize_row(row, "excluded") for row in (excluded or [])],
             "metadata": [self._normalize_row(row, "metadata") for row in (metadata or [])],
         }
-        self.scope_tabs.setTabText(0, f"阻断项 {len(self.rows_by_scope['blocking'])}")
-        self.scope_tabs.setTabText(1, f"已人工排除 {len(self.rows_by_scope['excluded'])}")
-        self.scope_tabs.setTabText(2, f"仅元数据完成 {len(self.rows_by_scope['metadata'])}")
+        self.total_by_scope = {
+            scope: max(
+                len(self.rows_by_scope[scope]),
+                int((totals or {}).get(scope, len(self.rows_by_scope[scope]))),
+            )
+            for scope in ("blocking", "excluded", "metadata")
+        }
+        for scope in self.total_by_scope:
+            last_page = self._page_count(scope) - 1
+            self.page_by_scope[scope] = min(self.page_by_scope[scope], max(0, last_page))
+        self.scope_tabs.setTabText(0, f"阻断项 {self.total_by_scope['blocking']}")
+        self.scope_tabs.setTabText(1, f"已人工排除 {self.total_by_scope['excluded']}")
+        self.scope_tabs.setTabText(2, f"仅元数据完成 {self.total_by_scope['metadata']}")
         self._scope_changed(self.scope_tabs.currentIndex())
+
+    def _page_count(self, scope: str) -> int:
+        total = max(0, int(self.total_by_scope.get(scope, 0)))
+        return max(1, (total + self.page_size - 1) // self.page_size)
+
+    def page_offset(self, scope: str) -> int:
+        return max(0, int(self.page_by_scope.get(scope, 0))) * self.page_size
+
+    def _change_page(self, delta: int) -> None:
+        scope = ("blocking", "excluded", "metadata")[
+            max(0, min(self.scope_tabs.currentIndex(), 2))
+        ]
+        current = int(self.page_by_scope.get(scope, 0))
+        target = max(0, min(current + int(delta), self._page_count(scope) - 1))
+        if target != current:
+            self.page_by_scope[scope] = target
+            self.refresh_requested.emit()
 
     @staticmethod
     def _normalize_row(row: object, scope: str) -> dict[str, object]:
@@ -2432,13 +3599,32 @@ class FailedPage(QWidget):
     def _scope_changed(self, index: int) -> None:
         scope = ("blocking", "excluded", "metadata")[max(0, min(index, 2))]
         self.rows = self.rows_by_scope[scope]
+        total = self.total_by_scope.get(scope, len(self.rows))
         self.subtitle.setText(
-            f"{len(self.rows)} 个阻断项"
+            f"{total} 个阻断项"
             if scope == "blocking"
-            else f"{len(self.rows)} 个已人工排除文件"
+            else f"{total} 个已人工排除文件"
             if scope == "excluded"
-            else f"{len(self.rows)} 个仅元数据完成文件"
+            else f"{total} 个仅元数据完成文件"
         )
+        self.subtitle.setProperty(
+            "state",
+            "error"
+            if (
+                scope == "blocking"
+                and total
+                and not self.index_running
+                and not self.snapshot_loading
+                and bool(self.readiness.get("failure_alert_ready", True))
+            )
+            else "",
+        )
+        self.subtitle.style().unpolish(self.subtitle)
+        self.subtitle.style().polish(self.subtitle)
+        current_page = int(self.page_by_scope.get(scope, 0)) + 1
+        self.page_label.setText(f"第 {current_page}/{self._page_count(scope)} 页")
+        self.previous_page_button.setEnabled(current_page > 1)
+        self.next_page_button.setEnabled(current_page < self._page_count(scope))
         self.status_filter.blockSignals(True)
         self.extension_filter.blockSignals(True)
         self.status_filter.clear()
@@ -2457,19 +3643,48 @@ class FailedPage(QWidget):
         self.retry_button.setVisible(scope == "blocking")
         self.exclude_button.setVisible(scope == "blocking")
         self.restore_button.setVisible(scope == "excluded")
-        self.force_complete_button.setVisible(
-            True
-        )
+        self.force_complete_button.setVisible(scope == "blocking")
         self._update_action_states()
         self.apply_filters()
+        self.action_group.layout().activate()
+        self._set_action_toolbar_compact(self._toolbar_should_compact())
 
     def set_index_running(self, running: bool) -> None:
         self.index_running = bool(running)
+        if running:
+            self.risk_banner.clear()
+            self.risk_banner.setVisible(False)
         self._update_action_states()
 
     def set_readiness(self, readiness: dict[str, object]) -> None:
         self.readiness = dict(readiness)
-        self._update_force_complete_state()
+        self._update_action_states()
+
+    def set_snapshot_loading(self, loading: bool) -> None:
+        self.snapshot_loading = bool(loading)
+        self._update_action_states()
+        self._update_scope_alert_state()
+
+    def _update_scope_alert_state(self) -> None:
+        scope = ("blocking", "excluded", "metadata")[
+            max(0, min(self.scope_tabs.currentIndex(), 2))
+        ]
+        total = self.total_by_scope.get(scope, len(self.rows_by_scope[scope]))
+        visible = bool(
+            scope == "blocking"
+            and total
+            and not self.index_running
+            and not self.snapshot_loading
+            and bool(self.readiness.get("failure_alert_ready", True))
+            and str(self.readiness.get("background_task_state") or "") != "running"
+        )
+        self.subtitle.setProperty("state", "error" if visible else "")
+        self.subtitle.style().unpolish(self.subtitle)
+        self.subtitle.style().polish(self.subtitle)
+
+    def set_database_migration_running(self, running: bool) -> None:
+        self.database_migration_running = bool(running)
+        self._update_action_states()
 
     def set_exclusion_running(self, running: bool) -> None:
         self.exclusion_running = bool(running)
@@ -2514,35 +3729,80 @@ class FailedPage(QWidget):
         self.set_status("正在取消索引更新并回滚，请稍候...")
 
     def _update_action_states(self) -> None:
-        busy = self.index_running or self.exclusion_running
+        busy = (
+            self.index_running
+            or self.exclusion_running
+            or self.database_migration_running
+            or self.snapshot_loading
+        )
         scope = self.scope_tabs.currentIndex()
-        self.retry_button.setEnabled(scope == 0 and not busy)
-        self.exclude_button.setEnabled(scope == 0 and not busy)
+        blockers = self.total_by_scope.get("blocking", len(self.rows_by_scope["blocking"]))
+        ready = bool(self.readiness.get("ready", blockers == 0))
+        has_selection = bool(self.selected_file_ids())
+        self.retry_button.setEnabled(
+            scope == 0 and blockers > 0 and not ready and not busy
+        )
+        # Exclusion is scoped to the selected files. A directory scan in
+        # another root must not globally disable this action; the database
+        # worker settles only real tasks belonging to the selection.
+        self.exclude_button.setEnabled(
+            scope == 0
+            and blockers > 0
+            and not ready
+            and not busy
+        )
         self.restore_button.setEnabled(scope == 1 and not busy)
+        if busy:
+            retry_reason = "当前任务正在处理，请等待完成"
+        elif ready:
+            retry_reason = "当前索引已经就绪，请从索引管理页发起更新"
+        elif blockers == 0:
+            retry_reason = "当前没有需要重新解析的阻断文件"
+        elif has_selection:
+            retry_reason = "只重新解析当前选中的阻断文件"
+        else:
+            retry_reason = "请先勾选至少一个未成功索引项"
+        self.retry_button.setToolTip(retry_reason)
+        self.exclude_button.setToolTip(
+            "排除选中的阻断文件；不会删除源文件"
+            if has_selection
+            else "请先勾选至少一个阻断文件"
+        )
         self.select_all.setEnabled(not self.exclusion_running)
         self._update_force_complete_state()
+        self._update_recommendation()
+        self._update_risk_banner()
 
     def _update_force_complete_state(self) -> None:
-        blockers = len(self.rows_by_scope["blocking"])
+        busy = (
+            self.index_running
+            or self.exclusion_running
+            or self.database_migration_running
+            or self.snapshot_loading
+        )
+        blockers = self.total_by_scope.get("blocking", len(self.rows_by_scope["blocking"]))
         ready = bool(self.readiness.get("ready", blockers == 0))
         repairable = bool(self.readiness.get("repairable", blockers > 0))
         reasons = [
             str(value) for value in self.readiness.get("not_ready_reasons", [])
         ]
+        has_unready_reason = bool(reasons)
         enabled = (
-            not ready
-            and repairable
-            and not self.index_running
-            and not self.exclusion_running
+            self.scope_tabs.currentIndex() == 0
+            and not ready
+            and blockers > 0
+            and not busy
         )
         self.force_complete_button.setEnabled(enabled)
-        if self.exclusion_running:
-            tooltip = "搜索索引正在后台更新，完成后可使用强力完成"
+        if self.database_migration_running:
+            tooltip = "数据库正在迁移，完成后可使用保底完成"
+        elif self.exclusion_running:
+            tooltip = "搜索索引正在后台更新，完成后可使用保底完成"
         elif self.index_running:
-            tooltip = "索引任务正在运行，结束后可使用强力完成"
+            tooltip = "索引任务正在运行，结束后可使用保底完成"
         elif blockers:
             tooltip = f"仍有 {blockers} 个阻断项，可执行最终重试并排除后开放搜索"
-        elif enabled:
+        elif not blockers and repairable:
             labels = {
                 "unfinished_tasks": "残留解析任务",
                 "content_fts_dirty": "全文索引待发布",
@@ -2551,12 +3811,91 @@ class FailedPage(QWidget):
                 "unpublished_candidate": "候选索引未发布",
             }
             detail = "、".join(labels.get(reason, reason) for reason in reasons)
-            tooltip = f"文件已处理完成，可修复：{detail or '索引状态未收敛'}"
+            tooltip = f"没有可选择的未成功索引项：{detail or '索引状态未收敛'}"
         elif ready:
             tooltip = "当前索引已经就绪"
+        elif not blockers and not ready and not repairable:
+            tooltip = "当前没有未成功索引项，无法执行此操作"
         else:
             tooltip = "当前状态暂不可修复，请查看未就绪原因"
         self.force_complete_button.setToolTip(tooltip)
+
+    def _update_risk_banner(self) -> None:
+        blockers = int(
+            self.total_by_scope.get(
+                "blocking",
+                len(self.rows_by_scope["blocking"]),
+            )
+        )
+        ready = bool(self.readiness.get("ready", blockers == 0))
+        if (
+            self.index_running
+            or self.snapshot_loading
+            or str(self.readiness.get("background_task_state") or "") == "running"
+        ):
+            self.risk_banner.clear()
+            self.risk_banner.setVisible(False)
+            return
+        if blockers > 0 and not self.snapshot_loading and bool(
+            self.readiness.get("failure_alert_ready", True)
+        ):
+            self.risk_banner.setText(
+                f"需要处理：当前有 {blockers:,} 个文件未成功索引。"
+                "请从下方三种方式中选择一种；源文件不会被自动删除。"
+            )
+            state = "error"
+            visible = True
+        elif not ready:
+            self.risk_banner.setText(
+                "索引状态尚未收敛：文件可能已处理完成，但搜索索引仍需修复。"
+                "可使用“保底完成并开放搜索”修复并开放搜索。"
+            )
+            state = "warning"
+            visible = True
+        else:
+            self.risk_banner.clear()
+            state = ""
+            visible = False
+        self.risk_banner.setProperty("state", state)
+        self.risk_banner.setVisible(visible)
+        self.risk_banner.style().unpolish(self.risk_banner)
+        self.risk_banner.style().polish(self.risk_banner)
+
+    def _update_recommendation(self) -> None:
+        blockers = self.total_by_scope.get("blocking", len(self.rows_by_scope["blocking"]))
+        ready = bool(self.readiness.get("ready", blockers == 0))
+        if self.database_migration_running:
+            text = "正在迁移数据库，完成后可继续操作。"
+        elif self.exclusion_running:
+            text = "正在更新搜索索引，完成后可继续操作。"
+        elif self.index_running:
+            text = "正在重新解析文件，完成后可继续操作。"
+        elif ready:
+            text = "当前索引已完成，可以正常搜索，无需处理。"
+        elif blockers:
+            text = (
+                f"仍有 {blockers} 个文件无法解析。建议先重新尝试；确认无法修复后再排除，"
+                "或使用保底完成。"
+            )
+        else:
+            text = (
+                "没有失败文件，但索引发布状态未完成，请使用“保底完成并开放搜索”修复。"
+            )
+        self.recommendation_label.setText(text)
+        self.recommendation_label.setProperty(
+            "state",
+            "error"
+            if (
+                blockers > 0
+                and not self.snapshot_loading
+                and bool(self.readiness.get("failure_alert_ready", True))
+            )
+            else "warning"
+            if not ready
+            else "ready",
+        )
+        self.recommendation_label.style().unpolish(self.recommendation_label)
+        self.recommendation_label.style().polish(self.recommendation_label)
 
     def visible_rows(self) -> list[dict[str, object]]:
         status = str(self.status_filter.currentData() or "")
@@ -2572,6 +3911,7 @@ class FailedPage(QWidget):
 
     def apply_filters(self) -> None:
         rows = self.visible_rows()
+        self.table.blockSignals(True)
         self.table.setRowCount(len(rows))
         selectable = self.scope_tabs.currentIndex() in {0, 1}
         for row_index, row in enumerate(rows):
@@ -2611,6 +3951,12 @@ class FailedPage(QWidget):
             action_button = QPushButton("打开文件夹")
             action_button.clicked.connect(lambda _checked=False, value=path: self.open_folder_requested.emit(value))
             self.table.setCellWidget(row_index, 10, action_button)
+        self.table.blockSignals(False)
+        self._update_action_states()
+
+    def _table_item_changed(self, item: QTableWidgetItem) -> None:
+        if item.column() == 0:
+            self._update_action_states()
 
     def selected_file_ids(self) -> list[int]:
         selected = []
@@ -2630,16 +3976,46 @@ class FailedPage(QWidget):
     def _emit_exclude(self) -> None:
         file_ids = self.selected_file_ids()
         if not file_ids:
-            self.set_status("请先选择需要排除的阻断项")
+            QMessageBox.information(
+                self,
+                "需要选择未成功索引项",
+                "请先勾选需要处理的未成功索引项。",
+            )
             return
         self.exclude_requested.emit(file_ids)
+
+    def _emit_retry(self) -> None:
+        file_ids = self.selected_file_ids()
+        if not file_ids:
+            QMessageBox.information(
+                self,
+                "需要选择未成功索引项",
+                "请先勾选需要处理的未成功索引项。",
+            )
+            return
+        self.retry_requested.emit(file_ids)
 
     def _emit_restore(self) -> None:
         file_ids = self.selected_file_ids()
         if not file_ids:
-            self.set_status("请先选择需要恢复纳入的文件")
+            QMessageBox.information(
+                self,
+                "需要选择未成功索引项",
+                "请先勾选需要处理的未成功索引项。",
+            )
             return
         self.restore_requested.emit(file_ids)
+
+    def _emit_force_complete(self) -> None:
+        file_ids = self.selected_file_ids()
+        if not file_ids:
+            QMessageBox.information(
+                self,
+                "需要选择未成功索引项",
+                "请先勾选需要处理的未成功索引项。",
+            )
+            return
+        self.force_complete_requested.emit()
 
     def set_status(self, text: str) -> None:
         self.status.setText(text)
@@ -2651,6 +4027,8 @@ class FailedPage(QWidget):
 
 class SettingsPage(QWidget):
     save_requested = Signal(object)
+    database_migration_requested = Signal(str)
+    database_migration_cancel_requested = Signal()
 
     def __init__(self, settings: AppSettings) -> None:
         super().__init__()
@@ -2663,10 +4041,97 @@ class SettingsPage(QWidget):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll_host = QWidget()
+        scroll_host_layout = QHBoxLayout(scroll_host)
+        scroll_host_layout.setContentsMargins(0, 0, 0, 0)
+        scroll_host_layout.addStretch(1)
         host = QWidget()
+        host.setObjectName("SettingsContent")
+        host.setMaximumWidth(1100)
+        self.settings_content = host
         host_layout = QVBoxLayout(host)
         host_layout.setContentsMargins(0, 0, 0, 0)
         host_layout.setSpacing(12)
+        scroll_host_layout.addWidget(host, 1)
+        scroll_host_layout.addStretch(1)
+
+        self.current_database_path = Path()
+        self.database_migration_running = False
+        self.database_path_value = QLineEdit("-")
+        self.database_path_value.setReadOnly(True)
+        self.database_path_value.setObjectName("DatabasePath")
+        self.database_size_value = QLabel("-")
+        self.database_schema_value = QLabel("-")
+        self.database_current_space_value = QLabel("-")
+        self.database_target = QLineEdit()
+        self.database_target.setReadOnly(True)
+        self.database_target.setPlaceholderText("选择本机固定磁盘上的目标目录")
+        self.database_target_space_value = QLabel("尚未选择目标目录")
+        self.database_choose_button = QPushButton("选择目录")
+        self.database_migrate_button = QPushButton("迁移数据库")
+        self.database_migrate_button.setObjectName("PrimaryButton")
+        self.database_cancel_button = QPushButton("取消迁移")
+        self.database_cancel_button.setVisible(False)
+        self.database_copy_button = QPushButton("复制路径")
+        self.database_migration_status = QLabel("数据库未迁移")
+        self.database_migration_status.setWordWrap(True)
+        self.database_migration_progress = QProgressBar()
+        self.database_migration_progress.setRange(0, 100)
+        self.database_migration_progress.setValue(0)
+        self.database_migration_progress.setVisible(False)
+        database_progress = QWidget()
+        database_progress_layout = QVBoxLayout(database_progress)
+        database_progress_layout.setContentsMargins(0, 0, 0, 0)
+        database_progress_layout.setSpacing(6)
+        database_progress_layout.addWidget(self.database_migration_status)
+        database_progress_layout.addWidget(self.database_migration_progress)
+        database_card = QFrame()
+        database_card.setObjectName("SettingsCard")
+        database_layout = QVBoxLayout(database_card)
+        database_layout.setContentsMargins(16, 14, 16, 14)
+        database_layout.setSpacing(9)
+        database_heading = QLabel("索引数据库")
+        database_heading.setObjectName("SectionTitle")
+        database_layout.addWidget(database_heading)
+
+        database_path_header = QHBoxLayout()
+        database_path_header.addWidget(QLabel("当前数据库"))
+        database_path_header.addStretch(1)
+        database_path_header.addWidget(self.database_copy_button)
+        database_layout.addLayout(database_path_header)
+        database_layout.addWidget(self.database_path_value)
+
+        database_summary = QWidget()
+        database_summary_layout = QGridLayout(database_summary)
+        database_summary_layout.setContentsMargins(0, 2, 0, 2)
+        database_summary_layout.setHorizontalSpacing(24)
+        summary_items = (
+            ("数据库大小", self.database_size_value),
+            ("数据库版本", self.database_schema_value),
+            ("当前磁盘", self.database_current_space_value),
+        )
+        for column, (caption, value) in enumerate(summary_items):
+            caption_label = QLabel(caption)
+            caption_label.setObjectName("MutedText")
+            database_summary_layout.addWidget(caption_label, 0, column)
+            database_summary_layout.addWidget(value, 1, column)
+            database_summary_layout.setColumnStretch(column, 1)
+        database_layout.addWidget(database_summary)
+
+        target_caption = QLabel("目标位置")
+        target_caption.setObjectName("MutedText")
+        database_layout.addWidget(target_caption)
+        database_target_row = QHBoxLayout()
+        database_target_row.setSpacing(8)
+        database_target_row.addWidget(self.database_target, 1)
+        database_target_row.addWidget(self.database_choose_button)
+        database_target_row.addWidget(self.database_migrate_button)
+        database_target_row.addWidget(self.database_cancel_button)
+        database_layout.addLayout(database_target_row)
+        self.database_target_space_value.setObjectName("InlineStatus")
+        database_layout.addWidget(self.database_target_space_value)
+        database_layout.addWidget(database_progress)
+        host_layout.addWidget(database_card)
 
         self.page_size = QSpinBox()
         self.page_size.setRange(10, 100)
@@ -2794,20 +4259,184 @@ class SettingsPage(QWidget):
         advanced_layout.addWidget(settings_card("排除目录", [("每行一个目录名", self.exclude_dirs)]))
         self.advanced_content.setVisible(False)
         host_layout.addWidget(self.advanced_content)
-        host_layout.addStretch(1)
-        scroll.setWidget(host)
-        layout.addWidget(scroll, 1)
 
-        save = QPushButton("保存设置")
-        save.setObjectName("PrimaryButton")
-        save.clicked.connect(self.apply)
-        layout.addWidget(save, alignment=Qt.AlignmentFlag.AlignRight)
+        self.save_button = QPushButton("保存设置")
+        self.save_button.setObjectName("PrimaryButton")
+        self.save_button.clicked.connect(self.apply)
+        save_row = QHBoxLayout()
+        save_row.addStretch(1)
+        save_row.addWidget(self.save_button)
+        host_layout.addLayout(save_row)
+        host_layout.addStretch(1)
+        scroll.setWidget(scroll_host)
+        layout.addWidget(scroll, 1)
 
         self.auto_search.toggled.connect(self.search_delay.setEnabled)
         self.search_delay.setEnabled(self.auto_search.isChecked())
         self.enable_ocr.toggled.connect(self._update_ocr_controls)
         self.advanced_toggle.toggled.connect(self._toggle_advanced)
+        self.database_choose_button.clicked.connect(
+            self.choose_database_directory
+        )
+        self.database_copy_button.clicked.connect(self.copy_database_path)
+        self.database_migrate_button.clicked.connect(
+            self.emit_database_migration
+        )
+        self.database_cancel_button.clicked.connect(
+            self.database_migration_cancel_requested.emit
+        )
         self._update_ocr_controls(self.enable_ocr.isChecked())
+        self._refresh_database_actions()
+
+    def set_database_info(self, path: Path) -> None:
+        self.current_database_path = Path(path).resolve()
+        self.database_path_value.setText(str(self.current_database_path))
+        self.database_path_value.setToolTip(str(self.current_database_path))
+        size = (
+            self.current_database_path.stat().st_size
+            if self.current_database_path.is_file()
+            else 0
+        )
+        self.database_size_value.setText(format_bytes(size))
+        schema = 0
+        if self.current_database_path.is_file():
+            try:
+                connection = sqlite3.connect(
+                    f"file:{self.current_database_path.as_posix()}?mode=ro",
+                    uri=True,
+                    timeout=5,
+                )
+                try:
+                    schema = int(
+                        connection.execute("PRAGMA user_version").fetchone()[0]
+                    )
+                finally:
+                    connection.close()
+            except sqlite3.Error:
+                schema = 0
+        self.database_schema_value.setText(
+            f"schema v{schema}" if schema else "尚未初始化"
+        )
+        try:
+            free = shutil.disk_usage(self.current_database_path.parent).free
+            self.database_current_space_value.setText(
+                f"可用 {format_bytes(free)}"
+            )
+        except OSError:
+            self.database_current_space_value.setText("无法读取磁盘空间")
+        self._refresh_database_actions()
+
+    def copy_database_path(self) -> None:
+        QGuiApplication.clipboard().setText(str(self.current_database_path))
+        self.database_migration_status.setText("已复制当前数据库路径")
+
+    def choose_database_directory(self) -> None:
+        initial = (
+            str(self.current_database_path.parent)
+            if str(self.current_database_path)
+            else ""
+        )
+        directory = QFileDialog.getExistingDirectory(
+            self,
+            "选择数据库目标目录",
+            initial,
+        )
+        if not directory:
+            return
+        self.database_target.setText(str(Path(directory).resolve()))
+        self._update_target_space()
+        self._refresh_database_actions()
+
+    def emit_database_migration(self) -> None:
+        target = self.database_target.text().strip()
+        if target and not self.database_migration_running:
+            self.database_migration_requested.emit(target)
+
+    def set_database_migration_running(self, running: bool) -> None:
+        self.database_migration_running = bool(running)
+        self.database_choose_button.setEnabled(not running)
+        self.database_cancel_button.setVisible(running)
+        self.database_cancel_button.setEnabled(running)
+        self.save_button.setEnabled(not running)
+        self.database_migration_progress.setVisible(running)
+        if running:
+            self.database_migration_progress.setValue(0)
+            self.database_migration_status.setText("正在准备数据库迁移")
+        self._refresh_database_actions()
+
+    def set_database_migration_progress(self, payload: object) -> None:
+        if not isinstance(payload, dict):
+            return
+        percent = int(payload.get("percent") or 0)
+        label = str(payload.get("phase_label") or "正在迁移数据库")
+        processed = int(payload.get("processed_bytes") or 0)
+        total = int(payload.get("total_bytes") or 0)
+        if total > 0:
+            label += f" · {format_bytes(processed)} / {format_bytes(total)}"
+        self.database_migration_status.setText(label)
+        self.database_migration_progress.setValue(percent)
+
+    def set_database_migration_completed(self, payload: object) -> None:
+        self.database_migration_progress.setVisible(True)
+        self.database_migration_progress.setValue(100)
+        backup = ""
+        if isinstance(payload, dict):
+            backup = str(payload.get("previous_database_backup") or "")
+        text = "数据库迁移完成，当前索引可以继续使用。"
+        if backup:
+            text += f" 回滚备份：{backup}"
+        self.database_migration_status.setText(text)
+        self.database_target.clear()
+        self.database_target_space_value.setText("尚未选择目标目录")
+        self._refresh_database_actions()
+
+    def set_database_migration_cancel_pending(self) -> None:
+        self.database_cancel_button.setEnabled(False)
+        self.database_migration_status.setText("正在取消迁移并恢复原数据库")
+
+    def set_database_migration_cancelled(self) -> None:
+        self.database_migration_progress.setVisible(False)
+        self.database_migration_status.setText(
+            "数据库迁移已取消，程序继续使用原数据库。"
+        )
+
+    def set_database_migration_failed(self, message: str) -> None:
+        self.database_migration_progress.setVisible(False)
+        self.database_migration_status.setText(
+            f"迁移失败：{message}。程序继续使用原数据库。"
+        )
+
+    def _update_target_space(self) -> None:
+        text = self.database_target.text().strip()
+        if not text:
+            self.database_target_space_value.setText("尚未选择目标目录")
+            return
+        try:
+            free = shutil.disk_usage(Path(text)).free
+            current_size = (
+                self.current_database_path.stat().st_size
+                if self.current_database_path.is_file()
+                else 0
+            )
+            required = current_size + max(
+                64 * 1024 * 1024,
+                current_size // 4,
+            )
+            status = "空间充足" if free >= required else "空间不足"
+            self.database_target_space_value.setText(
+                f"可用 {format_bytes(free)} · 预计需要 {format_bytes(required)} · {status}"
+            )
+        except OSError:
+            self.database_target_space_value.setText("无法读取目标磁盘空间")
+
+    def _refresh_database_actions(self) -> None:
+        target = self.database_target.text().strip()
+        target_is_different = bool(target) and (
+            Path(target).resolve() != self.current_database_path.parent
+        )
+        self.database_migrate_button.setEnabled(
+            target_is_different and not self.database_migration_running
+        )
 
     def _toggle_advanced(self, visible: bool) -> None:
         self.advanced_content.setVisible(visible)
@@ -3077,7 +4706,9 @@ def settings_card(title: str, rows: list[tuple[str, QWidget]]) -> QFrame:
     layout.setContentsMargins(16, 14, 16, 14)
     layout.setHorizontalSpacing(16)
     layout.setVerticalSpacing(10)
-    layout.setColumnStretch(0, 1)
+    layout.setColumnMinimumWidth(0, 160)
+    layout.setColumnStretch(0, 0)
+    layout.setColumnStretch(1, 1)
     heading = QLabel(title)
     heading.setObjectName("SectionTitle")
     layout.addWidget(heading, 0, 0, 1, 2)

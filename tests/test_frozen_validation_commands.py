@@ -25,6 +25,14 @@ def test_failure_fallback_demo_has_a_frozen_validation_command() -> None:
     assert "--validate-failure-demo" in VALIDATIONS
 
 
+def test_partial_search_has_a_frozen_validation_command() -> None:
+    assert "--validate-partial-search" in VALIDATIONS
+
+
+def test_database_migration_has_a_frozen_validation_command() -> None:
+    assert "--validate-database-migration" in VALIDATIONS
+
+
 def test_phase2_frozen_validation_matrix_contains_every_special_gate() -> None:
     required = {
         "--validate-hang-recovery",

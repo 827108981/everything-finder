@@ -91,21 +91,43 @@ class PlanningProgressReporter:
         temporary = self.progress_path.with_suffix(
             f".tmp.{os.getpid()}.{uuid.uuid4().hex[:8]}"
         )
-        temporary.write_text(
-            json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
-            encoding="utf-8",
-        )
+        try:
+            temporary.write_text(
+                json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+                encoding="utf-8",
+            )
+        except OSError:
+            logger.warning(
+                "Planning progress snapshot could not be written: %s",
+                temporary,
+                exc_info=True,
+            )
+            return
         # On Windows a concurrent reader can briefly deny rename/delete
         # sharing. Keep the atomic replace contract, but tolerate that bounded
         # sharing window instead of failing a healthy planning task.
         for attempt in range(20):
             try:
                 temporary.replace(self.progress_path)
-                break
+                self._cleanup_fallback_snapshots()
+                return
             except PermissionError:
                 if attempt >= 19:
-                    raise
-                time.sleep(0.005)
+                    logger.warning(
+                        "Planning progress destination is locked; retaining fallback snapshot: %s",
+                        temporary,
+                    )
+                    return
+                time.sleep(0.01)
+
+    def _cleanup_fallback_snapshots(self) -> None:
+        for candidate in self.progress_path.parent.glob(
+            f"{self.progress_path.stem}.tmp.*"
+        ):
+            try:
+                candidate.unlink(missing_ok=True)
+            except OSError:
+                continue
 
 
 class RecoverablePlanningRunner:
@@ -502,9 +524,32 @@ def _planning_stream_process_entry(
 
 
 def _read_progress(path: Path) -> PlanningProgress | None:
+    candidates = [path]
+    try:
+        candidates.extend(
+            path.parent.glob(f"{path.stem}.tmp.*")
+        )
+    except OSError:
+        pass
+    latest_snapshot: PlanningProgress | None = None
+    latest_order = (-1.0, -1)
+    for candidate in candidates:
+        result = _read_progress_candidate(candidate)
+        if result is None:
+            continue
+        snapshot, updated_at, sequence = result
+        if (updated_at, sequence) >= latest_order:
+            latest_snapshot = snapshot
+            latest_order = (updated_at, sequence)
+    return latest_snapshot
+
+
+def _read_progress_candidate(
+    path: Path,
+) -> tuple[PlanningProgress, float, int] | None:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
-        return PlanningProgress(
+        snapshot = PlanningProgress(
             phase=str(payload.get("phase") or ""),
             completed=max(0, int(payload.get("completed") or 0)),
             total=max(0, int(payload.get("total") or 0)),
@@ -516,6 +561,11 @@ def _read_progress(path: Path) -> PlanningProgress | None:
             ),
             detail=str(payload.get("detail") or ""),
             worker_pid=max(0, int(payload.get("worker_pid") or 0)),
+        )
+        return (
+            snapshot,
+            float(payload.get("updated_at") or 0.0),
+            max(0, int(payload.get("sequence") or 0)),
         )
     except (OSError, ValueError, TypeError, json.JSONDecodeError):
         return None

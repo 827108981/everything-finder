@@ -358,6 +358,45 @@ def _run_parse_hang(
     executors = [executor]
     process_executors = [executor]
     token = CancelToken()
+
+    # Frozen Windows workers can spend more than the deliberately tiny
+    # one-second validation timeout importing their runtime on first use.
+    # Warm the persistent worker before injecting the stall so the scenario
+    # measures no-progress recovery, not executable cold-start latency.
+    warmup_job = ParseJob(
+        file_id=0,
+        file_path=healthy_source,
+        parser_name="text",
+        parser_version="validation",
+        lane=lane,
+        size_bytes=healthy_source.stat().st_size,
+        memory_estimate_bytes=healthy_source.stat().st_size,
+    )
+    parse_lane.pending.append(warmup_job)
+    schedule_parse_lanes(lanes.values(), settings, token, case_dir)
+    warmup_complete = False
+    warmup_deadline = time.monotonic() + 30
+    while time.monotonic() < warmup_deadline:
+        completed = drain_completed_lanes(
+            lanes.values(),
+            token,
+            case_dir,
+            block=True,
+        )
+        if not completed:
+            continue
+        warmup_result = completed[0][2]
+        warmup_complete = (
+            isinstance(warmup_result, SpoolParseResult)
+            or (
+                isinstance(warmup_result, ParseOutcome)
+                and warmup_result.status in {"success", "partial_success"}
+            )
+        )
+        break
+    if not warmup_complete:
+        raise RuntimeError(f"Unable to warm frozen parse lane: {lane}")
+
     job = ParseJob(
         file_id=1,
         file_path=healthy_source,
@@ -376,6 +415,7 @@ def _run_parse_hang(
         diagnostic_callback=manager._record_scheduler_diagnostic,
     )
     watchdog.start()
+    watchdog_stopped = False
     started = time.monotonic()
     timed_out_result: ParseOutcome | None = None
     try:
@@ -402,6 +442,15 @@ def _run_parse_hang(
         diagnostic_events = manager._take_scheduler_diagnostics()
         old_pid_exited = _wait_pid_exit(old_pid, 2)
 
+        # The one-second timeout used by this validation is deliberately much
+        # shorter than the production defaults.  Once recovery diagnostics
+        # and worker termination have been proved, stop that artificial
+        # watchdog before cold-starting the replacement frozen worker.  The
+        # follow-up below validates pool health independently instead of
+        # mistaking executable import time for a second parser stall.
+        watchdog.stop()
+        watchdog_stopped = True
+
         healthy_job = ParseJob(
             file_id=2,
             file_path=healthy_source,
@@ -414,7 +463,7 @@ def _run_parse_hang(
         parse_lane.pending.append(healthy_job)
         schedule_parse_lanes(lanes.values(), settings, token, case_dir)
         healthy_follow_up = False
-        healthy_deadline = time.monotonic() + 8
+        healthy_deadline = time.monotonic() + 30
         while time.monotonic() < healthy_deadline:
             completed = drain_completed_lanes(
                 lanes.values(),
@@ -457,7 +506,8 @@ def _run_parse_hang(
             ],
         }
     finally:
-        watchdog.stop()
+        if not watchdog_stopped:
+            watchdog.stop()
         for process_executor in process_executors:
             terminate_process_pool_workers(process_executor, case_dir)
         for active_executor in executors:

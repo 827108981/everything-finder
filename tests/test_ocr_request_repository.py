@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import hashlib
+import sqlite3
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -291,3 +293,80 @@ def test_p0_02r_manager_confirms_only_owned_validated_ocr_spool(
     )
 
     assert repository.get(request_id)["status"] == "confirmed"
+
+
+def test_ocr_confirmation_lock_does_not_restart_search_scope(
+    tmp_path: Path,
+) -> None:
+    database = DatabaseManager(tmp_path / "index.db")
+    manager = IndexManager(database, AppSettings())
+    source = tmp_path / "locked.jpg"
+    source.write_bytes(b"image")
+    spool = tmp_path / "result.pickle"
+    spool.write_bytes(b"validated-result")
+    job = ParseJob(
+        file_id=1,
+        file_path=source,
+        task_id=1,
+        lane="ocr",
+        ocr_request_id=42,
+        ocr_request_owner="run",
+    )
+    outcome = ParseOutcome(
+        file_id=1,
+        file_path=source,
+        blocks=[],
+        parser_name="image_ocr",
+        status="success",
+        spool_path=spool,
+        spool_checksum="digest",
+    )
+
+    with (
+        patch.object(
+            OcrRequestRepository,
+            "confirm",
+            side_effect=sqlite3.OperationalError("database is locked"),
+        ) as confirm,
+        patch("local_full_text_search.core.index_manager.time.sleep") as sleep,
+    ):
+        manager._update_ocr_request_for_outcome(job, outcome)
+
+    assert confirm.call_count == 4
+    assert [call.args[0] for call in sleep.call_args_list] == [0.05, 0.1, 0.2]
+    assert all(
+        call.kwargs["timeout_seconds"] == 0.25
+        for call in confirm.call_args_list
+    )
+
+
+def test_ocr_confirmation_non_lock_database_error_still_propagates(
+    tmp_path: Path,
+) -> None:
+    database = DatabaseManager(tmp_path / "index.db")
+    manager = IndexManager(database, AppSettings())
+    job = ParseJob(
+        file_id=1,
+        file_path=tmp_path / "broken.jpg",
+        task_id=1,
+        lane="ocr",
+        ocr_request_id=42,
+        ocr_request_owner="run",
+    )
+    outcome = ParseOutcome(
+        file_id=1,
+        file_path=job.file_path,
+        blocks=[],
+        parser_name="image_ocr",
+        status="success",
+        spool_path=tmp_path / "result.pickle",
+        spool_checksum="digest",
+    )
+
+    with patch.object(
+        OcrRequestRepository,
+        "confirm",
+        side_effect=sqlite3.OperationalError("no such table: ocr_requests"),
+    ):
+        with pytest.raises(sqlite3.OperationalError, match="no such table"):
+            manager._update_ocr_request_for_outcome(job, outcome)

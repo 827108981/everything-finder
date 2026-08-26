@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import tempfile
 import threading
 import time
@@ -2504,13 +2505,17 @@ def _validate_planning_pause_gates(
             payload = chunk[:remaining]
             stream.write(payload)
             remaining -= len(payload)
+    # Use an equal-content peer so the cost-aware duplicate planner exercises
+    # the real content-hash safe-point path instead of correctly bypassing a
+    # singleton low-cost text file.
+    shutil.copyfile(hash_source, hash_root / "safe-pause-hash-copy.txt")
     hash_result = _validate_one_planning_pause(
         base / "content-hash",
         hash_root,
         hash_source,
         phase="content_hash",
         minimum_progress=2 * 1024 * 1024,
-        expected_files=1,
+        expected_files=2,
     )
 
     directory_root = base / "directory" / "files"

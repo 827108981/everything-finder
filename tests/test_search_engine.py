@@ -18,6 +18,72 @@ from local_full_text_search.ui.result_view import highlight_context
 
 
 class SearchEngineTests(unittest.TestCase):
+    def test_content_query_uses_separate_indexed_source_joins(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            database = DatabaseManager(Path(tmp) / "index.db")
+            database.initialize()
+            engine = SearchEngine(database)
+            query = SearchQuery(
+                text="真空",
+                mode="exact",
+                search_filename=False,
+                search_path=False,
+                search_content=True,
+            )
+
+            sql, params, strategy = engine._content_query(query, ["真空"])
+
+            self.assertEqual(strategy, "like")
+            self.assertIn("JOIN files f ON f.document_id = cb.document_id", sql)
+            self.assertIn("JOIN files f ON f.id = cb.file_id", sql)
+            self.assertNotIn("OR (cb.document_id IS NULL", sql)
+            self.assertEqual(params, ["%真空%", 0.6, 0.6])
+
+    def test_search_result_preserves_structured_slide_location(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = base / "files"
+            root.mkdir()
+            source = root / "slides.pptx"
+            source.write_bytes(b"pptx")
+            db = DatabaseManager(base / "index.db")
+            db.initialize()
+            root_id = db.add_root(root)
+            file_id, _ = db.upsert_file_metadata(root_id, source)
+            db.replace_file_blocks(
+                file_id,
+                source.name,
+                str(source),
+                [
+                    ContentBlock(
+                        file_path=str(source),
+                        block_index=0,
+                        block_type="pptx_slide",
+                        location_text="第 46 张幻灯片",
+                        raw_text="STRUCTURED_SLIDE_HIT",
+                        normalized_text="structured_slide_hit",
+                        slide_number=46,
+                    )
+                ],
+                parser_name="pptx",
+            )
+            db.update_root_scan_time(root_id, "ready")
+
+            page = SearchEngine(db).search(
+                SearchQuery(
+                    text="STRUCTURED_SLIDE_HIT",
+                    mode="exact",
+                    search_filename=False,
+                    search_path=False,
+                    search_content=True,
+                )
+            )
+
+            self.assertEqual(page.total_confirmed, 1)
+            self.assertEqual(page.results[0].slide_number, 46)
+            self.assertEqual(page.results[0].matches[0].slide_number, 46)
+            self.assertEqual(page.results[0].matches[0].location_text, "第 46 张幻灯片")
+
     def test_chinese_filename_uses_fts_match_without_content_scan(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -118,6 +184,66 @@ class SearchEngineTests(unittest.TestCase):
 
             with self.assertRaises(IndexNotReadyError):
                 SearchEngine(db).search(SearchQuery(text="anything"))
+
+    def test_committed_partial_projection_is_searchable_before_scope_complete(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = base / "files"
+            root.mkdir()
+            completed = root / "completed.txt"
+            pending = root / "pending.txt"
+            completed.write_text("PARTIAL_INDEX_HIT", encoding="utf-8")
+            pending.write_text("PENDING_MUST_STAY_HIDDEN", encoding="utf-8")
+            db = DatabaseManager(base / "index.db")
+            db.initialize()
+            root_id = db.add_root(root)
+            db.set_partial_search_projection_active(True)
+            completed_id, _ = db.upsert_file_metadata(root_id, completed)
+            db.upsert_file_metadata(root_id, pending)
+            db.replace_file_blocks(
+                completed_id,
+                completed.name,
+                str(completed),
+                [
+                    ContentBlock(
+                        file_path=str(completed),
+                        block_index=0,
+                        block_type="text",
+                        location_text="line 1",
+                        raw_text="PARTIAL_INDEX_HIT",
+                        normalized_text="partial_index_hit",
+                    )
+                ],
+                parser_name="text",
+            )
+
+            readiness = db.index_readiness()
+            self.assertFalse(readiness["ready"])
+            self.assertTrue(readiness["search_available"])
+            self.assertTrue(readiness["search_is_partial"])
+            self.assertGreater(int(readiness["search_projection_generation"]), 0)
+
+            page = SearchEngine(db).search(
+                SearchQuery(
+                    text="PARTIAL_INDEX_HIT",
+                    mode="exact",
+                    search_filename=False,
+                    search_path=False,
+                    search_content=True,
+                )
+            )
+            self.assertEqual(page.total_confirmed, 1)
+
+            hidden = SearchEngine(db).search(
+                SearchQuery(
+                    text="pending",
+                    mode="exact",
+                    search_filename=True,
+                    search_path=False,
+                    search_content=False,
+                )
+            )
+            self.assertEqual(hidden.total_confirmed, 0)
 
     def test_extension_filter(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

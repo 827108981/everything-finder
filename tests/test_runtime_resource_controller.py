@@ -226,6 +226,31 @@ def test_p1_02r_idle_safe_boundary_replaces_the_real_ocr_pool(
     lane.executor.shutdown(wait=True, cancel_futures=True)
 
 
+def test_ocr_pool_is_reused_across_roots_in_one_index_session(tmp_path) -> None:
+    settings = AppSettings(enable_ocr=True, ocr_workers=2)
+    manager = IndexManager(DatabaseManager(tmp_path / "shared.db"), settings)
+    manager._shared_ocr_session_active = True
+
+    first_lanes, first_executors, _ = manager._create_lanes(
+        [],
+        tmp_path / "root-one",
+    )
+    second_lanes, second_executors, _ = manager._create_lanes(
+        [],
+        tmp_path / "root-two",
+    )
+
+    assert first_lanes["ocr"].executor is second_lanes["ocr"].executor
+    assert first_lanes["ocr"].worker_count == 2
+    assert second_lanes["ocr"].worker_count == 2
+
+    shared = manager._shared_ocr_executor
+    manager._close_shared_ocr_pool()
+    for executor in {*(first_executors + second_executors)}:
+        if executor is not shared:
+            executor.shutdown(wait=True, cancel_futures=True)
+
+
 def test_p1_02r_resize_event_contains_every_required_resource_sample(
     tmp_path,
 ) -> None:

@@ -35,8 +35,8 @@ def test_legacy_settings_are_persisted_at_current_version(tmp_path: Path) -> Non
     settings = SettingsService(path).load()
     persisted = json.loads(path.read_text(encoding="utf-8"))
 
-    assert settings.settings_version == 9
-    assert persisted["settings_version"] == 9
+    assert settings.settings_version == 10
+    assert persisted["settings_version"] == 10
     assert persisted["ocr_scanned_pdf"] is False
     assert "process_parser_workers" in persisted
     assert "pdf_parser_workers" in persisted
@@ -57,6 +57,22 @@ def test_planning_watchdog_settings_are_migrated_and_persisted(tmp_path: Path) -
     assert persisted["planning_discovery_batch_size"] == 128
 
 
+def test_v9_retry_policy_migrates_to_explicit_only(tmp_path: Path) -> None:
+    path = tmp_path / "settings.json"
+    path.write_text(
+        '{"settings_version": 9, "retry_failed_files": true}',
+        encoding="utf-8",
+    )
+
+    settings = SettingsService(path).load()
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+
+    assert settings.retry_failed_files is False
+    assert settings.partial_search_during_index is True
+    assert persisted["retry_failed_files"] is False
+    assert persisted["partial_search_during_index"] is True
+
+
 def test_ocr_microbatch_limits_are_migrated_and_persisted(tmp_path: Path) -> None:
     path = tmp_path / "settings.json"
     path.write_text('{"settings_version": 8}', encoding="utf-8")
@@ -64,7 +80,7 @@ def test_ocr_microbatch_limits_are_migrated_and_persisted(tmp_path: Path) -> Non
     settings = SettingsService(path).load()
     persisted = json.loads(path.read_text(encoding="utf-8"))
 
-    assert settings.settings_version == 9
+    assert settings.settings_version == 10
     assert settings.ocr_microbatch_parent_jobs == 4
     assert settings.ocr_microbatch_max_requests == 64
     assert settings.ocr_microbatch_max_pixels == 8_000_000

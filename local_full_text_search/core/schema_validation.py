@@ -239,11 +239,7 @@ def _snapshot(database: DatabaseManager) -> dict[str, object]:
                 """
             ).fetchone()[0]
         )
-        if has_v8_scope:
-            hits = SearchEngine(database).search(
-                SearchQuery(text=_GOLDEN_TEXT, mode="exact")
-            ).total_confirmed
-        else:
+        if not has_v8_scope:
             hits = int(
                 connection.execute(
                     """
@@ -253,6 +249,13 @@ def _snapshot(database: DatabaseManager) -> dict[str, object]:
                     (f"%{_GOLDEN_TEXT.lower()}%",),
                 ).fetchone()[0]
             )
+    # Search must start after the metadata connection is closed. Keeping a
+    # write connection open here would make the foreground lease wait for its
+    # own transaction and report a misleading lease timeout.
+    if has_v8_scope:
+        hits = SearchEngine(database).search(
+            SearchQuery(text=_GOLDEN_TEXT, mode="exact")
+        ).total_confirmed
     return {
         "user_version": user_version,
         "counts": counts,

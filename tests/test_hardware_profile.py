@@ -9,6 +9,10 @@ from local_full_text_search.core.hardware_profile import (
 )
 
 
+def test_balanced_settings_default_to_two_ocr_workers() -> None:
+    assert AppSettings().ocr_workers == 2
+
+
 def test_laptop_performance_profile_reserves_system_capacity() -> None:
     profile = build_performance_profile(
         HardwareProfile(

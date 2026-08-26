@@ -69,6 +69,7 @@ class ScopeExclusionWorker(QObject):
             )
             if self.force_complete:
                 repair_result = database.force_complete_current_scope(
+                    file_ids=self.file_ids,
                     reason=self.reason,
                     operation_source=self.operation_source,
                     progress_callback=self._emit_progress,

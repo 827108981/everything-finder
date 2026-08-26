@@ -31,6 +31,7 @@ def load_application_dependencies() -> None:
 
     global APP_DISPLAY_NAME, AppSettings, CancelToken, DatabaseManager, IndexManager
     global SCHEMA_VERSION
+    global DatabaseLocationService
     global SearchEngine, SearchQuery, SettingsService, TEMP_DIR, configure_logging
 
     from local_full_text_search.config.constants import APP_DISPLAY_NAME, TEMP_DIR
@@ -41,6 +42,9 @@ def load_application_dependencies() -> None:
     from local_full_text_search.core.task_manager import CancelToken
     from local_full_text_search.models.search_query import SearchQuery
     from local_full_text_search.services.logging_service import configure_logging
+    from local_full_text_search.services.database_location_service import (
+        DatabaseLocationService,
+    )
     from local_full_text_search.services.settings_service import SettingsService
 
 
@@ -71,6 +75,72 @@ def run_self_test() -> int:
         return 1
 
 
+def run_partial_search_validation() -> int:
+    """Verify that a durable partial projection remains searchable."""
+
+    result_path = Path("partial_search_validation_result.json")
+    try:
+        with tempfile.TemporaryDirectory(prefix="lfts_partial_search_") as tmp:
+            base = Path(tmp)
+            root = base / "files"
+            root.mkdir()
+            (root / "good.txt").write_text(
+                "PARTIAL_SEARCH_VALIDATION_HIT",
+                encoding="utf-8",
+            )
+            (root / "broken.zip").write_bytes(b"not a zip archive")
+            database = DatabaseManager(base / "index.db")
+            database.initialize()
+            root_id = database.add_root(root)
+            settings = AppSettings(
+                enable_ocr=False,
+                retry_failed_files=False,
+                partial_search_during_index=True,
+            )
+            manager = IndexManager(database, settings)
+            first = manager.index_root(root_id)
+            readiness = database.index_readiness()
+            page = SearchEngine(database).search(
+                SearchQuery(
+                    text="PARTIAL_SEARCH_VALIDATION_HIT",
+                    mode="exact",
+                    search_filename=False,
+                    search_path=False,
+                    search_content=True,
+                )
+            )
+            second = manager.index_root(root_id)
+            passed = bool(
+                first.indexed == 1
+                and first.failed == 1
+                and not readiness["ready"]
+                and readiness["search_available"]
+                and page.total_confirmed == 1
+                and second.indexed == 0
+                and second.failed == 0
+            )
+            payload = {
+                "passed": passed,
+                "first": first.to_dict(),
+                "second": second.to_dict(),
+                "readiness": readiness,
+                "search_hits": page.total_confirmed,
+            }
+        result_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        print(f"PARTIAL_SEARCH_VALIDATION_OK passed={str(passed).lower()}")
+        return 0 if passed else 1
+    except Exception as exc:
+        result_path.write_text(
+            json.dumps({"passed": False, "error": str(exc)}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        print(f"PARTIAL_SEARCH_VALIDATION_FAILED: {exc}")
+        return 1
+
+
 def run_ui_validation() -> int:
     """Render the desktop UI offscreen and reject blank or undersized output."""
 
@@ -79,9 +149,13 @@ def run_ui_validation() -> int:
     index_image_path = Path("index_ui_validation.png")
     paused_index_image_path = Path("index_paused_ui_validation.png")
     try:
+        from PySide6.QtCore import QUrl
         from PySide6.QtGui import QImage
         from PySide6.QtWidgets import QApplication
+        from local_full_text_search.models.search_result import SearchHit, SearchResult
         from local_full_text_search.ui.main_window import MainWindow
+        from local_full_text_search.ui.preview_panel import PreviewPanel
+        from local_full_text_search.ui.result_view import ResultCard
 
         with tempfile.TemporaryDirectory(prefix="lfts_ui_validation_") as tmp:
             base = Path(tmp)
@@ -116,8 +190,10 @@ def run_ui_validation() -> int:
             app.processEvents()
             card = window.search_page.result_view._cards[0]
             item = window.search_page.result_view.item(0)
-            if "background:#FDE68A" not in card.context.text():
-                raise RuntimeError("Search result did not highlight the space-tolerant match")
+            if hasattr(card, "context"):
+                raise RuntimeError("Search result list should not render content snippets")
+            if card.location_layout.count() <= 0:
+                raise RuntimeError("Search result did not render a clickable hit location")
             if "background-color:#fde68a" not in window.preview_panel.context.toHtml().lower():
                 raise RuntimeError("Preview did not highlight the selected result")
             if item is None or card.path_label.geometry().bottom() > item.sizeHint().height():
@@ -125,6 +201,51 @@ def run_ui_validation() -> int:
             search_box = window.search_page.search_box
             if search_box.input.geometry().right() >= search_box.action_separator.geometry().left():
                 raise RuntimeError("Search actions overlap the text input")
+            structured_hit = SearchHit(
+                block_id=46,
+                location_text="第 46 张幻灯片",
+                context="主真空",
+                hit_count=1,
+                source_type="native_text",
+                slide_number=46,
+            )
+            structured_result = SearchResult(
+                file_id=46,
+                block_id=46,
+                file_path=r"E:\validation\slides.pptx",
+                filename="slides.pptx",
+                extension=".pptx",
+                size_bytes=1024,
+                modified_time=0,
+                location_text=structured_hit.location_text,
+                context=structured_hit.context,
+                hit_count=1,
+                source_type=structured_hit.source_type,
+                parse_status="success",
+                score=1.0,
+                slide_number=46,
+                matches=[structured_hit],
+            )
+            left_locations: list[object] = []
+            right_locations: list[object] = []
+            validation_card = ResultCard(structured_result, "主真空")
+            validation_preview = PreviewPanel()
+            validation_card.open_location_requested.connect(
+                lambda _path, value: left_locations.append(value)
+            )
+            validation_preview.open_location_requested.connect(
+                lambda _path, value: right_locations.append(value)
+            )
+            location_button = validation_card.location_layout.itemAt(0).widget()
+            if location_button is None:
+                raise RuntimeError("Left result did not create a location link")
+            location_button.click()
+            validation_preview.show_result(structured_result, "主真空")
+            validation_preview._handle_link(QUrl("hit:0"))
+            if left_locations != [structured_hit] or right_locations != [structured_hit]:
+                raise RuntimeError("Left and right location links did not emit the same hit")
+            if structured_hit.slide_number != 46:
+                raise RuntimeError("Structured slide number was not preserved")
             pixmap = window.grab()
             image = pixmap.toImage().convertToFormat(QImage.Format.Format_RGB32)
             if image.width() < 1000 or image.height() < 650:
@@ -202,8 +323,14 @@ def run_ui_validation() -> int:
             )
             app.processEvents()
             force_button = window.failed_page.force_complete_button
-            if force_button.text() != "强力完成本次索引":
+            if force_button.text() != "保底完成并开放搜索":
                 raise RuntimeError("Failed-files UI did not expose force completion")
+            if not window.failed_page.guide.isVisible():
+                raise RuntimeError("Failed-files UI did not show the always-visible action guide")
+            if "只重新解析，不会排除文件" not in " ".join(
+                label.text() for label in window.failed_page.guide_labels
+            ):
+                raise RuntimeError("Failed-files UI action guide is incomplete")
             window.failed_page.set_rows([])
             window.failed_page.set_readiness(
                 {
@@ -216,12 +343,12 @@ def run_ui_validation() -> int:
                 }
             )
             app.processEvents()
-            if force_button.isHidden() or not force_button.isEnabled():
+            if force_button.isHidden() or force_button.isEnabled():
                 raise RuntimeError(
-                    "Force completion must repair a zero-blocker residual state"
+                    "Force completion must require a selected failed item"
                 )
-            if "残留解析任务" not in force_button.toolTip():
-                raise RuntimeError("Force completion did not disclose residual tasks")
+            if "没有可选择的未成功索引项" not in force_button.toolTip():
+                raise RuntimeError("Force completion did not disclose selection requirement")
             window.failed_page.set_readiness(
                 {
                     "ready": True,
@@ -287,6 +414,16 @@ def run_ui_validation() -> int:
             if "大型 FTS 操作" not in window.failed_page.status.text():
                 raise RuntimeError("Scope exclusion FTS stage is not disclosed")
             window.failed_page.set_exclusion_running(False)
+            window.switch_page("settings")
+            app.processEvents()
+            if window.settings_page.database_migrate_button.text() != "迁移数据库":
+                raise RuntimeError("Settings UI did not expose database migration")
+            if str(db.db_path.resolve()) not in window.settings_page.database_path_value.text():
+                raise RuntimeError("Settings UI did not display the active database path")
+            if "schema v" not in window.settings_page.database_schema_value.text():
+                raise RuntimeError("Settings UI did not display the database schema")
+            if window.settings_page.settings_content.maximumWidth() != 1100:
+                raise RuntimeError("Settings UI content width is not constrained")
             window.close()
             app.processEvents()
             message = (
@@ -299,6 +436,109 @@ def run_ui_validation() -> int:
     except Exception as exc:
         result_path.write_text(f"UI_VALIDATION_FAILED: {exc}\n", encoding="utf-8")
         print(f"UI_VALIDATION_FAILED: {exc}")
+        return 1
+
+
+def run_database_migration_validation() -> int:
+    """Migrate an isolated database and verify restart path discovery."""
+
+    result_path = Path("database_migration_validation_result.json")
+    try:
+        from local_full_text_search.services.database_location_service import (
+            DatabaseLocationService,
+        )
+        from local_full_text_search.workers.database_migration_worker import (
+            DatabaseMigrationWorker,
+        )
+
+        with tempfile.TemporaryDirectory(prefix="lfts_database_migration_") as tmp:
+            base = Path(tmp)
+            source = base / "source" / "search_index.db"
+            target_directory = base / "target"
+            database = DatabaseManager(source)
+            database.initialize()
+            documents = base / "documents"
+            documents.mkdir()
+            (documents / "migration-proof.txt").write_text(
+                "数据库迁移后仍应自动读取新地址并保留全文搜索结果。",
+                encoding="utf-8",
+            )
+            root_id = database.add_root(documents)
+            IndexManager(
+                database,
+                AppSettings(enable_ocr=False, monitor_file_changes=False),
+            ).index_root(root_id)
+            before = database.stats()
+            before_hits = SearchEngine(database).search(
+                SearchQuery(text="自动读取新地址", mode="exact")
+            ).total_confirmed
+            service = DatabaseLocationService(
+                base / "config" / "database-location.json",
+                source,
+            )
+            service.save_verified(source)
+            worker = DatabaseMigrationWorker(
+                source,
+                target_directory,
+                service,
+                allow_other_instances=True,
+            )
+            finished: list[dict[str, object]] = []
+            failures: list[str] = []
+            worker.finished.connect(finished.append)
+            worker.failed.connect(failures.append)
+            worker.run()
+            if failures or len(finished) != 1:
+                raise RuntimeError(
+                    failures[0] if failures else "数据库迁移没有返回结果"
+                )
+            target = Path(str(finished[0]["database_path"]))
+            resolution = DatabaseLocationService(
+                service.config_path,
+                source,
+            ).resolve()
+            reopened = DatabaseManager(resolution.path)
+            reopened.initialize()
+            after = reopened.stats()
+            after_hits = SearchEngine(reopened).search(
+                SearchQuery(text="自动读取新地址", mode="exact")
+            ).total_confirmed
+            if resolution.path != target.resolve():
+                raise RuntimeError("升级启动没有自动读取迁移后的数据库地址")
+            if before != after or before_hits != after_hits or before_hits != 1:
+                raise RuntimeError("迁移前后索引统计或搜索结果不一致")
+            if root_id not in {
+                int(row["id"]) for row in reopened.list_roots()
+            }:
+                raise RuntimeError("迁移后搜索范围记录丢失")
+            if source.exists():
+                raise RuntimeError("迁移完成后原数据库仍保持活动文件名")
+            payload = {
+                "passed": True,
+                "database_path": str(target),
+                "resolution_source": resolution.source,
+                "database_size_bytes": target.stat().st_size,
+                "stats_before": before,
+                "stats_after": after,
+                "search_hits_before": before_hits,
+                "search_hits_after": after_hits,
+                "rollback_backup": str(
+                    finished[0].get("previous_database_backup") or ""
+                ),
+            }
+            result_path.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            print("DATABASE_MIGRATION_VALIDATION_OK")
+            return 0
+    except Exception as exc:
+        payload = {"passed": False, "error": str(exc)}
+        result_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        print(f"DATABASE_MIGRATION_VALIDATION_FAILED: {exc}")
         return 1
 
 
@@ -2117,6 +2357,18 @@ def apply_light_theme(app: object) -> None:
 
 
 def main() -> int:
+    if "--run-usn-service" in sys.argv:
+        from local_full_text_search.services.usn_service import run_service_dispatcher
+
+        return run_service_dispatcher()
+    if "--install-usn-service" in sys.argv:
+        from local_full_text_search.services.usn_service import install_or_update_service
+
+        return install_or_update_service()
+    if "--remove-usn-service" in sys.argv:
+        from local_full_text_search.services.usn_service import remove_service
+
+        return remove_service()
     diagnostics = StartupDiagnostics()
     diagnostics.begin()
 
@@ -2133,6 +2385,8 @@ def main() -> int:
         diagnostics.stage_completed()
         if "--self-test" in sys.argv:
             return finish_command(run_self_test())
+        if "--validate-partial-search" in sys.argv:
+            return finish_command(run_partial_search_validation())
         if "--validate-core" in sys.argv:
             return finish_command(run_core_validation())
         if "--validate-process-pool" in sys.argv:
@@ -2281,10 +2535,16 @@ def main() -> int:
                 print("--validate-legacy-shutdown 需要一个 .doc/.xls/.ppt 路径")
                 return finish_command(2)
             return finish_command(run_legacy_shutdown_validation(Path(sys.argv[index + 1])))
+        if "--validate-database-migration" in sys.argv:
+            return finish_command(run_database_migration_validation())
         if "--validate-ui" in sys.argv:
             return finish_command(run_ui_validation())
         diagnostics.stage_started("加载图形界面")
         from PySide6.QtWidgets import QApplication, QMessageBox
+        from local_full_text_search.services.single_instance import (
+            SingleInstanceGuard,
+            activate_window,
+        )
         from local_full_text_search.ui.main_window import MainWindow
         diagnostics.stage_completed()
     except Exception as exc:
@@ -2292,12 +2552,26 @@ def main() -> int:
         diagnostics.show_native_error("本地全文搜索启动失败", diagnostics.format_error_message(exc))
         return 2
     try:
+        diagnostics.stage_started("检查重复启动")
+        app = QApplication(sys.argv)
+        app.setApplicationName(APP_DISPLAY_NAME)
+        apply_light_theme(app)
+        instance_guard = SingleInstanceGuard()
+        if not instance_guard.acquire():
+            diagnostics.stage_completed()
+            return finish_command(0)
+        diagnostics.stage_completed()
         diagnostics.stage_started("读取设置")
         settings_service = SettingsService()
         settings = settings_service.load()
         diagnostics.stage_completed()
+        diagnostics.stage_started("解析数据库位置")
+        database_location_service = DatabaseLocationService()
+        database_location = database_location_service.resolve()
+        diagnostics.database_path = database_location.path
+        diagnostics.stage_completed()
         diagnostics.stage_started("初始化索引数据库")
-        db = DatabaseManager()
+        db = DatabaseManager(database_location.path)
         demo_mode = "--failure-fallback-demo" in sys.argv
         demo_root: Path | None = None
         if demo_mode:
@@ -2305,30 +2579,42 @@ def main() -> int:
             if not os.environ.get("LFTS_APP_DATA_DIR"):
                 raise RuntimeError("异常保底演示必须使用独立的 LFTS_APP_DATA_DIR")
             demo_root = reset_failure_fallback_demo(app_data, db.db_path)
-        db.initialize()
+        db.initialize(startup_fast=True)
         if demo_root is not None:
             seed_failure_fallback_demo(db, demo_root)
         diagnostics.stage_completed()
         diagnostics.stage_started("创建图形界面")
-        app = QApplication(sys.argv)
-        app.setApplicationName(APP_DISPLAY_NAME)
-        apply_light_theme(app)
-        window = MainWindow(db, settings, settings_service)
+        window = MainWindow(
+            db,
+            settings,
+            settings_service,
+            database_location_service=database_location_service,
+            defer_initial_refresh=True,
+        )
+        instance_guard.activation_requested.connect(
+            lambda: activate_window(window, log=window.top_bar.set_index_status)
+        )
         if demo_mode:
             window.setWindowTitle(f"{APP_DISPLAY_NAME} - 异常保底演示（隔离数据）")
             window.switch_page("failed")
         window.show()
         diagnostics.stage_completed()
         diagnostics.mark_window_visible()
-        if diagnostics.previous_failure:
-            QMessageBox.warning(
-                window,
-                "检测到上次启动未完成",
-                "上次启动没有正常显示主窗口。\n\n"
-                f"上次阶段：{diagnostics.previous_failure.get('stage', '未知')}\n"
-                f"诊断日志：{diagnostics.log_path}",
-            )
-        return app.exec()
+        # Start the automatic incremental refresh only after Qt has painted the
+        # main window; this keeps startup responsive while preserving the
+        # user's existing committed search projection.
+        window.schedule_startup_incremental_scan()
+        # Recoverable location/startup diagnostics are kept in the log and
+        # surfaced in the non-modal status bar.  Do not block a usable window
+        # with a warning dialog merely because a previous launch was slow.
+        if database_location.warning:
+            window.top_bar.set_index_status(database_location.warning, is_pending=True)
+        elif diagnostics.previous_failure:
+            window.top_bar.set_index_status("已恢复上次未完成的启动状态", is_pending=True)
+        try:
+            return app.exec()
+        finally:
+            instance_guard.close()
     except Exception as exc:
         diagnostics.stage_failed(diagnostics.current_stage, exc)
         diagnostics.show_native_error("本地全文搜索启动失败", diagnostics.format_error_message(exc))

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
+import math
 import os
 import sqlite3
 import threading
@@ -17,7 +19,7 @@ from local_full_text_search.core.errors import CancelledError
 from local_full_text_search.models.content_block import ContentBlock
 from local_full_text_search.models.index_metrics import FileTiming, IndexRunMetrics
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 SUCCESSFUL_DOCUMENT_STATUSES = {
     "success",
     "metadata_only",
@@ -29,6 +31,7 @@ NON_BLOCKING_PARSE_STATUSES = {
 TERMINAL_PARSE_TASK_STATUSES = {
     "complete",
     "failed",
+    "failed_retryable",
     "superseded",
     "invalidated",
     "cancelled",
@@ -44,11 +47,48 @@ MANUALLY_EXCLUDABLE_STATUSES = {
     "partial_success",
     "password_protected",
 }
+FINAL_FAILURE_STATUSES = {
+    "failed",
+    "failed_retryable",
+    "unsupported",
+    "skipped",
+    "ocr_disabled",
+    "ocr_failed",
+    "converter_missing",
+    "partial_success",
+    "password_protected",
+}
 INDEX_RUN_RETENTION = 50
+STALE_PARSE_TASK_TIMEOUT_SECONDS = 120
+STALE_INDEX_RUN_TIMEOUT_SECONDS = 600
+ROOT_RETRY_DELAYS_SECONDS = (30, 120, 600)
+SQLITE_INT64_MIN = -(1 << 63)
+SQLITE_INT64_MAX = (1 << 63) - 1
+
+# SQLite permits one writer at a time.  The application has several worker
+# threads (index writer, task telemetry, OCR state, and UI snapshots) sharing
+# the same database file.  Serialising transactions in-process prevents short
+# telemetry writes from racing a large content transaction and turning a
+# recoverable update into a root failure.  Read-only foreground search uses a
+# separate connection and is not held by this lock.
+_DATABASE_WRITE_LOCK = threading.RLock()
+logger = logging.getLogger(__name__)
 
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _sqlite_int64(value: object, *, default: int = 0) -> int:
+    """Normalize filesystem integers before binding them to SQLite INTEGER."""
+
+    try:
+        normalized = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+    if normalized < SQLITE_INT64_MIN or normalized > SQLITE_INT64_MAX:
+        return default
+    return normalized
 
 
 def _replace_file_with_retry(
@@ -76,12 +116,31 @@ class DatabaseManager:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._connections_lock = threading.Lock()
         self._active_connections: set[sqlite3.Connection] = set()
+        self._quick_readiness_cache: dict[str, object] | None = None
 
     @contextmanager
     def connect(self, *, timeout_seconds: float = 30.0) -> Iterator[sqlite3.Connection]:
         timeout = max(0.0, float(timeout_seconds))
         busy_timeout_ms = max(0, int(timeout * 1000))
-        con = sqlite3.connect(self.db_path, timeout=timeout)
+        from local_full_text_search.core.foreground_activity import (
+            begin_index_write,
+            end_index_write,
+        )
+
+        if not begin_index_write(max_wait_seconds=timeout):
+            raise sqlite3.OperationalError("database is locked")
+        acquired = _DATABASE_WRITE_LOCK.acquire(
+            timeout=max(0.0, timeout)
+        )
+        if not acquired:
+            end_index_write()
+            raise sqlite3.OperationalError("database is locked")
+        try:
+            con = sqlite3.connect(self.db_path, timeout=timeout)
+        except Exception:
+            _DATABASE_WRITE_LOCK.release()
+            end_index_write()
+            raise
         with self._connections_lock:
             self._active_connections.add(con)
         try:
@@ -98,6 +157,8 @@ class DatabaseManager:
             with self._connections_lock:
                 self._active_connections.discard(con)
             con.close()
+            _DATABASE_WRITE_LOCK.release()
+            end_index_write()
 
     def interrupt_active_connections(self) -> int:
         """Interrupt in-flight SQLite statements, primarily during forced cancellation."""
@@ -114,7 +175,12 @@ class DatabaseManager:
                 continue
         return interrupted
 
-    def initialize(self) -> None:
+    def initialize(self, *, startup_fast: bool = False) -> None:
+        if startup_fast and self._startup_fast_path_ready():
+            # The existing schema and committed projection are already usable.
+            # Defer migrations, recovery, and any FTS rebuild to the background
+            # indexing worker so the GUI can become visible quickly.
+            return
         previous_version = self._database_user_version()
         requires_structural_repair = bool(
             previous_version == SCHEMA_VERSION
@@ -138,6 +204,7 @@ class DatabaseManager:
                 self._migrate_schema_v6(con)
                 self._migrate_schema_v7(con)
                 self._migrate_schema_v8(con)
+                self._migrate_schema_v9(con)
                 self._ensure_fts(con)
                 self._recover_interrupted_tasks(con)
                 con.execute(
@@ -153,6 +220,96 @@ class DatabaseManager:
         if self._fts_is_dirty() and not self.has_incomplete_full_batch():
             self.rebuild_content_fts()
 
+    def reconcile_stale_index_runs(
+        self,
+        *,
+        stale_after_seconds: int = STALE_INDEX_RUN_TIMEOUT_SECONDS,
+    ) -> int:
+        """Close abandoned index runs that have no live parse activity."""
+
+        now = datetime.now(timezone.utc)
+        cutoff = now.timestamp() - max(1, int(stale_after_seconds))
+        recovered = 0
+        with self.connect() as con:
+            rows = con.execute(
+                """
+                SELECT ir.id, ir.started_at
+                FROM index_runs ir
+                WHERE ir.status = 'running'
+                """
+            ).fetchall()
+            for row in rows:
+                try:
+                    started = datetime.fromisoformat(str(row["started_at"])).timestamp()
+                except (TypeError, ValueError, OSError):
+                    started = 0.0
+                if started > cutoff:
+                    continue
+                run_id = str(row["id"])
+                active = con.execute(
+                    """
+                    SELECT 1
+                    FROM parse_tasks pt
+                    WHERE pt.run_id = ?
+                      AND pt.status IN ('queued', 'running', 'spooled', 'blocked', 'paused')
+                      AND (
+                          pt.worker_pid IS NOT NULL
+                          OR julianday(COALESCE(pt.last_semantic_progress_at, pt.started_at, pt.created_at))
+                             >= julianday('now', '-120 seconds')
+                      )
+                    LIMIT 1
+                    """,
+                    (run_id,),
+                ).fetchone()
+                if active is not None:
+                    continue
+                self._converge_index_run_tasks(con, run_id, "interrupted")
+                con.execute(
+                    """
+                    UPDATE index_runs
+                    SET status = 'interrupted', finished_at = COALESCE(finished_at, ?),
+                        summary_json = COALESCE(summary_json, ?)
+                    WHERE id = ? AND status = 'running'
+                    """,
+                    (
+                        utc_now(),
+                        json.dumps(
+                            {
+                                "recovery_reason": "STALE_INDEX_RUN_RECOVERED",
+                            },
+                            ensure_ascii=False,
+                        ),
+                        run_id,
+                    ),
+                )
+                con.execute(
+                    """
+                    UPDATE files
+                    SET parse_status = 'failed_retryable',
+                        parse_error_code = COALESCE(parse_error_code, 'STALE_INDEX_RUN_RECOVERED'),
+                        parse_error_message = COALESCE(parse_error_message, '索引批次已失联，文件可重新尝试')
+                    WHERE id IN (
+                        SELECT file_id FROM parse_tasks WHERE run_id = ?
+                    )
+                      AND parse_status IN ('pending', 'processing', 'cancelled')
+                    """,
+                    (run_id,),
+                )
+                recovered += 1
+        return recovered
+
+    def _startup_fast_path_ready(self) -> bool:
+        """Return true when an existing database can be opened without repair."""
+
+        try:
+            return (
+                self.db_path.is_file()
+                and self._database_user_version() == SCHEMA_VERSION
+                and self._schema_layout_complete()
+            )
+        except (OSError, sqlite3.Error):
+            return False
+
     def _database_user_version(self) -> int | None:
         if not self.db_path.is_file() or self.db_path.stat().st_size == 0:
             return None
@@ -165,6 +322,30 @@ class DatabaseManager:
                 return None
             return int(con.execute("PRAGMA user_version").fetchone()[0])
         finally:
+            con.close()
+
+    @contextmanager
+    def connect_read_only(self, *, timeout_seconds: float = 2.0) -> Iterator[sqlite3.Connection]:
+        """Open a non-writing WAL reader for foreground search work."""
+
+        timeout = max(0.0, float(timeout_seconds))
+        uri = f"file:{self.db_path.as_posix()}?mode=ro"
+        con = sqlite3.connect(uri, uri=True, timeout=timeout)
+        with self._connections_lock:
+            self._active_connections.add(con)
+        try:
+            con.row_factory = sqlite3.Row
+            con.execute("PRAGMA query_only = ON")
+            con.execute(f"PRAGMA busy_timeout = {max(0, int(timeout * 1000))}")
+            con.execute("PRAGMA synchronous = NORMAL")
+            # Keep a foreground cold scan in one reader with a useful cache;
+            # these pragmas are connection-local and do not affect writers.
+            con.execute("PRAGMA cache_size = -65536")
+            con.execute("PRAGMA mmap_size = 268435456")
+            yield con
+        finally:
+            with self._connections_lock:
+                self._active_connections.discard(con)
             con.close()
 
     def _schema_layout_complete(self) -> bool:
@@ -218,6 +399,8 @@ class DatabaseManager:
                 for row in con.execute("PRAGMA table_info(files)")
             }
             if "parse_diagnostics_json" not in file_columns:
+                return False
+            if "file_reference" not in file_columns:
                 return False
             indexes = {
                 str(row[0])
@@ -371,6 +554,7 @@ class DatabaseManager:
                 member_crc32 INTEGER,
                 member_uncompressed_size INTEGER,
                 content_hash_full TEXT,
+                file_reference INTEGER,
                 FOREIGN KEY(root_id) REFERENCES roots(id),
                 FOREIGN KEY(document_id) REFERENCES documents(id),
                 FOREIGN KEY(container_file_id) REFERENCES files(id)
@@ -851,6 +1035,28 @@ class DatabaseManager:
         )
 
     @staticmethod
+    def _migrate_schema_v9(con: sqlite3.Connection) -> None:
+        """Persist NTFS file references used by the restart fast path."""
+
+        DatabaseManager._ensure_column(con, "files", "file_reference", "INTEGER")
+        con.executescript(
+            """
+            CREATE INDEX IF NOT EXISTS idx_files_root_reference
+                ON files(root_id, file_reference, is_deleted);
+            CREATE TABLE IF NOT EXISTS usn_directories (
+                root_id INTEGER NOT NULL,
+                file_reference INTEGER NOT NULL,
+                parent_reference INTEGER,
+                path TEXT NOT NULL,
+                PRIMARY KEY(root_id, file_reference),
+                FOREIGN KEY(root_id) REFERENCES roots(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_usn_directories_root_parent
+                ON usn_directories(root_id, parent_reference);
+            """
+        )
+
+    @staticmethod
     def _ensure_column(
         con: sqlite3.Connection,
         table: str,
@@ -1042,10 +1248,10 @@ class DatabaseManager:
                 prepared.append(
                     (
                         file_path,
-                        stat.st_size,
-                        stat.st_mtime,
-                        stat.st_ctime,
-                        fingerprint,
+                        _sqlite_int64(stat.st_size),
+                        float(stat.st_mtime) if math.isfinite(float(stat.st_mtime)) else 0.0,
+                        float(stat.st_ctime) if math.isfinite(float(stat.st_ctime)) else 0.0,
+                        f"{_sqlite_int64(stat.st_size)}:{_sqlite_int64(stat.st_mtime_ns)}",
                         content_hash,
                         versions.get(str(file_path)),
                     )
@@ -1100,24 +1306,48 @@ class DatabaseManager:
                 file_path = Path(str(getattr(row, "path")))
                 try:
                     content_hash = getattr(row, "content_hash", None)
-                    file_id, changed = self._upsert_file_metadata_in_connection(
-                        con,
-                        root_id,
-                        file_path,
-                        size=int(getattr(row, "size_bytes")),
-                        modified_time=float(getattr(row, "modified_time")),
-                        created_time=float(getattr(row, "created_time")),
-                        fingerprint=(
-                            f"{int(getattr(row, 'size_bytes'))}:"
-                            f"{int(getattr(row, 'modified_time_ns'))}"
-                        ),
+                    size = _sqlite_int64(getattr(row, "size_bytes"))
+                    modified_ns = _sqlite_int64(getattr(row, "modified_time_ns"))
+                    modified_time = float(getattr(row, "modified_time"))
+                    created_time = float(getattr(row, "created_time"))
+                    if not math.isfinite(modified_time):
+                        modified_time = 0.0
+                    if not math.isfinite(created_time):
+                        created_time = 0.0
+                    kwargs = dict(
+                        size=size,
+                        modified_time=modified_time,
+                        created_time=created_time,
+                        fingerprint=f"{size}:{modified_ns}",
                         content_hash=str(content_hash) if content_hash else None,
                         now=now,
                         retry_failed_files=retry_failed_files,
                         compute_full_hash=compute_full_hash,
                         mark_processing=mark_processing,
                         expected_parser_version=versions.get(str(file_path)),
+                        file_reference=_sqlite_int64(
+                            getattr(row, "file_reference", 0) or 0
+                        ),
                     )
+                    try:
+                        file_id, changed = self._upsert_file_metadata_in_connection(
+                            con, root_id, file_path, **kwargs
+                        )
+                    except (OverflowError, ValueError, TypeError) as exc:
+                        # A malformed Windows metadata value must not discard
+                        # the file. Keep the path and parser work schedulable;
+                        # the degraded identity is deliberately conservative.
+                        logger.warning(
+                            "Metadata degraded for %s: %s",
+                            file_path,
+                            exc,
+                        )
+                        kwargs["file_reference"] = 0
+                        kwargs["size"] = max(0, min(int(size), SQLITE_INT64_MAX))
+                        kwargs["fingerprint"] = f"{kwargs['size']}:0"
+                        file_id, changed = self._upsert_file_metadata_in_connection(
+                            con, root_id, file_path, **kwargs
+                        )
                     results.append((file_path, file_id, changed))
                 except Exception as exc:
                     errors.append((file_path, exc))
@@ -1139,11 +1369,29 @@ class DatabaseManager:
         compute_full_hash: bool,
         mark_processing: bool,
         expected_parser_version: str | None,
+        file_reference: int = 0,
     ) -> tuple[int, bool]:
+        # Windows filesystem metadata may expose unsigned values wider than
+        # SQLite's signed INTEGER range (notably file IDs on some volumes).
+        # Normalize at the database boundary so one unusual file cannot abort
+        # the whole planning batch.
+        size = _sqlite_int64(size)
+        file_reference = _sqlite_int64(file_reference)
         path_text = str(file_path)
         changed_status = "processing" if mark_processing else "pending"
         existing = con.execute(
-            "SELECT id, extension, quick_fingerprint, content_hash, parse_status, parser_version, parse_error_code FROM files WHERE path = ?",
+            """
+            SELECT f.id, f.extension, f.quick_fingerprint, f.content_hash,
+                   f.parse_status, f.parser_version, f.parse_error_code,
+                   EXISTS (
+                       SELECT 1 FROM index_scope_exclusions e
+                       WHERE e.file_id = f.id
+                         AND e.revoked_at IS NULL
+                         AND e.invalidated_at IS NULL
+                   ) AS manually_excluded
+            FROM files f
+            WHERE f.path = ?
+            """,
             (path_text,),
         ).fetchone()
         if existing is None:
@@ -1151,8 +1399,9 @@ class DatabaseManager:
                 """
                 INSERT INTO files(
                     root_id, path, filename, extension, size_bytes, modified_time, created_time,
-                    quick_fingerprint, content_hash, parse_status, parser_version, last_seen_at, is_deleted
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+                    quick_fingerprint, content_hash, parse_status, parser_version, last_seen_at, is_deleted,
+                    file_reference
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
                 """,
                 (
                     root_id,
@@ -1167,6 +1416,7 @@ class DatabaseManager:
                     changed_status,
                     expected_parser_version or PARSER_VERSION,
                     now,
+                    file_reference,
                 ),
             )
             file_id = int(cur.lastrowid)
@@ -1187,6 +1437,34 @@ class DatabaseManager:
                 reason="source_identity_changed",
                 invalidated_at=now,
             )
+        elif bool(existing["manually_excluded"]):
+            con.execute(
+                """
+                UPDATE files SET
+                    root_id = ?, filename = ?, extension = ?, size_bytes = ?,
+                    modified_time = ?, created_time = ?, quick_fingerprint = ?,
+                    content_hash = COALESCE(?, content_hash), last_seen_at = ?,
+                    is_deleted = 0,
+                    file_reference = COALESCE(NULLIF(?, 0), file_reference)
+                WHERE id = ?
+                """,
+                (
+                    root_id,
+                    file_path.name,
+                    file_path.suffix.lower(),
+                    size,
+                    modified_time,
+                    created_time,
+                    fingerprint,
+                    content_hash,
+                    now,
+                    file_reference,
+                    int(existing["id"]),
+                ),
+            )
+            file_id = int(existing["id"])
+            self._upsert_file_fts(con, file_id, file_path.name, path_text)
+            return file_id, False
         retry_incomplete = (
             retry_failed_files
             and str(existing["parse_status"]) != "success"
@@ -1209,7 +1487,8 @@ class DatabaseManager:
                 root_id = ?, filename = ?, extension = ?, size_bytes = ?, modified_time = ?,
                 created_time = ?, quick_fingerprint = ?, content_hash = COALESCE(?, content_hash),
                 last_seen_at = ?, is_deleted = 0, parse_status = ?,
-                parser_version = COALESCE(?, parser_version)
+                parser_version = COALESCE(?, parser_version),
+                file_reference = COALESCE(NULLIF(?, 0), file_reference)
             WHERE id = ?
             """,
             (
@@ -1224,6 +1503,7 @@ class DatabaseManager:
                 now,
                 next_status,
                 expected_parser_version,
+                file_reference,
                 int(existing["id"]),
             ),
         )
@@ -1245,6 +1525,8 @@ class DatabaseManager:
 
         now = utc_now()
         archive_stat = archive_path.stat()
+        archive_mtime = float(archive_stat.st_mtime)
+        archive_ctime = float(archive_stat.st_ctime)
         results: list[tuple[Any, int, bool, str]] = []
         active_paths: set[str] = set()
         with self.connect() as con:
@@ -1256,11 +1538,20 @@ class DatabaseManager:
                 extension = Path(internal_path).suffix.lower()
                 expected_version = parser_versions[display_path]
                 member_sha = str(member.sha256) if member.sha256 else None
-                fingerprint = f"zip:{int(member.size_bytes)}:{int(member.crc32)}"
+                member_size = _sqlite_int64(getattr(member, "size_bytes", 0))
+                member_crc32 = _sqlite_int64(getattr(member, "crc32", 0))
+                member_index = _sqlite_int64(getattr(member, "member_index", 0))
+                fingerprint = f"zip:{member_size}:{member_crc32}"
                 existing = con.execute(
                     """
                     SELECT id, quick_fingerprint, parser_version, parse_status,
-                        content_hash, content_hash_full
+                        content_hash, content_hash_full,
+                        EXISTS (
+                            SELECT 1 FROM index_scope_exclusions e
+                            WHERE e.file_id = files.id
+                              AND e.revoked_at IS NULL
+                              AND e.invalidated_at IS NULL
+                        ) AS manually_excluded
                     FROM files WHERE path = ?
                     """,
                     (display_path,),
@@ -1282,9 +1573,9 @@ class DatabaseManager:
                             display_path,
                             filename,
                             extension,
-                            int(member.size_bytes),
-                            archive_stat.st_mtime,
-                            archive_stat.st_ctime,
+                            member_size,
+                            archive_mtime,
+                            archive_ctime,
                             fingerprint,
                             member_sha,
                             member_sha,
@@ -1292,29 +1583,51 @@ class DatabaseManager:
                             now,
                             container_file_id,
                             internal_path,
-                            int(member.member_index),
-                            int(member.crc32),
-                            int(member.size_bytes),
+                            member_index,
+                            member_crc32,
+                            member_size,
                         ),
                     )
                     file_id = int(cursor.lastrowid)
                     changed = True
                 else:
+                    member_identity_changed = bool(
+                        str(existing["quick_fingerprint"] or "") != fingerprint
+                        or (
+                            member_sha is not None
+                            and str(
+                                existing["content_hash_full"]
+                                or existing["content_hash"]
+                                or ""
+                            )
+                            != member_sha
+                        )
+                    )
+                    if member_identity_changed:
+                        self._invalidate_active_scope_exclusion(
+                            con,
+                            int(existing["id"]),
+                            reason="source_identity_changed",
+                            invalidated_at=now,
+                        )
                     retry_incomplete = retry_failed_files and str(existing["parse_status"]) != "success"
                     stored_hash = member_sha or str(existing["content_hash_full"] or existing["content_hash"] or "") or None
                     changed = (
-                        str(existing["quick_fingerprint"] or "") != fingerprint
+                        member_identity_changed
                         or str(existing["parser_version"] or "") != expected_version
                         or str(existing["parse_status"] or "")
                         in {"pending", "processing", "cancelled", "deleted"}
                         or retry_incomplete
                     )
+                    if bool(existing["manually_excluded"]) and not member_identity_changed:
+                        changed = False
                     file_id = int(existing["id"])
                     con.execute(
                         """
                         UPDATE files SET root_id = ?, filename = ?, extension = ?, size_bytes = ?,
                             modified_time = ?, created_time = ?, quick_fingerprint = ?,
-                            content_hash = ?, content_hash_full = ?, parser_version = ?,
+                            content_hash = ?, content_hash_full = ?,
+                            parser_version = CASE WHEN ? THEN ? ELSE parser_version END,
                             last_seen_at = ?, is_deleted = 0, source_kind = 'zip_member',
                             container_file_id = ?, internal_path = ?, member_order = ?,
                             member_crc32 = ?, member_uncompressed_size = ?,
@@ -1325,19 +1638,20 @@ class DatabaseManager:
                             root_id,
                             filename,
                             extension,
-                            int(member.size_bytes),
-                            archive_stat.st_mtime,
-                            archive_stat.st_ctime,
+                            member_size,
+                            archive_mtime,
+                            archive_ctime,
                             fingerprint,
                             stored_hash,
                             stored_hash,
+                            int(changed),
                             expected_version,
                             now,
                             container_file_id,
                             internal_path,
-                            int(member.member_index),
-                            int(member.crc32),
-                            int(member.size_bytes),
+                            member_index,
+                            member_crc32,
+                            member_size,
                             int(changed),
                             file_id,
                         ),
@@ -1423,6 +1737,36 @@ class DatabaseManager:
                 "UPDATE files SET content_hash = ?, content_hash_full = ? WHERE id = ?",
                 (content_hash_full, content_hash_full, int(file_id)),
             )
+
+    def set_content_hash_full_many(
+        self,
+        values: Sequence[tuple[int, str]],
+    ) -> int:
+        """Persist content hashes in one transaction.
+
+        Planning can discover hundreds or thousands of hashes in one batch.
+        Opening and committing a connection for every file makes that phase
+        disproportionately expensive, especially on network-backed folders.
+        The last value for a file id wins so callers can safely accumulate
+        results from multiple planning lanes.
+        """
+
+        deduplicated: dict[int, str] = {}
+        for file_id, content_hash_full in values:
+            normalized = str(content_hash_full or "").strip()
+            if normalized:
+                deduplicated[int(file_id)] = normalized
+        if not deduplicated:
+            return 0
+        with self.connect() as con:
+            con.executemany(
+                "UPDATE files SET content_hash = ?, content_hash_full = ? WHERE id = ?",
+                [
+                    (content_hash, content_hash, file_id)
+                    for file_id, content_hash in deduplicated.items()
+                ],
+            )
+        return len(deduplicated)
 
     @staticmethod
     def _upsert_file_fts(
@@ -1694,8 +2038,30 @@ class DatabaseManager:
         with self.connect() as con:
             for item in items:
                 self._replace_document_item(con, item, now, update_fts=update_fts)
-            if not update_fts:
+            if update_fts:
+                self._advance_search_projection(con, updated_at=now)
+            else:
                 self._set_index_state(con, "content_fts_dirty", "1")
+
+    def _advance_search_projection(
+        self,
+        con: sqlite3.Connection,
+        *,
+        updated_at: str,
+    ) -> None:
+        con.execute(
+            """
+            INSERT INTO index_state(key, value)
+            VALUES ('search_projection_generation', '1')
+            ON CONFLICT(key) DO UPDATE SET
+                value = CAST(COALESCE(index_state.value, '0') AS INTEGER) + 1
+            """
+        )
+        self._set_index_state(
+            con,
+            "search_projection_updated_at",
+            str(updated_at),
+        )
 
     def _replace_document_item(
         self,
@@ -1726,6 +2092,33 @@ class DatabaseManager:
         content_key = str(item.get("content_key") or f"file:{primary_file_id}:{parser_name}")
         content_hash_full_value = item.get("content_hash_full")
         content_hash_full = str(content_hash_full_value) if content_hash_full_value else None
+        # A parser can cross the exclusion transaction boundary after its
+        # safe-stop request. The exclusion audit wins: discard that late
+        # artifact instead of reintroducing searchable rows.
+        excluded_placeholders = ",".join("?" for _ in file_ids)
+        excluded = con.execute(
+            f"""
+            SELECT 1 FROM index_scope_exclusions
+            WHERE file_id IN ({excluded_placeholders})
+              AND revoked_at IS NULL AND invalidated_at IS NULL
+            LIMIT 1
+            """,
+            tuple(file_ids),
+        ).fetchone()
+        if excluded is not None:
+            task_id = item.get("task_id")
+            if task_id is not None:
+                con.execute(
+                    """
+                    UPDATE parse_tasks
+                    SET status = 'cancelled', finished_at = COALESCE(finished_at, ?),
+                        error_code = COALESCE(error_code, 'EXCLUSION_REQUESTED'),
+                        error_message = COALESCE(error_message, '文件已人工排除')
+                    WHERE id = ? AND status NOT IN ('complete', 'failed', 'superseded', 'invalidated', 'cancelled')
+                    """,
+                    (now, int(task_id)),
+                )
+            return
         old_document_ids = self._document_ids_for_files(con, file_ids)
         document_id: int | None = None
         placeholders = ",".join("?" for _ in file_ids)
@@ -2030,6 +2423,89 @@ class DatabaseManager:
                 (status, error_code, _trim_message(message), parser_name, utc_now(), file_id),
             )
 
+    def queue_files_for_retry(self, file_ids: Sequence[int]) -> int:
+        ids = sorted({int(value) for value in file_ids})
+        if not ids:
+            return 0
+        placeholders = ",".join("?" for _ in ids)
+        with self.connect() as con:
+            cursor = con.execute(
+                f"""
+                UPDATE files
+                SET parse_status = 'pending'
+                WHERE id IN ({placeholders})
+                  AND is_deleted = 0
+                  AND parse_status IN (
+                      'pending', 'processing', 'failed', 'failed_retryable',
+                      'unsupported', 'skipped',
+                      'ocr_disabled', 'ocr_failed', 'converter_missing',
+                      'partial_success', 'password_protected', 'cancelled'
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM index_scope_exclusions excluded
+                      WHERE excluded.file_id = files.id
+                        AND excluded.revoked_at IS NULL
+                        AND excluded.invalidated_at IS NULL
+                  )
+                """,
+                tuple(ids),
+            )
+            return int(cursor.rowcount)
+
+    def root_ids_for_files(self, file_ids: Sequence[int]) -> tuple[int, ...]:
+        """Return enabled search roots owning the selected files."""
+
+        ids = sorted({int(value) for value in file_ids})
+        if not ids:
+            return ()
+        placeholders = ",".join("?" for _ in ids)
+        with self.connect() as con:
+            rows = con.execute(
+                f"""
+                SELECT DISTINCT f.root_id
+                FROM files f
+                JOIN roots r ON r.id = f.root_id
+                WHERE f.id IN ({placeholders})
+                  AND f.is_deleted = 0
+                  AND r.enabled = 1
+                ORDER BY f.root_id
+                """,
+                tuple(ids),
+            ).fetchall()
+        return tuple(int(row["root_id"]) for row in rows)
+
+    def paths_for_files(
+        self,
+        file_ids: Sequence[int],
+        *,
+        root_id: int | None = None,
+    ) -> set[Path]:
+        ids = sorted({int(value) for value in file_ids})
+        if not ids:
+            return set()
+        placeholders = ",".join("?" for _ in ids)
+        params: list[object] = [*ids]
+        root_clause = ""
+        if root_id is not None:
+            root_clause = " AND root_id = ?"
+            params.append(int(root_id))
+        with self.connect() as con:
+            rows = con.execute(
+                f"""
+                SELECT path FROM files
+                WHERE id IN ({placeholders})
+                  AND is_deleted = 0{root_clause}
+                """,
+                tuple(params),
+            ).fetchall()
+        paths: set[Path] = set()
+        for row in rows:
+            text = str(row["path"])
+            # ZIP members are displayed as ``archive > member`` but the
+            # scheduler must rediscover their physical archive container.
+            paths.add(Path(text.split(" > ", 1)[0]))
+        return paths
+
     def set_file_error_status(
         self,
         file_id: int,
@@ -2066,7 +2542,7 @@ class DatabaseManager:
         )
 
     def active_paths_for_root(self, root_id: int) -> set[str]:
-        with self.connect() as con:
+        with self.connect_read_only(timeout_seconds=0.75) as con:
             rows = con.execute(
                 """
                 SELECT path FROM files
@@ -2075,6 +2551,163 @@ class DatabaseManager:
                 (root_id,),
             ).fetchall()
             return {str(row["path"]) for row in rows}
+
+    def active_file_references_for_root(self, root_id: int) -> dict[int, str]:
+        """Return persisted NTFS file references for an incremental root."""
+
+        # This is a read-only gate.  It must never wait behind the application
+        # writer lock: foreground search can safely use the last committed
+        # projection while an index batch is being committed.
+        try:
+            with self.connect_read_only(timeout_seconds=0.75) as con:
+                rows = con.execute(
+                    """
+                    SELECT file_reference, path
+                    FROM files
+                    WHERE root_id = ? AND is_deleted = 0 AND source_kind = 'file'
+                      AND file_reference IS NOT NULL AND file_reference != 0
+                    """,
+                    (int(root_id),),
+                ).fetchall()
+                return {
+                    int(row["file_reference"]): str(row["path"])
+                    for row in rows
+                }
+        except sqlite3.OperationalError as exc:
+            if _is_database_busy(exc):
+                logger.warning(
+                    "Incremental file-reference snapshot deferred: root_id=%s",
+                    root_id,
+                )
+                return {}
+            raise
+
+    def active_file_count_for_root(self, root_id: int) -> int:
+        with self.connect_read_only(timeout_seconds=0.75) as con:
+            return int(
+                con.execute(
+                    """
+                    SELECT COUNT(*) FROM files
+                    WHERE root_id = ? AND is_deleted = 0 AND source_kind = 'file'
+                    """,
+                    (int(root_id),),
+                ).fetchone()[0]
+            )
+
+    def load_usn_checkpoint(self, root_id: int) -> dict[str, str] | None:
+        prefix = f"usn_checkpoint:{int(root_id)}:"
+        with self.connect_read_only(timeout_seconds=0.75) as con:
+            rows = con.execute(
+                "SELECT key, value FROM index_state WHERE key LIKE ?",
+                (prefix + "%",),
+            ).fetchall()
+        values = {
+            str(row["key"])[len(prefix):]: str(row["value"])
+            for row in rows
+        }
+        return values or None
+
+    def save_usn_checkpoint(
+        self,
+        root_id: int,
+        *,
+        journal_id: int,
+        next_usn: int,
+        volume_serial: int,
+    ) -> None:
+        prefix = f"usn_checkpoint:{int(root_id)}:"
+        values = {
+            "journal_id": str(int(journal_id)),
+            "next_usn": str(int(next_usn)),
+            "volume_serial": str(int(volume_serial)),
+        }
+        with self.connect() as con:
+            con.executemany(
+                """
+                INSERT INTO index_state(key, value) VALUES (?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """,
+                [(prefix + key, value) for key, value in values.items()],
+            )
+
+    def usn_directories_for_root(self, root_id: int) -> dict[int, str]:
+        with self.connect_read_only(timeout_seconds=0.75) as con:
+            rows = con.execute(
+                "SELECT file_reference, path FROM usn_directories WHERE root_id = ?",
+                (int(root_id),),
+            ).fetchall()
+        return {int(row["file_reference"]): str(row["path"]) for row in rows}
+
+    def refresh_usn_directories(
+        self,
+        root_id: int,
+        root_path: Path,
+        *,
+        include_subfolders: bool,
+    ) -> int:
+        """Record directory file references after a trusted full traversal."""
+
+        root_path = Path(root_path)
+        if not root_path.is_dir():
+            return 0
+        entries: list[tuple[int, int | None, str]] = []
+        iterator = os.walk(root_path) if include_subfolders else [(str(root_path), [], [])]
+        for current, _dirs, _files in iterator:
+            directory = Path(current)
+            try:
+                reference = _sqlite_int64(getattr(directory.stat(), "st_ino", 0) or 0)
+                parent = directory.parent
+                parent_reference = (
+                    _sqlite_int64(getattr(parent.stat(), "st_ino", 0) or 0)
+                    if directory != root_path
+                    else None
+                )
+            except OSError:
+                continue
+            if reference:
+                entries.append((reference, parent_reference, str(directory)))
+        with self.connect() as con:
+            con.execute("DELETE FROM usn_directories WHERE root_id = ?", (int(root_id),))
+            con.executemany(
+                """
+                INSERT INTO usn_directories(root_id, file_reference, parent_reference, path)
+                VALUES (?, ?, ?, ?)
+                """,
+                [(int(root_id), reference, parent_reference, path) for reference, parent_reference, path in entries],
+            )
+        return len(entries)
+
+    def relocate_file_reference(
+        self,
+        root_id: int,
+        file_reference: int,
+        destination: Path,
+    ) -> bool:
+        """Move an indexed physical file without invalidating its content."""
+
+        destination = Path(destination)
+        with self.connect() as con:
+            row = con.execute(
+                """
+                SELECT id FROM files
+                WHERE root_id = ? AND file_reference = ? AND is_deleted = 0
+                  AND source_kind = 'file'
+                LIMIT 1
+                """,
+                (int(root_id), int(file_reference)),
+            ).fetchone()
+            if row is None:
+                return False
+            file_id = int(row["id"])
+            con.execute(
+                """
+                UPDATE files SET path = ?, filename = ?, extension = ?, last_seen_at = ?
+                WHERE id = ?
+                """,
+                (str(destination), destination.name, destination.suffix.lower(), utc_now(), file_id),
+            )
+            self._upsert_file_fts(con, file_id, destination.name, str(destination))
+        return True
 
     def mark_deleted_paths(self, paths: set[str]) -> int:
         if not paths:
@@ -2143,11 +2776,79 @@ class DatabaseManager:
         )
         self._garbage_collect_documents(con, document_ids)
 
-    def update_root_scan_time(self, root_id: int, status: str = "ready") -> None:
-        with self.connect() as con:
+    def update_root_scan_time(
+        self,
+        root_id: int,
+        status: str = "ready",
+        *,
+        timeout_seconds: float = 30.0,
+    ) -> None:
+        with self.connect(timeout_seconds=timeout_seconds) as con:
             con.execute(
                 "UPDATE roots SET last_scan_at = ?, status = ?, updated_at = ? WHERE id = ?",
                 (utc_now(), status, utc_now(), root_id),
+            )
+            if status == "ready":
+                con.execute(
+                    "DELETE FROM index_state WHERE key = ?",
+                    (f"root_retry:{int(root_id)}",),
+                )
+
+    def root_retry_due(self, root_id: int) -> bool:
+        """Return whether an automatic retry may run for one failed root."""
+
+        with self.connect_read_only() as con:
+            root = con.execute(
+                "SELECT status FROM roots WHERE id = ?",
+                (int(root_id),),
+            ).fetchone()
+            if root is None or str(root["status"] or "") != "retry_pending":
+                return True
+            row = con.execute(
+                "SELECT value FROM index_state WHERE key = ?",
+                (f"root_retry:{int(root_id)}",),
+            ).fetchone()
+        if row is None:
+            return True
+        try:
+            return float(json.loads(str(row["value"])).get("next_retry_epoch", 0)) <= time.time()
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return True
+
+    def mark_root_retry_pending(
+        self,
+        root_id: int,
+        error: BaseException,
+        *,
+        timeout_seconds: float = 0.25,
+    ) -> None:
+        """Record an isolated root failure with bounded exponential backoff."""
+
+        key = f"root_retry:{int(root_id)}"
+        now = time.time()
+        with self.connect(timeout_seconds=timeout_seconds) as con:
+            row = con.execute(
+                "SELECT value FROM index_state WHERE key = ?",
+                (key,),
+            ).fetchone()
+            try:
+                previous_attempt = int(json.loads(str(row["value"])).get("attempt", 0)) if row else 0
+            except (TypeError, ValueError, json.JSONDecodeError):
+                previous_attempt = 0
+            attempt = min(previous_attempt + 1, len(ROOT_RETRY_DELAYS_SECONDS))
+            delay = ROOT_RETRY_DELAYS_SECONDS[attempt - 1]
+            payload = json.dumps(
+                {
+                    "attempt": attempt,
+                    "next_retry_epoch": now + delay,
+                    "last_error": f"{type(error).__name__}: {error}"[:1000],
+                },
+                ensure_ascii=False,
+            )
+            self._set_index_state(con, key, payload)
+            con.execute(
+                "UPDATE roots SET status = 'retry_pending', updated_at = ? WHERE id = ?",
+                (utc_now(), int(root_id)),
             )
 
     def create_parse_task(
@@ -2192,7 +2893,28 @@ class DatabaseManager:
         self.mark_tasks_running([task_id])
 
     def mark_tasks_running(self, task_ids: Sequence[int]) -> None:
-        self._mark_tasks_running(task_ids, timeout_seconds=30.0)
+        """Persist task state without allowing a transient writer lock to abort a root."""
+
+        if not task_ids:
+            return
+        # A large OCR/PDF result can legitimately hold the single SQLite
+        # writer for longer than the old 20-second retry window.  Task state
+        # is non-critical telemetry, but it must not make the root fail just
+        # because the writer is finishing a durable result.
+        deadline = time.monotonic() + 120.0
+        delay = 0.05
+        while True:
+            try:
+                self._mark_tasks_running(
+                    task_ids,
+                    timeout_seconds=min(2.0, max(0.0, deadline - time.monotonic())),
+                )
+                return
+            except sqlite3.OperationalError as exc:
+                if not _is_database_busy(exc) or time.monotonic() >= deadline:
+                    raise
+                time.sleep(delay)
+                delay = min(0.75, delay * 1.7)
 
     def try_mark_tasks_running(
         self,
@@ -2504,22 +3226,35 @@ class DatabaseManager:
         con.execute(
             """
             UPDATE parse_task_attempts
-            SET status = 'interrupted', finished_at = ?
+            SET status = 'interrupted', finished_at = COALESCE(finished_at, ?),
+                error_code = COALESCE(error_code, 'STALE_PARSE_TASK_RECOVERED'),
+                error_message = COALESCE(error_message, '程序启动时恢复旧批次残留任务')
             WHERE status IN ('running', 'spooled')
+            """,
+            (now,),
+        )
+        # No task from a previous process can be considered live after
+        # startup. Mark every non-terminal task retryable and let the next
+        # scan explicitly queue only files that still need work.
+        con.execute(
+            """
+            UPDATE parse_tasks
+            SET status = 'failed_retryable', finished_at = COALESCE(finished_at, ?),
+                lease_owner = NULL, lease_expires_at = NULL,
+                error_code = COALESCE(error_code, 'STALE_PARSE_TASK_RECOVERED'),
+                error_message = COALESCE(error_message, '程序启动时恢复旧批次残留任务')
+            WHERE status NOT IN ('complete', 'failed', 'failed_retryable',
+                                 'superseded', 'invalidated', 'cancelled')
             """,
             (now,),
         )
         con.execute(
             """
-            UPDATE parse_tasks SET status = 'queued', started_at = NULL
-            WHERE status = 'running'
-            """
-        )
-        con.execute(
-            """
-            UPDATE files SET parse_status = 'pending'
-            WHERE id IN (SELECT file_id FROM parse_tasks WHERE status = 'queued')
-              AND parse_status = 'processing'
+            UPDATE files SET parse_status = 'failed_retryable',
+                parse_error_code = COALESCE(parse_error_code, 'STALE_PARSE_TASK_RECOVERED'),
+                parse_error_message = COALESCE(parse_error_message, '程序启动时恢复旧批次残留任务')
+            WHERE id IN (SELECT file_id FROM parse_tasks WHERE error_code = 'STALE_PARSE_TASK_RECOVERED')
+              AND parse_status IN ('pending', 'processing', 'cancelled')
             """
         )
         con.execute(
@@ -2531,8 +3266,13 @@ class DatabaseManager:
             """
         )
 
-    def start_index_run(self, metrics: IndexRunMetrics) -> None:
-        with self.connect() as con:
+    def start_index_run(
+        self,
+        metrics: IndexRunMetrics,
+        *,
+        timeout_seconds: float = 30.0,
+    ) -> None:
+        with self.connect(timeout_seconds=timeout_seconds) as con:
             con.execute(
                 """
                 INSERT OR REPLACE INTO index_runs(id, started_at, mode, status)
@@ -2546,9 +3286,12 @@ class DatabaseManager:
         metrics: IndexRunMetrics,
         status: str,
         summary: dict[str, object],
+        *,
+        timeout_seconds: float = 30.0,
     ) -> None:
         parse_ms = sum(metrics.parse_ms_by_lane.values())
-        with self.connect() as con:
+        with self.connect(timeout_seconds=timeout_seconds) as con:
+            self._converge_index_run_tasks(con, metrics.run_id, status)
             con.execute(
                 """
                 UPDATE index_runs SET
@@ -2716,6 +3459,340 @@ class DatabaseManager:
             self._set_index_state(con, "content_fts_dirty", "1")
             self._set_index_state(con, "full_batch_incomplete", "1")
 
+    def set_partial_search_projection_active(self, active: bool) -> None:
+        with self.connect() as con:
+            self._set_index_state(
+                con,
+                "partial_search_projection_active",
+                "1" if active else "0",
+            )
+            if active:
+                row = con.execute(
+                    "SELECT value FROM index_state WHERE key = 'search_projection_generation'"
+                ).fetchone()
+                try:
+                    generation = int(row["value"]) if row is not None else 0
+                except (TypeError, ValueError):
+                    generation = 0
+                if generation <= 0:
+                    self._set_index_state(con, "search_projection_generation", "1")
+                    self._set_index_state(
+                        con,
+                        "search_projection_updated_at",
+                        utc_now(),
+                    )
+
+    def converge_index_run_tasks(self, run_id: str, status: str) -> int:
+        """Close non-terminal tasks left by an index run.
+
+        This is also called when run telemetry itself could not be persisted,
+        so task lifecycle state never depends on the optional metrics row.
+        """
+
+        with self.connect() as con:
+            converged = self._converge_index_run_tasks(con, run_id, status)
+            con.execute(
+                """
+                UPDATE index_runs
+                SET status = ?, finished_at = COALESCE(finished_at, ?)
+                WHERE id = ? AND status = 'running'
+                """,
+                (str(status), utc_now(), str(run_id)),
+            )
+            return converged
+
+    @staticmethod
+    def _converge_index_run_tasks(
+        con: sqlite3.Connection,
+        run_id: str,
+        status: str,
+    ) -> int:
+        now = utc_now()
+        terminal = tuple(sorted(TERMINAL_PARSE_TASK_STATUSES))
+        placeholders = ",".join("?" for _ in terminal)
+        rows = con.execute(
+            f"""
+            SELECT id, file_id FROM parse_tasks
+            WHERE run_id = ? AND status NOT IN ({placeholders})
+            """,
+            (str(run_id), *terminal),
+        ).fetchall()
+        if not rows:
+            return 0
+        ids = [int(row["id"]) for row in rows]
+        task_placeholders = ",".join("?" for _ in ids)
+        error_code = "INDEX_RUN_ENDED_WITHOUT_TERMINAL_RESULT"
+        message = "索引批次结束时任务没有终态结果"
+        con.execute(
+            f"""
+            UPDATE parse_tasks
+            SET status = 'failed_retryable', finished_at = COALESCE(finished_at, ?),
+                lease_owner = NULL, lease_expires_at = NULL,
+                error_code = COALESCE(error_code, ?),
+                error_message = COALESCE(error_message, ?)
+            WHERE id IN ({task_placeholders})
+            """,
+            (now, error_code, message, *ids),
+        )
+        con.execute(
+            f"""
+            UPDATE parse_task_attempts
+            SET status = 'interrupted', finished_at = COALESCE(finished_at, ?),
+                error_code = COALESCE(error_code, ?),
+                error_message = COALESCE(error_message, ?)
+            WHERE task_id IN ({task_placeholders}) AND status IN ('running', 'spooled')
+            """,
+            (now, error_code, message, *ids),
+        )
+        con.execute(
+            f"""
+            UPDATE files
+            SET parse_status = CASE WHEN parse_status IN ('pending', 'processing', 'cancelled') THEN 'failed_retryable' ELSE parse_status END,
+                parse_error_code = CASE WHEN parse_status IN ('pending', 'processing', 'cancelled') THEN COALESCE(parse_error_code, ?) ELSE parse_error_code END,
+                parse_error_message = CASE WHEN parse_status IN ('pending', 'processing', 'cancelled') THEN COALESCE(parse_error_message, ?) ELSE parse_error_message END
+            WHERE id IN (SELECT file_id FROM parse_tasks WHERE id IN ({task_placeholders}))
+            """,
+            (error_code, message, *ids),
+        )
+        return len(ids)
+
+    @staticmethod
+    def _pid_is_alive(worker_pid: object) -> bool:
+        try:
+            pid = int(worker_pid or 0)
+        except (TypeError, ValueError):
+            return False
+        if pid <= 0:
+            return False
+        try:
+            os.kill(pid, 0)
+        except (OSError, PermissionError):
+            return False
+        return True
+
+    @classmethod
+    def _task_is_recent(
+        cls,
+        row: sqlite3.Row,
+        now: datetime,
+        stale_after_seconds: int = STALE_PARSE_TASK_TIMEOUT_SECONDS,
+    ) -> bool:
+        for key in (
+            "last_semantic_progress_at",
+            "last_progress_at",
+            "started_at",
+            "created_at",
+        ):
+            value = row[key] if key in row.keys() else None
+            if not value:
+                continue
+            try:
+                stamp = datetime.fromisoformat(str(value))
+            except ValueError:
+                continue
+            if (now - stamp).total_seconds() <= max(0, int(stale_after_seconds)):
+                return True
+        return False
+
+    @classmethod
+    def _row_is_real_active_task(
+        cls,
+        row: sqlite3.Row,
+        now: datetime,
+        stale_after_seconds: int = STALE_PARSE_TASK_TIMEOUT_SECONDS,
+    ) -> bool:
+        status = str(row["status"] or "")
+        if status not in {"queued", "running", "spooled", "blocked", "paused"}:
+            return False
+        run_status = str(row["run_status"] or "")
+        if run_status not in {"", "running"}:
+            return False
+        return cls._pid_is_alive(row["worker_pid"]) or cls._task_is_recent(
+            row,
+            now,
+            stale_after_seconds,
+        )
+
+    def reconcile_stale_parse_tasks(
+        self,
+        *,
+        stale_after_seconds: int = STALE_PARSE_TASK_TIMEOUT_SECONDS,
+    ) -> int:
+        """Mark old-batch, dead-worker and no-heartbeat tasks retryable."""
+
+        now_dt = datetime.now(timezone.utc)
+        now = utc_now()
+        with self.connect() as con:
+            rows = con.execute(
+                """
+                SELECT pt.*, ir.status AS run_status,
+                       pta.last_progress_at
+                FROM parse_tasks pt
+                LEFT JOIN index_runs ir ON ir.id = pt.run_id
+                LEFT JOIN parse_task_attempts pta ON pta.id = (
+                    SELECT latest.id FROM parse_task_attempts latest
+                    WHERE latest.task_id = pt.id
+                    ORDER BY latest.attempt_no DESC LIMIT 1
+                )
+                WHERE pt.status IN ('queued', 'running', 'spooled', 'blocked', 'paused')
+                """
+            ).fetchall()
+            stale_ids = [
+                int(row["id"])
+                for row in rows
+                if not self._row_is_real_active_task(row, now_dt, stale_after_seconds)
+            ]
+            if not stale_ids:
+                return 0
+            placeholders = ",".join("?" for _ in stale_ids)
+            con.execute(
+                f"""
+                UPDATE parse_tasks
+                SET status = CASE
+                        WHEN file_id IN (
+                            SELECT id FROM files
+                            WHERE parse_status IN ('success', 'metadata_only')
+                        ) THEN 'invalidated'
+                        ELSE 'failed_retryable'
+                    END,
+                    finished_at = COALESCE(finished_at, ?),
+                    lease_owner = NULL, lease_expires_at = NULL,
+                    error_code = CASE
+                        WHEN file_id IN (
+                            SELECT id FROM files
+                            WHERE parse_status IN ('success', 'metadata_only')
+                        ) THEN COALESCE(error_code, 'STALE_TASK_AFTER_SUCCESS')
+                        ELSE 'STALE_PARSE_TASK_RECOVERED'
+                    END,
+                    error_message = CASE
+                        WHEN file_id IN (
+                            SELECT id FROM files
+                            WHERE parse_status IN ('success', 'metadata_only')
+                        ) THEN COALESCE(error_message, '文件已有成功终态，残留解析任务已失效')
+                        ELSE '无活动运行、worker 或心跳的残留任务已恢复'
+                    END
+                WHERE id IN ({placeholders})
+                """,
+                (now, *stale_ids),
+            )
+            con.execute(
+                f"""
+                UPDATE parse_task_attempts
+                SET status = 'interrupted', finished_at = COALESCE(finished_at, ?),
+                    error_code = COALESCE(error_code, 'STALE_PARSE_TASK_RECOVERED'),
+                    error_message = COALESCE(error_message, 'worker 已退出或任务批次已结束')
+                WHERE task_id IN ({placeholders}) AND status IN ('running', 'spooled')
+                """,
+                (now, *stale_ids),
+            )
+            con.execute(
+                f"""
+                UPDATE files
+                SET parse_status = 'failed_retryable',
+                    parse_error_code = COALESCE(parse_error_code, 'STALE_PARSE_TASK_RECOVERED'),
+                    parse_error_message = COALESCE(parse_error_message, '残留解析任务已恢复，可重新尝试')
+                WHERE id IN (SELECT file_id FROM parse_tasks WHERE id IN ({placeholders}))
+                  AND parse_status IN ('pending', 'processing', 'cancelled')
+                """,
+                tuple(stale_ids),
+            )
+            return len(stale_ids)
+
+    def reconcile_orphan_pending_files(self) -> int:
+        """Close pending files left after every index run has stopped."""
+
+        with self.connect() as con:
+            if int(con.execute("SELECT COUNT(*) FROM index_runs WHERE status = 'running'").fetchone()[0]) > 0:
+                return 0
+            cursor = con.execute(
+                """
+                UPDATE files
+                SET parse_status = 'failed_retryable',
+                    parse_error_code = COALESCE(parse_error_code, 'INDEX_RUN_ENDED_WITHOUT_TERMINAL_RESULT'),
+                    parse_error_message = COALESCE(parse_error_message, '索引批次已结束但文件没有终态结果，可重新尝试'),
+                    indexed_at = COALESCE(indexed_at, ?)
+                WHERE is_deleted = 0
+                  AND parse_status IN ('pending', 'processing', 'cancelled')
+                   AND NOT EXISTS (
+                       SELECT 1
+                       FROM parse_tasks pt
+                       LEFT JOIN index_runs ir ON ir.id = pt.run_id
+                       WHERE pt.file_id = files.id
+                         AND pt.status IN ('queued', 'running', 'spooled', 'blocked', 'paused')
+                         AND (
+                             ir.status = 'running'
+                             OR (
+                                 ir.id IS NULL
+                                 AND julianday(COALESCE(
+                                     pt.last_semantic_progress_at,
+                                     pt.started_at,
+                                     pt.created_at
+                                 )) >= julianday('now', '-120 seconds')
+                             )
+                         )
+                   )
+                """,
+                (utc_now(),),
+            )
+            return max(0, int(cursor.rowcount or 0))
+
+    def active_parse_task_ids(self, file_ids: Sequence[int]) -> list[int]:
+        ids = list(dict.fromkeys(int(value) for value in file_ids))
+        if not ids:
+            return []
+        placeholders = ",".join("?" for _ in ids)
+        with self.connect() as con:
+            rows = con.execute(
+                f"""
+                SELECT pt.*, ir.status AS run_status,
+                       pta.last_progress_at
+                FROM parse_tasks pt
+                LEFT JOIN index_runs ir ON ir.id = pt.run_id
+                LEFT JOIN parse_task_attempts pta ON pta.id = (
+                    SELECT latest.id FROM parse_task_attempts latest
+                    WHERE latest.task_id = pt.id
+                    ORDER BY latest.attempt_no DESC LIMIT 1
+                )
+                WHERE pt.file_id IN ({placeholders})
+                  AND pt.status IN ('queued', 'running', 'spooled', 'blocked', 'paused')
+                """,
+                tuple(ids),
+            ).fetchall()
+        now = datetime.now(timezone.utc)
+        return [int(row["id"]) for row in rows if self._row_is_real_active_task(row, now)]
+
+    def exclusion_task_ids(self, file_ids: Sequence[int]) -> list[int]:
+        """Return tasks that an exclusion request should settle immediately."""
+
+        ids = list(dict.fromkeys(int(value) for value in file_ids))
+        if not ids:
+            return []
+        self.reconcile_stale_parse_tasks()
+        placeholders = ",".join("?" for _ in ids)
+        with self.connect() as con:
+            rows = con.execute(
+                f"""
+                SELECT pt.*, ir.status AS run_status,
+                       pta.last_progress_at
+                FROM parse_tasks pt
+                LEFT JOIN index_runs ir ON ir.id = pt.run_id
+                LEFT JOIN parse_task_attempts pta ON pta.id = (
+                    SELECT latest.id FROM parse_task_attempts latest
+                    WHERE latest.task_id = pt.id
+                    ORDER BY latest.attempt_no DESC LIMIT 1
+                )
+                WHERE pt.file_id IN ({placeholders})
+                  AND pt.status IN ('queued', 'blocked', 'paused', 'running', 'spooled')
+                """,
+                tuple(ids),
+            ).fetchall()
+        now = datetime.now(timezone.utc)
+        return [
+            int(row["id"])
+            for row in rows
+            if self._row_is_real_active_task(row, now)
+        ]
+
     def has_incomplete_full_batch(self) -> bool:
         with self.connect() as con:
             row = con.execute(
@@ -2726,6 +3803,7 @@ class DatabaseManager:
     def mark_full_batch_complete(self) -> None:
         with self.connect() as con:
             self._set_index_state(con, "full_batch_incomplete", "0")
+            self._set_index_state(con, "partial_search_projection_active", "0")
 
     def requires_full_rebuild(self) -> bool:
         with self.connect() as con:
@@ -2863,6 +3941,9 @@ class DatabaseManager:
         now = utc_now()
         report("validating", "正在校验选中文件")
         throw_if_cancelled()
+        real_active_task_ids = set(self.exclusion_task_ids(ids))
+        if real_active_task_ids:
+            raise RuntimeError("选中文件存在活动解析任务，请等待任务安全结束后再排除")
         with self.connect() as con:
             rows = con.execute(
                 f"""
@@ -2883,21 +3964,47 @@ class DatabaseManager:
                 raise ValueError(
                     "文件不存在或已删除：" + ", ".join(str(value) for value in missing)
                 )
-            terminal_placeholders = ",".join(
-                "?" for _ in TERMINAL_PARSE_TASK_STATUSES
-            )
-            active_tasks = int(
+            if real_active_task_ids:
+                active_placeholders = ",".join("?" for _ in real_active_task_ids)
                 con.execute(
                     f"""
-                    SELECT COUNT(*) FROM parse_tasks
-                    WHERE file_id IN ({placeholders})
-                      AND status NOT IN ({terminal_placeholders})
+                    UPDATE parse_tasks
+                    SET status = 'cancelled', finished_at = COALESCE(finished_at, ?),
+                        lease_owner = NULL, lease_expires_at = NULL,
+                        error_code = 'EXCLUSION_REQUESTED',
+                        error_message = '选中文件请求人工排除，任务已在安全点停止'
+                    WHERE id IN ({active_placeholders})
                     """,
-                    (*ids, *sorted(TERMINAL_PARSE_TASK_STATUSES)),
-                ).fetchone()[0]
-            )
-            if active_tasks:
-                raise RuntimeError("所选文件仍有活动解析任务，请先暂停或等待安全点")
+                    (now, *sorted(real_active_task_ids)),
+                )
+                con.execute(
+                    f"""
+                    UPDATE parse_task_attempts
+                    SET status = 'interrupted', finished_at = COALESCE(finished_at, ?),
+                        error_code = 'EXCLUSION_REQUESTED',
+                        error_message = '选中文件请求人工排除'
+                    WHERE task_id IN ({active_placeholders}) AND status = 'running'
+                    """,
+                    (now, *sorted(real_active_task_ids)),
+                )
+                con.execute(
+                    f"""
+                    UPDATE files
+                    SET parse_status = 'failed_retryable',
+                        parse_error_code = 'EXCLUSION_REQUESTED',
+                        parse_error_message = '选中文件请求人工排除'
+                    WHERE id IN (SELECT file_id FROM parse_tasks WHERE id IN ({active_placeholders}))
+                      AND parse_status = 'processing'
+                    """,
+                    tuple(sorted(real_active_task_ids)),
+                )
+            active_file_ids = {
+                int(row["file_id"])
+                for row in con.execute(
+                    f"SELECT DISTINCT file_id FROM parse_tasks WHERE id IN ({','.join('?' for _ in real_active_task_ids)})",
+                    tuple(sorted(real_active_task_ids)),
+                ).fetchall()
+            } if real_active_task_ids else set()
             inserted_ids: list[int] = []
             report("recording_exclusions", "正在记录排除范围")
             for row in rows:
@@ -2905,6 +4012,8 @@ class DatabaseManager:
                 if row["active_exclusion_id"] is not None:
                     continue
                 parse_status = str(row["parse_status"] or "")
+                if int(row["id"]) in active_file_ids and parse_status == "processing":
+                    parse_status = "failed_retryable"
                 if parse_status not in MANUALLY_EXCLUDABLE_STATUSES:
                     raise ValueError(
                         f"文件状态不允许人工排除：{row['path']} ({parse_status})"
@@ -3064,8 +4173,18 @@ class DatabaseManager:
                 SELECT COUNT(*)
                 FROM parse_tasks pt
                 JOIN files f ON f.id = pt.file_id
+                LEFT JOIN index_runs ir ON ir.id = pt.run_id
                 WHERE f.is_deleted = 0
                   AND pt.status NOT IN ({terminal_placeholders})
+                  AND ir.status = 'running'
+                  AND (
+                      pt.worker_pid IS NOT NULL
+                      OR julianday(COALESCE(
+                          pt.last_semantic_progress_at,
+                          pt.started_at,
+                          pt.created_at
+                      )) >= julianday('now', '-120 seconds')
+                  )
                   AND NOT EXISTS (
                       SELECT 1 FROM index_scope_exclusions e
                       WHERE e.file_id = f.id
@@ -3097,54 +4216,70 @@ class DatabaseManager:
             if cancel_requested is not None and cancel_requested():
                 raise CancelledError("人工排除任务已取消")
 
-        report("rebuilding_content_fts", "正在重建全文索引")
-        throw_if_cancelled()
-        con.execute("DELETE FROM content_fts")
-        con.execute(
-            """
-            INSERT INTO content_fts(
-                rowid, block_id, file_id, filename, path,
-                location_text, normalized_text
+        # Manual exclusion already removes the affected FTS rows above.  A
+        # full rebuild is only needed when parsing explicitly deferred FTS
+        # writes; otherwise rebuilding a multi-gigabyte projection for a
+        # single file (or zero files during state repair) blocks search for a
+        # long time.
+        fts_dirty_row = con.execute(
+            "SELECT value FROM index_state WHERE key = 'content_fts_dirty'"
+        ).fetchone()
+        fts_rebuild_required = (
+            fts_dirty_row is not None and str(fts_dirty_row["value"]) == "1"
+        )
+        if fts_rebuild_required:
+            report("rebuilding_content_fts", "正在重建全文索引")
+            throw_if_cancelled()
+            con.execute("DELETE FROM content_fts")
+            con.execute(
+                """
+                INSERT INTO content_fts(
+                    rowid, block_id, file_id, filename, path,
+                    location_text, normalized_text
+                )
+                SELECT cb.id, cb.id, cb.file_id, COALESCE(f.filename, ''),
+                       COALESCE(f.path, ''), cb.location_text,
+                       cb.normalized_text
+                FROM content_blocks cb
+                LEFT JOIN files f ON f.id = cb.file_id
+                WHERE EXISTS (
+                    SELECT 1 FROM files visible
+                    WHERE visible.is_deleted = 0
+                      AND (
+                          (cb.document_id IS NOT NULL
+                           AND visible.document_id = cb.document_id)
+                          OR (cb.document_id IS NULL AND visible.id = cb.file_id)
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1 FROM index_scope_exclusions e
+                          WHERE e.file_id = visible.id
+                            AND e.revoked_at IS NULL
+                            AND e.invalidated_at IS NULL
+                      )
+                )
+                """
             )
-            SELECT cb.id, cb.id, cb.file_id, COALESCE(f.filename, ''),
-                   COALESCE(f.path, ''), cb.location_text,
-                   cb.normalized_text
-            FROM content_blocks cb
-            LEFT JOIN files f ON f.id = cb.file_id
-            WHERE EXISTS (
-                SELECT 1 FROM files visible
-                WHERE visible.is_deleted = 0
-                  AND (
-                      (cb.document_id IS NOT NULL
-                       AND visible.document_id = cb.document_id)
-                      OR (cb.document_id IS NULL AND visible.id = cb.file_id)
-                  )
+            report("updating_filename_fts", "正在更新文件名索引")
+            throw_if_cancelled()
+            con.execute("DELETE FROM files_fts")
+            con.execute(
+                """
+                INSERT INTO files_fts(rowid, file_id, filename, path)
+                SELECT f.id, f.id, f.filename, f.path
+                FROM files f
+                WHERE f.is_deleted = 0
                   AND NOT EXISTS (
                       SELECT 1 FROM index_scope_exclusions e
-                      WHERE e.file_id = visible.id
+                      WHERE e.file_id = f.id
                         AND e.revoked_at IS NULL
                         AND e.invalidated_at IS NULL
                   )
+                """
             )
-            """
-        )
-        report("updating_filename_fts", "正在更新文件名索引")
-        throw_if_cancelled()
-        con.execute("DELETE FROM files_fts")
-        con.execute(
-            """
-            INSERT INTO files_fts(rowid, file_id, filename, path)
-            SELECT f.id, f.id, f.filename, f.path
-            FROM files f
-            WHERE f.is_deleted = 0
-              AND NOT EXISTS (
-                  SELECT 1 FROM index_scope_exclusions e
-                  WHERE e.file_id = f.id
-                    AND e.revoked_at IS NULL
-                    AND e.invalidated_at IS NULL
-              )
-            """
-        )
+        else:
+            logger.info(
+                "Skipping full FTS rebuild during scope publication: projection is clean"
+            )
         report("refreshing_index_state", "正在刷新索引状态")
         throw_if_cancelled()
         con.execute(
@@ -3270,6 +4405,33 @@ class DatabaseManager:
             "invalidated_tasks": len(successful_ids),
         }
 
+    def cached_full_hashes(
+        self,
+        file_ids: Sequence[int],
+    ) -> dict[int, tuple[str | None, str | None]]:
+        """Return persisted full hashes together with their source fingerprint."""
+
+        ids = list(dict.fromkeys(int(file_id) for file_id in file_ids))
+        if not ids:
+            return {}
+        placeholders = ",".join("?" for _ in ids)
+        with self.connect() as con:
+            rows = con.execute(
+                f"""
+                SELECT id, quick_fingerprint, content_hash_full
+                FROM files
+                WHERE id IN ({placeholders}) AND content_hash_full IS NOT NULL
+                """,
+                tuple(ids),
+            ).fetchall()
+        return {
+            int(row["id"]): (
+                str(row["quick_fingerprint"] or ""),
+                str(row["content_hash_full"] or ""),
+            )
+            for row in rows
+        }
+
     @staticmethod
     def _discard_staging_index_versions(
         con: sqlite3.Connection,
@@ -3333,14 +4495,19 @@ class DatabaseManager:
 
     def excluded_files(
         self,
-        limit: int = 500,
+        limit: int | None = 500,
         *,
         include_history: bool = False,
+        offset: int = 0,
     ) -> list[sqlite3.Row]:
         history_filter = (
             ""
             if include_history
             else "AND e.revoked_at IS NULL AND e.invalidated_at IS NULL"
+        )
+        limit_clause = "LIMIT -1" if limit is None else "LIMIT ?"
+        parameters: tuple[object, ...] = () if limit is None else (
+            max(1, int(limit)),
         )
         with self.connect() as con:
             return list(
@@ -3356,17 +4523,26 @@ class DatabaseManager:
                     JOIN files f ON f.id = e.file_id
                     WHERE 1 = 1 {history_filter}
                     ORDER BY e.created_at DESC, e.id DESC
-                    LIMIT ?
+                    {limit_clause} OFFSET ?
                     """,
-                    (max(1, int(limit)),),
+                    (*parameters, max(0, int(offset))),
                 ).fetchall()
             )
 
-    def metadata_only_files(self, limit: int = 500) -> list[sqlite3.Row]:
+    def metadata_only_files(
+        self,
+        limit: int | None = 500,
+        *,
+        offset: int = 0,
+    ) -> list[sqlite3.Row]:
+        limit_clause = "LIMIT -1" if limit is None else "LIMIT ?"
+        parameters: tuple[object, ...] = () if limit is None else (
+            max(1, int(limit)),
+        )
         with self.connect() as con:
             return list(
                 con.execute(
-                    """
+                    f"""
                     SELECT f.*, 'included' AS scope_state
                     FROM files f
                     WHERE f.is_deleted = 0
@@ -3376,16 +4552,25 @@ class DatabaseManager:
                           WHERE e.file_id = f.id
                             AND e.revoked_at IS NULL
                             AND e.invalidated_at IS NULL
-                      )
+                    )
                     ORDER BY f.indexed_at DESC
-                    LIMIT ?
+                    {limit_clause} OFFSET ?
                     """,
-                    (max(1, int(limit)),),
+                    (*parameters, max(0, int(offset))),
                 ).fetchall()
             )
 
-    def failed_files(self, limit: int = 500) -> list[sqlite3.Row]:
+    def failed_files(
+        self,
+        limit: int | None = 500,
+        *,
+        offset: int = 0,
+    ) -> list[sqlite3.Row]:
         video_placeholders = ",".join("?" for _ in VIDEO_EXTENSIONS)
+        limit_clause = "LIMIT -1" if limit is None else "LIMIT ?"
+        parameters: tuple[object, ...] = () if limit is None else (
+            max(1, int(limit)),
+        )
         with self.connect() as con:
             return list(
                 con.execute(
@@ -3422,10 +4607,12 @@ class DatabaseManager:
                       )
                     WHERE f.parse_status IN (
                         'pending', 'processing', 'cancelled',
+                        'pending', 'processing', 'cancelled',
                         'failed', 'failed_retryable', 'unsupported', 'skipped',
                         'ocr_disabled', 'ocr_failed', 'converter_missing', 'partial_success',
                         'password_protected'
                     )
+                      AND f.is_deleted = 0
                       AND NOT (
                           f.extension IN ({video_placeholders})
                           AND f.parse_status = 'metadata_only'
@@ -3437,14 +4624,85 @@ class DatabaseManager:
                             AND e.invalidated_at IS NULL
                       )
                     ORDER BY f.indexed_at DESC
-                    LIMIT ?
+                    {limit_clause} OFFSET ?
                     """,
-                    (*sorted(VIDEO_EXTENSIONS), limit),
+                    (
+                        *sorted(VIDEO_EXTENSIONS),
+                        *parameters,
+                        max(0, int(offset)),
+                    ),
                 ).fetchall()
             )
 
+    def failed_file_counts(self) -> dict[str, int]:
+        """Return true totals for the three failed-index scopes.
+
+        The UI deliberately fetches only one page of rows; these counts keep
+        the tabs and progress text accurate for folders containing thousands of
+        failures.
+        """
+
+        video_placeholders = ",".join("?" for _ in VIDEO_EXTENSIONS)
+        statuses = (
+            "pending", "processing", "cancelled",
+            "failed", "failed_retryable",
+            "unsupported", "skipped", "ocr_disabled", "ocr_failed",
+            "converter_missing", "partial_success", "password_protected",
+        )
+        status_placeholders = ",".join("?" for _ in statuses)
+        with self.connect() as con:
+            blocking = int(
+                con.execute(
+                    f"""
+                    SELECT COUNT(*) AS n FROM files f
+                    WHERE f.is_deleted = 0
+                      AND f.parse_status IN ({status_placeholders})
+                      AND NOT (
+                          f.extension IN ({video_placeholders})
+                          AND f.parse_status = 'metadata_only'
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1 FROM index_scope_exclusions e
+                          WHERE e.file_id = f.id
+                            AND e.revoked_at IS NULL
+                            AND e.invalidated_at IS NULL
+                      )
+                    """,
+                    (*statuses, *sorted(VIDEO_EXTENSIONS)),
+                ).fetchone()["n"]
+            )
+            excluded = int(
+                con.execute(
+                    """
+                    SELECT COUNT(*) AS n
+                    FROM index_scope_exclusions e
+                    JOIN files f ON f.id = e.file_id
+                    WHERE f.is_deleted = 0
+                      AND e.revoked_at IS NULL
+                      AND e.invalidated_at IS NULL
+                    """
+                ).fetchone()["n"]
+            )
+            metadata = int(
+                con.execute(
+                    """
+                    SELECT COUNT(*) AS n FROM files f
+                    WHERE f.is_deleted = 0
+                      AND f.parse_status = 'metadata_only'
+                      AND NOT EXISTS (
+                          SELECT 1 FROM index_scope_exclusions e
+                          WHERE e.file_id = f.id
+                            AND e.revoked_at IS NULL
+                            AND e.invalidated_at IS NULL
+                      )
+                    """
+                ).fetchone()["n"]
+            )
+        return {"blocking": blocking, "excluded": excluded, "metadata": metadata}
+
     def force_complete_current_scope(
         self,
+        file_ids: Sequence[int] | None = None,
         *,
         reason: str,
         operation_source: str = "ui_force_complete",
@@ -3488,6 +4746,12 @@ class DatabaseManager:
         report("validating", "正在诊断索引状态")
         throw_if_cancelled()
         with self.connect() as con:
+            selected_ids = sorted({int(value) for value in (file_ids or ())})
+            selection_clause = ""
+            selection_params: tuple[object, ...] = ()
+            if selected_ids:
+                selection_clause = "AND f.id IN (" + ",".join("?" for _ in selected_ids) + ")"
+                selection_params = tuple(selected_ids)
             rows = con.execute(
                 f"""
                 SELECT f.*
@@ -3495,6 +4759,7 @@ class DatabaseManager:
                 WHERE f.is_deleted = 0
                   AND f.extension NOT IN ({video_placeholders})
                   AND f.parse_status NOT IN ('success', 'metadata_only')
+                  {selection_clause}
                   AND NOT EXISTS (
                       SELECT 1 FROM index_scope_exclusions e
                       WHERE e.file_id = f.id
@@ -3503,7 +4768,7 @@ class DatabaseManager:
                   )
                 ORDER BY f.id
                 """,
-                video_extensions,
+                (*video_extensions, *selection_params),
             ).fetchall()
             file_ids = [int(row["id"]) for row in rows]
             report(
@@ -3634,62 +4899,73 @@ class DatabaseManager:
             # FTS replacement and readiness state are committed with the audit.
             reconciled = self._reconcile_residual_parse_tasks(con, now)
             cancelled_tasks += int(reconciled["cancelled_tasks"])
-            report(
-                "rebuilding_content_fts",
-                "正在重建全文索引",
-                large_fts_operation=True,
+            fts_dirty_row = con.execute(
+                "SELECT value FROM index_state WHERE key = 'content_fts_dirty'"
+            ).fetchone()
+            fts_rebuild_required = (
+                fts_dirty_row is not None and str(fts_dirty_row["value"]) == "1"
             )
-            throw_if_cancelled()
-            con.execute("DELETE FROM content_fts")
-            con.execute(
-                """
-                INSERT INTO content_fts(
-                    rowid, block_id, file_id, filename, path,
-                    location_text, normalized_text
+            if fts_rebuild_required:
+                report(
+                    "rebuilding_content_fts",
+                    "正在重建全文索引",
+                    large_fts_operation=True,
                 )
-                SELECT cb.id, cb.id, cb.file_id, COALESCE(f.filename, ''),
-                       COALESCE(f.path, ''), cb.location_text,
-                       cb.normalized_text
-                FROM content_blocks cb
-                LEFT JOIN files f ON f.id = cb.file_id
-                WHERE EXISTS (
-                    SELECT 1 FROM files visible
-                    WHERE visible.is_deleted = 0
-                      AND (
-                          (cb.document_id IS NOT NULL
-                           AND visible.document_id = cb.document_id)
-                          OR (cb.document_id IS NULL AND visible.id = cb.file_id)
-                      )
+                throw_if_cancelled()
+                con.execute("DELETE FROM content_fts")
+                con.execute(
+                    """
+                    INSERT INTO content_fts(
+                        rowid, block_id, file_id, filename, path,
+                        location_text, normalized_text
+                    )
+                    SELECT cb.id, cb.id, cb.file_id, COALESCE(f.filename, ''),
+                           COALESCE(f.path, ''), cb.location_text,
+                           cb.normalized_text
+                    FROM content_blocks cb
+                    LEFT JOIN files f ON f.id = cb.file_id
+                    WHERE EXISTS (
+                        SELECT 1 FROM files visible
+                        WHERE visible.is_deleted = 0
+                          AND (
+                              (cb.document_id IS NOT NULL
+                               AND visible.document_id = cb.document_id)
+                              OR (cb.document_id IS NULL AND visible.id = cb.file_id)
+                          )
+                          AND NOT EXISTS (
+                              SELECT 1 FROM index_scope_exclusions e
+                              WHERE e.file_id = visible.id
+                                AND e.revoked_at IS NULL
+                                AND e.invalidated_at IS NULL
+                          )
+                    )
+                    """
+                )
+                report(
+                    "updating_filename_fts",
+                    "正在更新文件名索引",
+                    large_fts_operation=True,
+                )
+                throw_if_cancelled()
+                con.execute("DELETE FROM files_fts")
+                con.execute(
+                    """
+                    INSERT INTO files_fts(rowid, file_id, filename, path)
+                    SELECT f.id, f.id, f.filename, f.path
+                    FROM files f
+                    WHERE f.is_deleted = 0
                       AND NOT EXISTS (
                           SELECT 1 FROM index_scope_exclusions e
-                          WHERE e.file_id = visible.id
+                          WHERE e.file_id = f.id
                             AND e.revoked_at IS NULL
                             AND e.invalidated_at IS NULL
                       )
+                    """
                 )
-                """
-            )
-            report(
-                "updating_filename_fts",
-                "正在更新文件名索引",
-                large_fts_operation=True,
-            )
-            throw_if_cancelled()
-            con.execute("DELETE FROM files_fts")
-            con.execute(
-                """
-                INSERT INTO files_fts(rowid, file_id, filename, path)
-                SELECT f.id, f.id, f.filename, f.path
-                FROM files f
-                WHERE f.is_deleted = 0
-                  AND NOT EXISTS (
-                      SELECT 1 FROM index_scope_exclusions e
-                      WHERE e.file_id = f.id
-                        AND e.revoked_at IS NULL
-                        AND e.invalidated_at IS NULL
-                  )
-                """
-            )
+            else:
+                logger.info(
+                    "Skipping full FTS rebuild during force completion: projection is clean"
+                )
             report("refreshing_index_state", "正在刷新索引状态")
             throw_if_cancelled()
             con.execute(
@@ -3825,6 +5101,15 @@ class DatabaseManager:
             }
 
     def index_readiness(self) -> dict[str, object]:
+        # Collapse old-batch and dead-worker leftovers before calculating the
+        # user-facing readiness gate. A stale row must not keep exclusion or
+        # search state blocked forever.
+        try:
+            self.reconcile_stale_index_runs()
+            self.reconcile_stale_parse_tasks()
+            self.reconcile_orphan_pending_files()
+        except sqlite3.Error:
+            logger.debug("Unable to reconcile stale parse tasks", exc_info=True)
         stats = self.stats()
         video_placeholders = ",".join("?" for _ in VIDEO_EXTENSIONS)
         video_extensions = tuple(sorted(VIDEO_EXTENSIONS))
@@ -3881,17 +5166,37 @@ class DatabaseManager:
                     """
                 ).fetchone()["n"]
             )
+            active_index_versions = int(
+                con.execute(
+                    "SELECT COUNT(*) AS n FROM index_versions WHERE status = 'active'"
+                ).fetchone()["n"]
+            )
             state_rows = {
                 str(row["key"]): str(row["value"])
                 for row in con.execute(
                     """
                     SELECT key, value FROM index_state
-                    WHERE key IN ('content_fts_dirty', 'full_batch_incomplete')
+                    WHERE key IN (
+                        'content_fts_dirty', 'full_batch_incomplete',
+                        'search_projection_generation',
+                        'search_projection_updated_at',
+                        'partial_search_projection_active'
+                    )
                     """
                 )
             }
         content_fts_dirty = state_rows.get("content_fts_dirty") == "1"
         full_batch_incomplete = state_rows.get("full_batch_incomplete") == "1"
+        partial_search_projection_active = (
+            state_rows.get("partial_search_projection_active") == "1"
+        )
+        try:
+            search_projection_generation = max(
+                0,
+                int(state_rows.get("search_projection_generation", "0")),
+            )
+        except (TypeError, ValueError):
+            search_projection_generation = 0
         not_ready_reasons: list[str] = []
         if enabled_roots <= 0:
             not_ready_reasons.append("no_enabled_roots")
@@ -3919,21 +5224,194 @@ class DatabaseManager:
             and not content_fts_dirty
             and unpublished_candidates == 0
         )
+        # A running incremental scan must not hide the already committed
+        # projection.  The FTS dirty flag and unpublished candidate gate still
+        # prevent exposing a projection that is known to be inconsistent.
+        search_available = bool(
+            ready
+            or (
+                int(stats["complete_files"]) > 0
+                and (
+                    partial_search_projection_active
+                    or (
+                        not content_fts_dirty
+                        and unpublished_candidates == 0
+                        and (
+                            active_runs > 0
+                            or active_index_versions > 0
+                            or search_projection_generation > 0
+                            or int(stats["blocks"]) > 0
+                        )
+                    )
+                )
+            )
+        )
+        background_task_state = (
+            "running"
+            if int(unfinished_tasks) > 0 and int(active_runs) > 0
+            else "residual"
+            if int(unfinished_tasks) > 0
+            else "converged"
+        )
         return {
             **stats,
             "enabled_roots": enabled_roots,
             "active_runs": active_runs,
             "unready_roots": unready_roots,
             "unfinished_tasks": unfinished_tasks,
+            "background_task_state": background_task_state,
             "content_fts_dirty": content_fts_dirty,
             "full_batch_incomplete": full_batch_incomplete,
             "unpublished_candidates": unpublished_candidates,
+            "active_index_versions": active_index_versions,
             "not_ready_reasons": not_ready_reasons,
             "repairable": bool(
                 enabled_roots > 0 and active_runs == 0 and not ready
             ),
+            "search_projection_generation": search_projection_generation,
+            "search_projection_updated_at": state_rows.get(
+                "search_projection_updated_at",
+                "",
+            ),
+            "search_available": search_available,
+            "search_is_partial": bool(search_available and not ready),
+            "failure_alert_ready": True,
+            "partial_search_projection_active": (
+                partial_search_projection_active
+            ),
+            "index_complete": ready,
             "ready": ready,
         }
+
+    def quick_index_readiness(self) -> dict[str, object]:
+        """Return a bounded startup search gate without scanning large tables.
+
+        The full counters in :meth:`index_readiness` require several aggregate
+        scans and can take noticeable time on a cold, multi-gigabyte database.
+        Startup only needs to know whether a committed projection already
+        exists so the search controls can become usable while full statistics
+        are collected in a background thread.
+        """
+
+        try:
+            # This is a read-only gate. It must never wait behind the
+            # application writer lock: search can use the last committed
+            # projection while an index batch is being committed.
+            with self.connect_read_only(timeout_seconds=0.75) as con:
+                enabled_roots = int(
+                    con.execute(
+                        "SELECT COUNT(*) FROM roots WHERE enabled = 1"
+                    ).fetchone()[0]
+                )
+                active_runs = int(
+                    con.execute(
+                        "SELECT COUNT(*) FROM index_runs WHERE status = 'running'"
+                    ).fetchone()[0]
+                )
+                active_index_versions = int(
+                    con.execute(
+                        "SELECT COUNT(*) FROM index_versions WHERE status = 'active'"
+                    ).fetchone()[0]
+                )
+                state_rows = {
+                    str(row["key"]): str(row["value"])
+                    for row in con.execute(
+                        """
+                        SELECT key, value FROM index_state
+                        WHERE key IN (
+                            'content_fts_dirty',
+                            'search_projection_generation',
+                            'search_projection_updated_at',
+                            'partial_search_projection_active'
+                        )
+                        """
+                    )
+                }
+                has_blocks = bool(
+                    con.execute(
+                        "SELECT 1 FROM content_blocks LIMIT 1"
+                    ).fetchone()
+                )
+        except sqlite3.OperationalError as exc:
+            if _is_database_busy(exc):
+                if self._quick_readiness_cache is not None:
+                    cached = dict(self._quick_readiness_cache)
+                    cached["readiness_stale"] = True
+                    cached["readiness_degraded"] = True
+                    return cached
+                # A rollback-journal database can briefly reject even a
+                # read-only probe while a writer is committing.  Do not turn
+                # that short window into a foreground search failure.  The
+                # actual search uses its own read-only connection and will
+                # either see the last committed projection or report a real
+                # query error through the worker without a modal dialog.
+                if self.db_path.is_file():
+                    return {
+                        "enabled_roots": 0,
+                        "active_runs": 1,
+                        "active_index_versions": 0,
+                        "content_fts_dirty": False,
+                        "search_projection_generation": 0,
+                        "search_projection_updated_at": "",
+                        "partial_search_projection_active": True,
+                        "search_available": True,
+                        "search_is_partial": True,
+                        "index_complete": False,
+                        "ready": False,
+                        "startup_snapshot_pending": True,
+                        "readiness_degraded": True,
+                        "complete_files": 0,
+                        "eligible_files": 0,
+                        "blocking_files": 0,
+                        "video_excluded": 0,
+                        "manual_excluded_files": 0,
+                    }
+            raise
+        try:
+            generation = max(
+                0,
+                int(state_rows.get("search_projection_generation", "0")),
+            )
+        except (TypeError, ValueError):
+            generation = 0
+        content_fts_dirty = state_rows.get("content_fts_dirty") == "1"
+        partial_active = (
+            state_rows.get("partial_search_projection_active") == "1"
+        )
+        committed_projection = bool(
+            generation > 0 or active_index_versions > 0 or has_blocks
+        )
+        search_available = bool(
+            enabled_roots > 0
+            and (
+                partial_active
+                or (not content_fts_dirty and committed_projection)
+            )
+        )
+        result = {
+            "enabled_roots": enabled_roots,
+            "active_runs": active_runs,
+            "active_index_versions": active_index_versions,
+            "content_fts_dirty": content_fts_dirty,
+            "search_projection_generation": generation,
+            "search_projection_updated_at": state_rows.get(
+                "search_projection_updated_at",
+                "",
+            ),
+            "partial_search_projection_active": partial_active,
+            "search_available": search_available,
+            "search_is_partial": search_available,
+            "index_complete": False,
+            "ready": False,
+            "startup_snapshot_pending": True,
+            "complete_files": 0,
+            "eligible_files": 0,
+            "blocking_files": 0,
+            "video_excluded": 0,
+            "manual_excluded_files": 0,
+        }
+        self._quick_readiness_cache = dict(result)
+        return result
 
     def add_search_history(self, query_text: str, max_entries: int = 50) -> None:
         text = query_text.strip()

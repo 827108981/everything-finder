@@ -10,6 +10,13 @@ class SearchHit:
     context: str
     hit_count: int
     source_type: str
+    page_number: int | None = None
+    slide_number: int | None = None
+    sheet_name: str | None = None
+    cell_start: str | None = None
+    cell_end: str | None = None
+    line_start: int | None = None
+    line_end: int | None = None
     ocr_confidence: float | None = None
     is_fuzzy: bool = False
 
@@ -29,6 +36,13 @@ class SearchResult:
     source_type: str
     parse_status: str
     score: float
+    page_number: int | None = None
+    slide_number: int | None = None
+    sheet_name: str | None = None
+    cell_start: str | None = None
+    cell_end: str | None = None
+    line_start: int | None = None
+    line_end: int | None = None
     ocr_confidence: float | None = None
     has_fuzzy_match: bool = False
     matches: list[SearchHit] = field(default_factory=list)

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import html
+import re
 from datetime import datetime
 
-from PySide6.QtCore import Signal, Qt
+from PySide6.QtCore import QUrl, Signal, Qt
 from PySide6.QtGui import QPixmap, QTextOption
 from PySide6.QtWidgets import (
     QApplication,
@@ -12,18 +14,23 @@ from PySide6.QtWidgets import (
     QLabel,
     QPushButton,
     QSizePolicy,
-    QTextEdit,
+    QTextBrowser,
     QVBoxLayout,
 )
 
 from local_full_text_search.config.constants import IMAGE_EXTENSIONS
 from local_full_text_search.models.search_result import SearchResult
-from local_full_text_search.ui.result_view import render_context_html
+from local_full_text_search.ui.result_view import (
+    highlight_context,
+    hit_label,
+    result_hits,
+)
 
 
 class PreviewPanel(QFrame):
     open_file_requested = Signal(str)
     open_folder_requested = Signal(str)
+    open_location_requested = Signal(str, object)
     close_requested = Signal()
 
     def __init__(self) -> None:
@@ -32,6 +39,9 @@ class PreviewPanel(QFrame):
         self.setMinimumWidth(360)
         self.setMaximumWidth(560)
         self.current_path: str | None = None
+        self._current_result: SearchResult | None = None
+        self._query_text = ""
+        self._visible_hit_indexes: list[int] = []
 
         heading = QLabel("文件预览")
         heading.setObjectName("PreviewHeading")
@@ -59,12 +69,13 @@ class PreviewPanel(QFrame):
         self.image.setObjectName("PreviewImage")
         self.image.setVisible(False)
 
-        self.context = QTextEdit()
+        self.context = QTextBrowser()
         self.context.setObjectName("PreviewContext")
         self.context.setReadOnly(True)
+        self.context.setOpenLinks(False)
         self.context.setMinimumHeight(260)
         self.context.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self.context.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
+        self.context.setLineWrapMode(QTextBrowser.LineWrapMode.WidgetWidth)
         self.context.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         option = QTextOption()
         option.setWrapMode(QTextOption.WrapMode.WrapAnywhere)
@@ -98,10 +109,13 @@ class PreviewPanel(QFrame):
         self.open_button.clicked.connect(self._open_file)
         self.open_folder_button.clicked.connect(self._open_folder)
         self.copy_path_button.clicked.connect(self._copy_path)
+        self.context.anchorClicked.connect(self._handle_link)
 
     def show_result(self, result: SearchResult | None, query_text: str = "") -> None:
         if result is None:
             self.current_path = None
+            self._current_result = None
+            self._visible_hit_indexes = []
             self.title.setText("选择一个搜索结果")
             self.meta.setText("单击结果后显示命中位置和上下文")
             self.context.clear()
@@ -109,6 +123,8 @@ class PreviewPanel(QFrame):
             self.image.setVisible(False)
             return
         self.current_path = result.file_path
+        self._current_result = result
+        self._query_text = query_text
         modified = datetime.fromtimestamp(result.modified_time).strftime("%Y-%m-%d %H:%M")
         self.title.setText(result.filename)
         type_text = result.extension.upper().lstrip(".") or "文件"
@@ -116,9 +132,7 @@ class PreviewPanel(QFrame):
         self.meta.setText(
             f"{type_text} · {format_size(result.size_bytes)} · {modified}{confidence}\n{result.location_text}\n{wrap_path(result.file_path)}"
         )
-        self.context.setHtml(
-            render_context_html(result, query_text, expanded=True)
-        )
+        self.context.setHtml(self._render_context_html())
         self._load_image_preview(result.file_path, result.extension)
 
     def _load_image_preview(self, file_path: str, extension: str) -> None:
@@ -140,6 +154,32 @@ class PreviewPanel(QFrame):
     def _open_folder(self) -> None:
         if self.current_path:
             self.open_folder_requested.emit(self.current_path)
+
+    def _render_context_html(self) -> str:
+        result = self._current_result
+        if result is None:
+            self._visible_hit_indexes = []
+            return ""
+        hits = result_hits(result)
+        visible = hits
+        self._visible_hit_indexes = list(range(len(hits)))
+        parts: list[str] = []
+        for index, hit in zip(self._visible_hit_indexes, visible):
+            label = html.escape(hit_label(hit))
+            context = highlight_context(hit.context or "文件名/路径命中", self._query_text)
+            parts.append(
+                f'<a href="hit:{index}" style="color:#1769E0;text-decoration:none;">{label}</a><br>{context}'
+            )
+        return "<br><br>".join(parts)
+
+    def _handle_link(self, url: QUrl) -> None:
+        match = re.fullmatch(r"hit:(\d+)", url.toString())
+        if not match or self._current_result is None:
+            return
+        index = int(match.group(1))
+        hits = result_hits(self._current_result)
+        if 0 <= index < len(hits):
+            self.open_location_requested.emit(self._current_result.file_path, hits[index])
 
     def _copy_path(self) -> None:
         if self.current_path:

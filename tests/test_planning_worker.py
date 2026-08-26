@@ -14,11 +14,13 @@ from local_full_text_search.core.errors import PlanningNoProgressError
 from local_full_text_search.core.planning_worker import (
     PlanningProgressReporter,
     RecoverablePlanningRunner,
+    _read_progress,
 )
 from local_full_text_search.core.run_control import (
     request_process_pause,
     resume_processes,
 )
+from local_full_text_search.core.planning_tasks import _raise_walk_error
 from local_full_text_search.core.task_manager import ProcessRunControlToken
 
 
@@ -350,3 +352,36 @@ def test_s0_01r_force_cancel_terminates_active_planning_process(
     assert finished.wait(3)
     thread.join(timeout=1)
     assert runner.active_pids == ()
+
+
+def test_progress_replace_permission_denial_keeps_a_readable_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    progress_path = tmp_path / "progress.json"
+    original_replace = Path.replace
+
+    def deny_fixed_progress_replace(source: Path, target: Path) -> Path:
+        if Path(target) == progress_path:
+            raise PermissionError(5, "access denied", str(target))
+        return original_replace(source, target)
+
+    monkeypatch.setattr(Path, "replace", deny_fixed_progress_replace)
+    reporter = PlanningProgressReporter(progress_path)
+
+    reporter.advance(
+        phase="content_hash",
+        completed=3,
+        total=10,
+        cursor="file:3",
+        bytes_read=4096,
+    )
+
+    snapshot = _read_progress(progress_path)
+    assert snapshot is not None
+    assert snapshot.completed == 3
+    assert snapshot.cursor == "file:3"
+
+
+def test_directory_walk_permission_error_is_nonfatal() -> None:
+    _raise_walk_error(PermissionError(5, "access denied", r"C:\blocked"))

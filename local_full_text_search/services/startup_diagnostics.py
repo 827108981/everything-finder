@@ -259,12 +259,9 @@ class StartupDiagnostics:
                 "STAGE_SLOW",
                 {"stage": expected_stage, "elapsed_seconds": elapsed_seconds},
             )
-        self.show_native_error(
-            "本地全文搜索仍在启动",
-            f"当前阶段：{expected_stage}\n"
-            f"已等待约 {elapsed_seconds} 秒。\n\n"
-            f"程序仍在尝试启动；如持续无窗口，请提供诊断日志：\n{self.log_path}",
-        )
+        # A slow stage is diagnostic information, not a startup failure.  A
+        # modal native dialog hides the GUI and makes a recoverable startup
+        # look broken.  The UI reports the non-blocking status after it shows.
 
     def _cancel_timer_locked(self) -> None:
         if self._timer is not None:

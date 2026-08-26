@@ -164,6 +164,9 @@ class IndexRunMetrics:
     discovered_bytes: int = 0
     scan_ms: int = 0
     fingerprint_ms: int = 0
+    planning_metadata_ms: int = 0
+    fingerprint_compute_ms: int = 0
+    zip_member_prepare_ms: int = 0
     parse_ms_by_lane: dict[str, int] = field(default_factory=dict)
     lane_input_bytes: dict[str, int] = field(default_factory=dict)
     lane_output_blocks: dict[str, int] = field(default_factory=dict)
@@ -181,6 +184,7 @@ class IndexRunMetrics:
     dedup_verified_source_count: int = 0
     dedup_parse_avoided_count: int = 0
     dedup_bytes_avoided: int = 0
+    dedup_strategy_metrics: dict[str, object] = field(default_factory=dict)
     source_open_count: int = 0
     source_bytes_read: int = 0
     full_hash_count: int = 0

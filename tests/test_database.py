@@ -212,6 +212,42 @@ class DatabaseIndexSearchTests(unittest.TestCase):
             db.clear_search_history()
             self.assertEqual(db.search_history(), [])
 
+    def test_failed_file_scopes_are_paginated_with_true_totals(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = base / "files"
+            root.mkdir()
+            paths = []
+            for index in range(5):
+                path = root / f"failed-{index}.txt"
+                path.write_text(f"failure {index}", encoding="utf-8")
+                paths.append(path)
+            db = DatabaseManager(base / "index.db")
+            db.initialize()
+            root_id = db.add_root(root)
+            file_ids = [db.upsert_file_metadata(root_id, path)[0] for path in paths]
+            with db.connect() as con:
+                con.executemany(
+                    "UPDATE files SET parse_status = 'failed' WHERE id = ?",
+                    [(file_id,) for file_id in file_ids],
+                )
+
+            db.exclude_files_from_index(
+                [file_ids[0]],
+                reason="pagination test",
+            )
+            totals = db.failed_file_counts()
+            self.assertEqual(totals["blocking"], 4)
+            self.assertEqual(totals["excluded"], 1)
+            self.assertEqual(
+                len(db.failed_files(limit=2, offset=2)),
+                2,
+            )
+            self.assertEqual(
+                len(db.excluded_files(limit=1, offset=0)),
+                1,
+            )
+
     def test_diagnostic_task_updates_skip_a_busy_database_quickly(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -501,3 +537,47 @@ def test_latest_schema_has_task_leases_pdf_ocr_versions_and_scope_tables(
         "backend_benchmarks",
         "index_scope_exclusions",
     } <= tables
+
+
+def test_p0_content_hashes_can_be_persisted_as_one_batch(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "files"
+    root.mkdir()
+    first = root / "first.txt"
+    second = root / "second.txt"
+    first.write_text("first", encoding="utf-8")
+    second.write_text("second", encoding="utf-8")
+    database = DatabaseManager(tmp_path / "batch-hash.db")
+    database.initialize()
+    root_id = database.add_root(root)
+    metadata = [
+        PreparedFileMetadata(
+            path=str(path),
+            size_bytes=path.stat().st_size,
+            modified_time=path.stat().st_mtime,
+            created_time=path.stat().st_ctime,
+            modified_time_ns=path.stat().st_mtime_ns,
+        )
+        for path in (first, second)
+    ]
+    prepared, errors = database.upsert_precomputed_file_metadata_many(
+        root_id,
+        metadata,
+        retry_failed_files=False,
+        compute_full_hash=False,
+        mark_processing=False,
+        parser_versions={str(first): "test-v1", str(second): "test-v1"},
+    )
+    assert errors == []
+    ids = {str(path): file_id for path, file_id, _changed in prepared}
+
+    written = database.set_content_hash_full_many(
+        [(ids[str(first)], "a" * 64), (ids[str(second)], "b" * 64)]
+    )
+
+    assert written == 2
+    assert database.file_content_states([ids[str(first)], ids[str(second)]]) == {
+        ids[str(first)]: ("a" * 64, None),
+        ids[str(second)]: ("b" * 64, None),
+    }

@@ -107,7 +107,7 @@ class RuntimeResourceController:
         )
         if resize_allowed:
             if candidate == "underutilized":
-                desired = min(2, self.ocr_hard_max)
+                desired = min(3, self.ocr_hard_max)
             elif candidate in {
                 "memory_pressure",
                 "cpu_pressure",

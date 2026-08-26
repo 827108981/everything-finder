@@ -9,6 +9,7 @@ from local_full_text_search.core.planning_tasks import (
     PreparedFileMetadata,
     discover_file_batches,
     fingerprint_source,
+    prepare_zip_member_batch_task,
     prepare_zip_member_task,
     scan_pdf_document_task,
     scan_zip_manifest_task,
@@ -139,6 +140,35 @@ def test_physical_source_hash_can_avoid_redundant_spool_copy(
     assert not list((tmp_path / "spool").glob("*"))
 
 
+def test_low_cost_fingerprint_uses_metadata_for_non_candidate_source(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "cheap.txt"
+    source.write_text("LOW_COST_FINGERPRINT", encoding="utf-8")
+    runner = RecoverablePlanningRunner(
+        tmp_path / "control-low-cost",
+        no_progress_timeout_seconds=2,
+        startup_timeout_seconds=2,
+    )
+
+    result = runner.run(
+        "content_hash-low-cost",
+        fingerprint_source,
+        source,
+        tmp_path / "spool",
+        False,
+        None,
+        False,
+        True,
+    )
+
+    assert result.fingerprint.method == "metadata"
+    assert result.fingerprint.key.startswith("metadata:")
+    assert result.bytes_read == 0
+    assert result.spool_path is None
+    assert not list((tmp_path / "spool").glob("*"))
+
+
 def test_pdf_scan_uses_meaningful_text_for_ocr_classification(
     tmp_path: Path,
 ) -> None:
@@ -231,3 +261,38 @@ def test_s0_01r_zip_member_prepare_streams_to_atomic_spool(
     assert result.sha256
     assert progress[-1].phase == "zip_member_prepare"
     assert progress[-1].bytes_read == len(payload)
+
+
+def test_p0_zip_member_batch_reuses_one_archive_open(
+    tmp_path: Path,
+) -> None:
+    archive = tmp_path / "batch.zip"
+    first = b"first member" * 1024
+    second = b"second member" * 2048
+    with zipfile.ZipFile(archive, "w") as output:
+        output.writestr("first.txt", first)
+        output.writestr("second.txt", second)
+    with zipfile.ZipFile(archive) as source:
+        infos = source.infolist()
+    runner = RecoverablePlanningRunner(
+        tmp_path / "batch-control",
+        no_progress_timeout_seconds=2,
+        startup_timeout_seconds=2,
+    )
+
+    result = runner.run(
+        "zip_member_prepare_batch",
+        prepare_zip_member_batch_task,
+        archive,
+        (
+            (0, "first.txt", len(first), int(infos[0].CRC), ".txt"),
+            (1, "second.txt", len(second), int(infos[1].CRC), ".txt"),
+        ),
+        tmp_path / "batch-spool",
+    )
+
+    assert len(result.items) == 2
+    assert result.items[0].result is not None
+    assert result.items[1].result is not None
+    assert result.items[0].result.spool_path.read_bytes() == first
+    assert result.items[1].result.spool_path.read_bytes() == second

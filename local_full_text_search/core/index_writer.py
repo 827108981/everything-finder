@@ -10,6 +10,10 @@ from typing import Any, Callable
 
 from local_full_text_search.core.database import DatabaseManager
 from local_full_text_search.core.errors import CancelledError
+from local_full_text_search.core.foreground_activity import (
+    begin_index_write,
+    end_index_write,
+)
 from local_full_text_search.core.task_manager import CancelToken
 
 logger = logging.getLogger(__name__)
@@ -42,9 +46,13 @@ class IndexWriter:
     ) -> None:
         self.db = db
         self.update_fts = bool(update_fts)
-        self.batch_blocks = max(1, int(batch_blocks))
-        self.batch_bytes = max(1024, int(batch_bytes))
-        self.max_delay = max(0.01, int(max_delay_ms) / 1000)
+        # Keep the writer's transaction bounded even when old settings carry
+        # multi-thousand-block batches. Large FTS transactions were the main
+        # source of search/index contention; the parser queue still provides
+        # throughput between these small commits.
+        self.batch_blocks = max(1, min(500, int(batch_blocks)))
+        self.batch_bytes = max(1024, min(1024 * 1024, int(batch_bytes)))
+        self.max_delay = max(0.01, min(0.5, int(max_delay_ms) / 1000))
         self.on_written = on_written
         self.summary = WriterSummary()
         self._queue: queue.Queue[object] = queue.Queue(maxsize=max(2, int(queue_size)))
@@ -160,6 +168,11 @@ class IndexWriter:
         if not artifacts:
             return
         started = time.perf_counter()
+        # Reserve the writer side atomically with the search lease. This
+        # closes the race where a lease is granted between the idle check and
+        # the SQLite transaction start.
+        if not begin_index_write(cancel_event=self._aborted):
+            return
         self._flushing.set()
         try:
             items = [self._to_item(artifact) for artifact in artifacts]
@@ -191,6 +204,7 @@ class IndexWriter:
                 self.on_written(artifacts, elapsed_ms)
         finally:
             self._flushing.clear()
+            end_index_write()
 
     @staticmethod
     def _to_item(artifact: Any) -> dict[str, Any]:

@@ -7,11 +7,15 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QVBoxLayout
+from PySide6.QtWidgets import QApplication, QMessageBox, QVBoxLayout
 
+from local_full_text_search.core.database import DatabaseManager
+from local_full_text_search.config.defaults import AppSettings
 from local_full_text_search.ui.main_window import (
     FailedPage,
     IndexPage,
+    SearchPage,
+    SettingsPage,
     format_index_scope_status,
     format_active_phase,
     format_remaining_single,
@@ -74,6 +78,27 @@ def test_pdf_lane_ocr_phase_is_labeled_as_ocr_runtime() -> None:
     assert page.task_phase.text() == "OCR 批量识别文字区域"
 
 
+def test_planning_progress_exposes_discovered_and_planned_counts() -> None:
+    _app()
+    page = IndexPage()
+    page.set_scan_progress(
+        0,
+        1023,
+        0,
+        r"E:\qq聊天记录\Emoji\18.png",
+        phase_label="正在流水分析并解析已发现文件",
+        planning_phase="directory_enumeration",
+        planning_completed=384,
+        planning_total=0,
+        discovered_files=1023,
+        indeterminate=True,
+    )
+
+    assert "已完成 0/1,023" in page.task_label.text()
+    assert page.task_units.text() == "发现 1,023"
+    assert "18.png" in page.task_file.text()
+
+
 def test_active_phase_has_readable_labels_and_safe_fallback() -> None:
     assert format_active_phase("pdf_ocr_tile_detect") == "OCR 分块检测文字区域"
     assert (
@@ -88,6 +113,32 @@ def test_single_eta_never_displays_a_range() -> None:
     assert format_remaining_single(40, True) == "预计剩余约 40 秒"
     assert format_remaining_single(601, True) == "预计剩余约 11 分钟"
     assert "-" not in format_remaining_single(601, True)
+
+
+def test_partial_index_availability_keeps_search_controls_enabled() -> None:
+    _app()
+    page = SearchPage(AppSettings())
+    page.set_stats(
+        {"complete_files": 50, "eligible_files": 100},
+        has_roots=True,
+    )
+    page.set_index_ready(
+        True,
+        {
+            "ready": False,
+            "index_complete": False,
+            "search_available": True,
+            "search_is_partial": True,
+            "active_runs": 1,
+            "complete_files": 50,
+            "eligible_files": 100,
+            "blocking_files": 50,
+        },
+    )
+
+    assert page.index_ready() is True
+    assert page.search_box.isEnabled()
+    assert page.mode_combo.isEnabled()
 
 
 def test_mode_switch_is_enabled_only_after_safe_pause_confirmation() -> None:
@@ -125,6 +176,34 @@ def test_performance_mode_notice_discloses_aggressive_idle_resource_use() -> Non
     assert "CPU" in notice
     assert "内存" in notice
     assert "自动降低" in notice
+
+
+def test_settings_page_exposes_guarded_database_migration_controls(tmp_path) -> None:
+    _app()
+    database_path = tmp_path / "data" / "search_index.db"
+    _initialized = DatabaseManager(database_path)
+    _initialized.initialize()
+    page = SettingsPage(AppSettings())
+    page.set_database_info(database_path)
+
+    assert str(database_path.resolve()) in page.database_path_value.text()
+    assert page.database_path_value.toolTip() == str(database_path.resolve())
+    assert "schema v" in page.database_schema_value.text()
+    assert page.database_choose_button.text() == "选择目录"
+    assert page.database_migrate_button.text() == "迁移数据库"
+    assert not page.database_migrate_button.isEnabled()
+    assert page.settings_content.maximumWidth() == 1100
+
+    page.database_copy_button.click()
+    assert QApplication.clipboard().text() == str(database_path.resolve())
+
+    page.database_target.setText(str(tmp_path / "new-data"))
+    page._refresh_database_actions()
+    assert page.database_migrate_button.isEnabled()
+
+    page.set_database_migration_running(True)
+    assert not page.database_migrate_button.isEnabled()
+    assert not page.database_cancel_button.isHidden()
 def test_u0_01v_declares_every_required_high_dpi_layout_case() -> None:
     assert INDEX_STATUS_LAYOUT_CASES == (
         (1280, 800, 1.00, "ocr_running"),
@@ -217,12 +296,17 @@ def test_fts_02r_failed_page_separates_scope_states_and_supports_bulk_actions() 
     }
 
     page.set_rows([blocking], [excluded], [metadata])
+    page.set_readiness(
+        {"ready": False, "repairable": True, "not_ready_reasons": ["blocking_files"]}
+    )
 
     assert page.scope_tabs.tabText(0) == "阻断项 1"
     assert page.scope_tabs.tabText(1) == "已人工排除 1"
     assert page.scope_tabs.tabText(2) == "仅元数据完成 1"
+    assert page.exclude_button.isEnabled()
     checkbox = page.table.item(0, 0)
     checkbox.setCheckState(Qt.CheckState.Checked)
+    assert page.exclude_button.isEnabled()
     page.exclude_button.click()
     assert excluded_ids == [[11]]
 
@@ -246,7 +330,7 @@ def test_failed_page_exposes_force_complete_control() -> None:
     app.processEvents()
     assert page.force_complete_button.isHidden() is False
     assert page.force_complete_button.isEnabled() is False
-    assert page.force_complete_button.toolTip() == "当前索引已经就绪"
+    assert page.force_complete_button.toolTip() == "当前没有未成功索引项，无法执行此操作"
 
     page.set_rows(
         [
@@ -269,7 +353,7 @@ def test_failed_page_exposes_force_complete_control() -> None:
     page.show()
     app.processEvents()
 
-    assert page.force_complete_button.text() == "强力完成本次索引"
+    assert page.force_complete_button.text() == "保底完成并开放搜索"
     assert page.force_complete_button.isHidden() is False
     button_bottom = page.force_complete_button.mapTo(
         page,
@@ -283,9 +367,58 @@ def test_failed_page_exposes_force_complete_control() -> None:
     assert page.force_complete_button.isEnabled() is False
     assert "正在运行" in page.force_complete_button.toolTip()
     page.set_index_running(False)
+    page.table.item(0, 0).setCheckState(Qt.CheckState.Checked)
     page.force_complete_button.click()
     assert requests == [True]
     page.close()
+
+
+def test_failed_page_always_explains_actions_and_disables_processing_when_ready() -> None:
+    _app()
+    page = FailedPage()
+    guide_text = " ".join(label.text() for label in page.guide_labels)
+
+    assert "只重新解析，不会排除文件" in guide_text
+    assert "源文件不会被删除" in guide_text
+    assert "保底完成并开放搜索" in guide_text
+    assert page.retry_button.objectName() != "PrimaryButton"
+    assert page.force_complete_button.objectName() == "PrimaryButton"
+
+    page.set_rows([])
+    page.set_readiness({"ready": True, "repairable": False})
+    assert page.recommendation_label.text() == "当前索引已完成，可以正常搜索，无需处理。"
+    assert not page.retry_button.isEnabled()
+    assert not page.exclude_button.isEnabled()
+    assert not page.force_complete_button.isEnabled()
+
+
+def test_failed_page_toolbar_aligns_groups_and_wraps_only_on_narrow_pages() -> None:
+    app = _app()
+    page = FailedPage()
+    page.resize(1700, 800)
+    page.show()
+    app.processEvents()
+
+    filter_index = page.action_toolbar_layout.indexOf(page.filter_group)
+    action_index = page.action_toolbar_layout.indexOf(page.action_group)
+    filter_row, _, _, _ = page.action_toolbar_layout.getItemPosition(filter_index)
+    action_row, _, _, _ = page.action_toolbar_layout.getItemPosition(action_index)
+    assert filter_row == action_row == 0
+    assert page.filter_group.geometry().center().y() == page.action_group.geometry().center().y()
+
+    page.close()
+
+    narrow_page = FailedPage()
+    narrow_page.resize(800, 800)
+    narrow_page.show()
+    app.processEvents()
+    filter_index = narrow_page.action_toolbar_layout.indexOf(narrow_page.filter_group)
+    action_index = narrow_page.action_toolbar_layout.indexOf(narrow_page.action_group)
+    filter_row, _, _, _ = narrow_page.action_toolbar_layout.getItemPosition(filter_index)
+    action_row, _, _, _ = narrow_page.action_toolbar_layout.getItemPosition(action_index)
+    assert filter_row == 0
+    assert action_row == 1
+    narrow_page.close()
 
 
 def test_failed_page_enables_force_complete_for_zero_blocker_repair() -> None:
@@ -307,10 +440,77 @@ def test_failed_page_enables_force_complete_for_zero_blocker_repair() -> None:
     app.processEvents()
 
     assert page.force_complete_button.isHidden() is False
-    assert page.force_complete_button.isEnabled() is True
-    assert "残留解析任务" in page.force_complete_button.toolTip()
-    assert "全文索引待发布" in page.force_complete_button.toolTip()
+    assert page.force_complete_button.isEnabled() is False
+    assert "没有可选择的未成功索引项" in page.force_complete_button.toolTip()
+    assert "没有失败文件" in page.recommendation_label.text()
     page.close()
+
+
+def test_failed_page_requires_selection_for_all_three_processing_actions(monkeypatch) -> None:
+    _app()
+    page = FailedPage()
+    page.set_rows(
+        [
+            {
+                "id": 51,
+                "path": r"E:\scope\failed.txt",
+                "filename": "failed.txt",
+                "extension": ".txt",
+                "parse_status": "failed",
+            }
+        ]
+    )
+    page.set_readiness({"ready": False, "repairable": True, "not_ready_reasons": ["blocking_files"]})
+    messages: list[str] = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "information",
+        lambda _parent, _title, message: messages.append(str(message)),
+    )
+
+    page.retry_button.click()
+    page.exclude_button.click()
+    page.force_complete_button.click()
+
+    assert messages == [
+        "请先勾选需要处理的未成功索引项。",
+        "请先勾选需要处理的未成功索引项。",
+        "请先勾选需要处理的未成功索引项。",
+    ]
+
+
+def test_failed_page_does_not_show_red_until_snapshot_is_stable() -> None:
+    _app()
+    page = FailedPage()
+    page.set_rows(
+        [
+            {
+                "id": 52,
+                "path": r"E:\scope\pending.txt",
+                "filename": "pending.txt",
+                "extension": ".txt",
+                "parse_status": "failed_retryable",
+            }
+        ]
+    )
+    page.set_readiness(
+        {
+            "ready": False,
+            "repairable": True,
+            "failure_alert_ready": True,
+            "not_ready_reasons": ["blocking_files"],
+        }
+    )
+    page.show()
+    _app().processEvents()
+
+    page.set_snapshot_loading(True)
+    assert page.risk_banner.isVisible() is False
+    assert page.subtitle.property("state") != "error"
+
+    page.set_snapshot_loading(False)
+    assert page.risk_banner.isVisible() is True
+    assert page.subtitle.property("state") == "error"
 
 
 def test_fts_02r_scope_completion_status_discloses_manual_exclusions() -> None:

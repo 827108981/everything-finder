@@ -6,37 +6,47 @@ from pathlib import Path
 from PIL import Image
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
+from reportlab.lib.utils import ImageReader
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.pdfgen.canvas import Canvas
-from reportlab.lib.utils import ImageReader
 
 
 PAGE_WIDTH, PAGE_HEIGHT = A4
 MARGIN_X = 48
-TOP_Y = PAGE_HEIGHT - 54
-BOTTOM_Y = 42
+CONTENT_WIDTH = PAGE_WIDTH - 2 * MARGIN_X
+TOP_Y = PAGE_HEIGHT - 50
+BOTTOM_Y = 46
+
 BLUE = colors.HexColor("#2563EB")
-DEEP_BLUE = colors.HexColor("#153E75")
+BLUE_DARK = colors.HexColor("#173B72")
 INK = colors.HexColor("#172033")
-MUTED = colors.HexColor("#596579")
+MUTED = colors.HexColor("#617086")
+LINE = colors.HexColor("#DCE3EC")
+PANEL = colors.HexColor("#F5F7FA")
 PALE_BLUE = colors.HexColor("#EFF6FF")
 PALE_GREEN = colors.HexColor("#ECFDF5")
 PALE_AMBER = colors.HexColor("#FFFBEB")
-BORDER = colors.HexColor("#D8E0EA")
-PANEL = colors.HexColor("#F7F9FC")
-VERSION = "1.3.7"
-GUIDE_DATE = "2026 年 8 月 3 日"
-PAGE_TOTAL = 10
+PALE_RED = colors.HexColor("#FEF2F2")
+WHITE = colors.white
+
+VERSION = "1.5.0"
+GUIDE_DATE = "2026 年 8 月 14 日"
+PAGE_TOTAL = 8
+SCREENSHOT_CAPTION = "当前版本真实界面，内容为演示数据"
 
 
 def register_fonts() -> None:
-    regular = Path(r"C:\Windows\Fonts\msyh.ttc")
-    bold = Path(r"C:\Windows\Fonts\msyhbd.ttc")
-    if not regular.exists() or not bold.exists():
-        raise FileNotFoundError("Microsoft YaHei fonts are required to build the guide")
-    pdfmetrics.registerFont(TTFont("GuideSans", str(regular)))
-    pdfmetrics.registerFont(TTFont("GuideSans-Bold", str(bold)))
+    candidates = (
+        (Path(r"C:\Windows\Fonts\Deng.ttf"), Path(r"C:\Windows\Fonts\Dengb.ttf")),
+        (Path(r"C:\Windows\Fonts\msyh.ttc"), Path(r"C:\Windows\Fonts\msyhbd.ttc")),
+    )
+    for regular, bold in candidates:
+        if regular.exists() and bold.exists():
+            pdfmetrics.registerFont(TTFont("GuideSans", str(regular)))
+            pdfmetrics.registerFont(TTFont("GuideSans-Bold", str(bold)))
+            return
+    raise FileNotFoundError("A Chinese TrueType font is required to build the guide")
 
 
 def wrap_text(text: str, font: str, size: float, width: float) -> list[str]:
@@ -63,72 +73,88 @@ class Guide:
         self.output = output
         self.assets = assets
         self.canvas = Canvas(str(output), pagesize=A4, pageCompression=1)
+        self.canvas.setTitle("本地多格式全文搜索工具 - 图文使用说明")
+        self.canvas.setAuthor("本地多格式全文搜索工具")
+        self.canvas.setSubject("版本 1.5.0 的安装、索引、搜索、暂停、故障处理和数据库迁移说明")
+        self.canvas.setKeywords("本地全文搜索, OCR, PDF, Office, 索引, 使用说明")
         self.page_number = 0
 
-    def new_page(self, title: str, subtitle: str = "") -> float:
+    def begin_page(self, title: str, subtitle: str) -> float:
         if self.page_number:
             self.canvas.showPage()
         self.page_number += 1
-        self.canvas.setFillColor(DEEP_BLUE)
-        self.canvas.setFont("GuideSans-Bold", 21)
+        self.canvas.setFillColor(BLUE_DARK)
+        self.canvas.setFont("GuideSans-Bold", 19)
         self.canvas.drawString(MARGIN_X, TOP_Y, title)
-        if subtitle:
-            self.canvas.setFillColor(MUTED)
-            self.canvas.setFont("GuideSans", 9.5)
-            self.canvas.drawString(MARGIN_X, TOP_Y - 20, subtitle)
-        self.canvas.setStrokeColor(BORDER)
-        self.canvas.line(MARGIN_X, TOP_Y - 31, PAGE_WIDTH - MARGIN_X, TOP_Y - 31)
+        self.canvas.setFillColor(MUTED)
+        self.canvas.setFont("GuideSans", 9.3)
+        self.canvas.drawString(MARGIN_X, TOP_Y - 21, subtitle)
+        self.canvas.setStrokeColor(LINE)
+        self.canvas.line(MARGIN_X, TOP_Y - 34, PAGE_WIDTH - MARGIN_X, TOP_Y - 34)
         return TOP_Y - 55
 
     def footer(self) -> None:
         self.canvas.setFillColor(MUTED)
         self.canvas.setFont("GuideSans", 8)
-        self.canvas.drawString(MARGIN_X, 24, f"本地多格式全文搜索工具 · 使用说明 {VERSION}")
+        self.canvas.drawString(
+            MARGIN_X,
+            25,
+            f"本地多格式全文搜索工具 · 图文使用说明 {VERSION}",
+        )
         self.canvas.drawRightString(
-            PAGE_WIDTH - MARGIN_X, 24, f"{self.page_number} / {PAGE_TOTAL}"
+            PAGE_WIDTH - MARGIN_X,
+            25,
+            f"{self.page_number} / {PAGE_TOTAL}",
         )
 
-    def heading(self, text: str, y: float) -> float:
-        self.canvas.setFillColor(INK)
-        self.canvas.setFont("GuideSans-Bold", 13)
-        self.canvas.drawString(MARGIN_X, y, text)
-        return y - 22
-
-    def paragraph(
+    def text(
         self,
-        text: str,
+        value: str,
         y: float,
         *,
         x: float = MARGIN_X,
-        width: float | None = None,
-        size: float = 10,
-        leading: float = 16,
+        width: float = CONTENT_WIDTH,
+        size: float = 9.5,
+        leading: float = 14,
         color: colors.Color = INK,
         bold: bool = False,
     ) -> float:
-        width = width or PAGE_WIDTH - 2 * MARGIN_X
         font = "GuideSans-Bold" if bold else "GuideSans"
         self.canvas.setFillColor(color)
         self.canvas.setFont(font, size)
-        for line in wrap_text(text, font, size, width):
+        for line in wrap_text(value, font, size, width):
             self.canvas.drawString(x, y, line)
             y -= leading
         return y
 
-    def bullets(self, items: list[str], y: float, *, width: float | None = None) -> float:
-        width = width or PAGE_WIDTH - 2 * MARGIN_X - 20
+    def heading(self, title: str, y: float) -> float:
+        self.canvas.setFillColor(INK)
+        self.canvas.setFont("GuideSans-Bold", 12.5)
+        self.canvas.drawString(MARGIN_X, y, title)
+        return y - 21
+
+    def bullets(
+        self,
+        items: list[str],
+        y: float,
+        *,
+        size: float = 9.4,
+        leading: float = 14,
+        gap: float = 4,
+    ) -> float:
+        width = CONTENT_WIDTH - 20
         for item in items:
             self.canvas.setFillColor(BLUE)
-            self.canvas.circle(MARGIN_X + 4, y + 3, 2.2, fill=1, stroke=0)
-            y = self.paragraph(
+            self.canvas.circle(MARGIN_X + 4, y + 3, 2.1, fill=1, stroke=0)
+            y = self.text(
                 item,
                 y,
                 x=MARGIN_X + 16,
                 width=width,
-                size=9.5,
-                leading=15,
+                size=size,
+                leading=leading,
             )
-            y -= 5
+            y -= gap
         return y
 
     def callout(
@@ -138,42 +164,55 @@ class Guide:
         y: float,
         *,
         fill: colors.Color = PALE_BLUE,
-        height: float = 70,
+        title_color: colors.Color = BLUE_DARK,
     ) -> float:
-        x = MARGIN_X
-        width = PAGE_WIDTH - 2 * MARGIN_X
+        inner_width = CONTENT_WIDTH - 28
+        body_lines = wrap_text(body, "GuideSans", 9.2, inner_width)
+        height = 39 + max(1, len(body_lines)) * 13.5
         self.canvas.setFillColor(fill)
-        self.canvas.setStrokeColor(BORDER)
-        self.canvas.roundRect(x, y - height, width, height, 8, fill=1, stroke=1)
-        self.canvas.setFillColor(DEEP_BLUE)
-        self.canvas.setFont("GuideSans-Bold", 10.5)
-        self.canvas.drawString(x + 14, y - 22, title)
-        self.paragraph(
-            body,
-            y - 41,
-            x=x + 14,
-            width=width - 28,
-            size=9,
-            leading=14,
-            color=INK,
+        self.canvas.setStrokeColor(LINE)
+        self.canvas.roundRect(MARGIN_X, y - height, CONTENT_WIDTH, height, 6, fill=1, stroke=1)
+        self.text(
+            title,
+            y - 20,
+            x=MARGIN_X + 14,
+            width=inner_width,
+            size=10.2,
+            bold=True,
+            color=title_color,
         )
-        return y - height - 14
+        self.text(
+            body,
+            y - 38,
+            x=MARGIN_X + 14,
+            width=inner_width,
+            size=9.2,
+            leading=13.5,
+        )
+        return y - height - 12
 
-    def screenshot(self, name: str, y: float, *, max_height: float = 320) -> float:
+    def screenshot(
+        self,
+        name: str,
+        y: float,
+        *,
+        max_height: float = 320,
+        caption: str = SCREENSHOT_CAPTION,
+    ) -> float:
         image_path = self.assets / name
-        if not image_path.exists():
+        if not image_path.is_file():
             raise FileNotFoundError(f"Screenshot is missing: {image_path}")
         with Image.open(image_path) as image:
             source_width, source_height = image.size
-        width = PAGE_WIDTH - 2 * MARGIN_X
+        width = CONTENT_WIDTH
         height = width * source_height / source_width
         if height > max_height:
             height = max_height
             width = height * source_width / source_height
         x = (PAGE_WIDTH - width) / 2
-        self.canvas.setFillColor(colors.white)
-        self.canvas.setStrokeColor(BORDER)
-        self.canvas.roundRect(x - 4, y - height - 4, width + 8, height + 8, 6, fill=1, stroke=1)
+        self.canvas.setFillColor(WHITE)
+        self.canvas.setStrokeColor(LINE)
+        self.canvas.roundRect(x - 3, y - height - 3, width + 6, height + 6, 5, fill=1, stroke=1)
         self.canvas.drawImage(
             ImageReader(str(image_path)),
             x,
@@ -183,339 +222,393 @@ class Guide:
             preserveAspectRatio=True,
             mask="auto",
         )
-        return y - height - 18
+        self.canvas.setFillColor(MUTED)
+        self.canvas.setFont("GuideSans", 8)
+        self.canvas.drawRightString(PAGE_WIDTH - MARGIN_X, y - height - 15, caption)
+        return y - height - 29
+
+    def numbered_steps(
+        self,
+        items: list[tuple[str, str]],
+        y: float,
+        *,
+        height: float = 82,
+    ) -> float:
+        gap = 8
+        width = (CONTENT_WIDTH - gap * (len(items) - 1)) / len(items)
+        for index, (title, body) in enumerate(items, 1):
+            x = MARGIN_X + (index - 1) * (width + gap)
+            self.canvas.setFillColor(WHITE)
+            self.canvas.setStrokeColor(LINE)
+            self.canvas.roundRect(x, y - height, width, height, 6, fill=1, stroke=1)
+            self.canvas.setFillColor(BLUE)
+            self.canvas.circle(x + 18, y - 19, 10, fill=1, stroke=0)
+            self.canvas.setFillColor(WHITE)
+            self.canvas.setFont("GuideSans-Bold", 9)
+            self.canvas.drawCentredString(x + 18, y - 22, str(index))
+            self.text(
+                title,
+                y - 22,
+                x=x + 34,
+                width=width - 43,
+                size=9.5,
+                bold=True,
+            )
+            self.text(
+                body,
+                y - 45,
+                x=x + 12,
+                width=width - 24,
+                size=8.5,
+                leading=12,
+                color=MUTED,
+            )
+        return y - height - 12
 
     def table(
         self,
         rows: list[tuple[str, str]],
         y: float,
         *,
-        first_width: float = 120,
-        row_height: float = 38,
+        label_width: float = 112,
+        min_height: float = 43,
     ) -> float:
-        x = MARGIN_X
-        width = PAGE_WIDTH - 2 * MARGIN_X
         for index, (label, value) in enumerate(rows):
-            fill = PANEL if index % 2 == 0 else colors.white
-            self.canvas.setFillColor(fill)
-            self.canvas.setStrokeColor(BORDER)
-            self.canvas.rect(x, y - row_height, width, row_height, fill=1, stroke=1)
-            self.canvas.setFillColor(DEEP_BLUE)
-            self.canvas.setFont("GuideSans-Bold", 9.5)
-            self.canvas.drawString(x + 12, y - 23, label)
-            self.paragraph(
+            value_width = CONTENT_WIDTH - label_width - 22
+            value_lines = wrap_text(value, "GuideSans", 8.9, value_width)
+            label_lines = wrap_text(label, "GuideSans-Bold", 9.1, label_width - 20)
+            height = max(
+                min_height,
+                18 + max(len(value_lines), len(label_lines)) * 12.5,
+            )
+            self.canvas.setFillColor(PANEL if index % 2 == 0 else WHITE)
+            self.canvas.setStrokeColor(LINE)
+            self.canvas.rect(MARGIN_X, y - height, CONTENT_WIDTH, height, fill=1, stroke=1)
+            self.text(
+                label,
+                y - 18,
+                x=MARGIN_X + 10,
+                width=label_width - 20,
+                size=9.1,
+                leading=12.5,
+                bold=True,
+                color=BLUE_DARK,
+            )
+            self.text(
+                value,
+                y - 18,
+                x=MARGIN_X + label_width,
+                width=value_width,
+                size=8.9,
+                leading=12.5,
+            )
+            y -= height
+        return y - 12
+
+    def mini_table(
+        self,
+        title: str,
+        rows: list[tuple[str, str]],
+        *,
+        x: float,
+        y: float,
+        width: float,
+    ) -> float:
+        self.canvas.setFillColor(INK)
+        self.canvas.setFont("GuideSans-Bold", 11.5)
+        self.canvas.drawString(x, y, title)
+        y -= 18
+        label_width = width * 0.31
+        for index, (label, value) in enumerate(rows):
+            value_width = width - label_width - 18
+            lines = max(
+                len(wrap_text(label, "GuideSans-Bold", 8.4, label_width - 14)),
+                len(wrap_text(value, "GuideSans", 8.3, value_width)),
+            )
+            height = max(38, 15 + lines * 11.5)
+            self.canvas.setFillColor(PANEL if index % 2 == 0 else WHITE)
+            self.canvas.setStrokeColor(LINE)
+            self.canvas.rect(x, y - height, width, height, fill=1, stroke=1)
+            self.text(
+                label,
+                y - 15,
+                x=x + 8,
+                width=label_width - 14,
+                size=8.4,
+                leading=11.5,
+                bold=True,
+                color=BLUE_DARK,
+            )
+            self.text(
                 value,
                 y - 15,
-                x=x + first_width,
-                width=width - first_width - 12,
-                size=9,
-                leading=13,
+                x=x + label_width,
+                width=value_width,
+                size=8.3,
+                leading=11.5,
             )
-            y -= row_height
-        return y - 26
+            y -= height
+        return y
 
     def cover(self) -> None:
         self.page_number = 1
-        self.canvas.setFillColor(colors.HexColor("#F2F7FF"))
+        self.canvas.setFillColor(colors.HexColor("#F4F7FB"))
         self.canvas.rect(0, 0, PAGE_WIDTH, PAGE_HEIGHT, fill=1, stroke=0)
+
         self.canvas.setFillColor(BLUE)
-        self.canvas.roundRect(MARGIN_X, PAGE_HEIGHT - 175, 54, 54, 13, fill=1, stroke=0)
-        self.canvas.setFillColor(colors.white)
-        self.canvas.setFont("GuideSans-Bold", 24)
-        self.canvas.drawCentredString(MARGIN_X + 27, PAGE_HEIGHT - 158, "搜")
-        self.canvas.setFillColor(DEEP_BLUE)
-        self.canvas.setFont("GuideSans-Bold", 28)
-        self.canvas.drawString(MARGIN_X, PAGE_HEIGHT - 245, "本地多格式全文搜索工具")
-        self.canvas.setFont("GuideSans-Bold", 20)
-        self.canvas.drawString(MARGIN_X, PAGE_HEIGHT - 282, "使用说明")
+        self.canvas.roundRect(MARGIN_X, PAGE_HEIGHT - 104, 42, 42, 9, fill=1, stroke=0)
+        self.canvas.setFillColor(WHITE)
+        self.canvas.setFont("GuideSans-Bold", 18)
+        self.canvas.drawCentredString(MARGIN_X + 21, PAGE_HEIGHT - 90, "搜")
+
+        self.canvas.setFillColor(BLUE_DARK)
+        self.canvas.setFont("GuideSans-Bold", 25)
+        self.canvas.drawString(MARGIN_X + 56, PAGE_HEIGHT - 82, "本地多格式全文搜索工具")
+        self.canvas.setFont("GuideSans-Bold", 16)
+        self.canvas.drawString(MARGIN_X + 56, PAGE_HEIGHT - 107, "图文使用说明")
         self.canvas.setFillColor(MUTED)
-        self.canvas.setFont("GuideSans", 11)
-        self.canvas.drawString(MARGIN_X, PAGE_HEIGHT - 315, f"适用于 {VERSION} · {GUIDE_DATE}")
-        self.canvas.setFillColor(colors.white)
-        self.canvas.setStrokeColor(BORDER)
-        self.canvas.roundRect(
-            MARGIN_X,
-            PAGE_HEIGHT - 510,
-            PAGE_WIDTH - 2 * MARGIN_X,
-            128,
-            12,
-            fill=1,
-            stroke=1,
+        self.canvas.setFont("GuideSans", 9.5)
+        self.canvas.drawRightString(
+            PAGE_WIDTH - MARGIN_X,
+            PAGE_HEIGHT - 105,
+            f"版本 {VERSION} · {GUIDE_DATE}",
         )
-        self.canvas.setFillColor(INK)
-        self.canvas.setFont("GuideSans-Bold", 12)
-        self.canvas.drawString(MARGIN_X + 20, PAGE_HEIGHT - 414, "本版本重点")
-        self.bullets(
+
+        y = PAGE_HEIGHT - 145
+        y = self.screenshot(
+            "search_results.png",
+            y,
+            max_height=306,
+            caption=SCREENSHOT_CAPTION,
+        )
+        y = self.numbered_steps(
             [
-                "首次索引完成前不可搜索，避免把未索引文件误判为“搜不到”。",
-                "人工排除在后台更新全文索引；窗口保持响应并持续显示当前阶段。",
-                "“强力完成本次索引”固定显示，可修复阻断文件或零阻断残留状态。",
-                "性能模式按当前硬件和空闲资源提高 PDF、OCR 与普通文件并发。",
+                ("添加范围", "在“索引管理”中选择要搜索的本地文件夹。"),
+                ("完成索引", "全部可解析文件完成后，搜索才会开放。"),
+                ("输入关键词", "在结果和右侧预览中查看命中与黄显。"),
             ],
-            PAGE_HEIGHT - 440,
-            width=PAGE_WIDTH - 2 * MARGIN_X - 48,
+            y,
+            height=78,
         )
-        self.canvas.setFillColor(MUTED)
-        self.canvas.setFont("GuideSans", 9)
-        self.canvas.drawString(MARGIN_X, 52, "离线运行 · 索引数据库保存在本机 · 视频文件不参与解析")
+        self.callout(
+            "完全本地运行",
+            "索引、OCR 与搜索均在本机完成，不需要联网；视频文件不解析，也不会计入解析失败。",
+            y,
+            fill=PALE_GREEN,
+        )
         self.footer()
 
     def build(self) -> None:
         self.cover()
 
-        y = self.new_page("01  首次索引", "等待全部可解析文件处理完成后，搜索功能才开放")
-        y = self.screenshot("index_ui_validation.png", y, max_height=300)
-        y = self.heading("状态条怎么读", y)
-        y = self.bullets(
+        y = self.begin_page(
+            "01  首次建立索引",
+            "先添加搜索范围，再等待全部可解析文件完成；首轮完成前搜索保持关闭",
+        )
+        y = self.screenshot("index_running.png", y, max_height=305)
+        y = self.numbered_steps(
             [
-                "第一行显示模式、完成数/总数、失败数、排除视频数、单一预计剩余时间和控制按钮。",
-                "第二行显示当前文件、OCR 已运行时间、中文阶段说明、进度单位及距上次有效进展时间。",
-                "样本不足时显示“正在估算…”。估算稳定后显示“预计剩余约 11 分钟”，不会再显示跨度很大的时间范围。",
-                "路径太长时界面只缩短文件名；鼠标悬停仍可查看完整路径。",
+                ("添加搜索范围", "点击右上角按钮，选择一个或多个本地文件夹。"),
+                ("选择运行方式", "办公时用普通模式；电脑空闲时用性能模式。"),
+                ("等待完整完成", "总数、失败数、排除视频和当前阶段会持续更新。"),
             ],
             y,
+            height=78,
         )
         self.callout(
-            "为什么索引中不能搜索？",
-            "本工具采用“完整索引后开放搜索”的规则。视频和仅元数据完成项不属于失败；确实无法解析的文件可在“未成功索引”中人工排除，排除最后一个阻断项后会自动发布索引并开放搜索。",
-            y - 2,
+            "首次索引为什么不能立即搜索？",
+            "本工具要求当前范围内全部可解析文件都完成后才开放搜索，避免用户误以为没有结果。视频会明确排除；损坏、加密或缺少转换组件的文件会进入“未成功索引”。",
+            y,
             fill=PALE_AMBER,
-            height=76,
         )
         self.footer()
 
-        y = self.new_page("02  安全暂停与模式切换", "暂停不是强杀进程：先到安全检查点，再确认“已暂停”")
-        y = self.screenshot("index_paused_ui_validation.png", y, max_height=300)
-        y = self.heading("正确操作顺序", y)
+        y = self.begin_page(
+            "02  索引状态、安全暂停与模式切换",
+            "预计时间只显示一个值；真正进入“已暂停”后才允许切换普通或性能模式",
+        )
+        y = self.screenshot("index_paused.png", y, max_height=300)
         y = self.table(
             [
-                ("1. 点击暂停", "界面先显示“正在暂停…”，立即停止提交新文件。"),
-                ("2. 等待已暂停", "活动任务完成当前页、OCR 区域或安全检查点；此时 CPU、磁盘活动应接近零。"),
-                ("3. 切换模式", "只有“已暂停”时，普通模式与性能模式按钮才可用。"),
-                ("4. 点击继续", "已完成文件不会重复解析，剩余任务按新模式运行；预计时间重新估算。"),
+                ("1. 点击暂停", "界面先显示“正在暂停…”，程序立即停止提交新文件。"),
+                ("2. 等待已暂停", "活动任务完成当前页、OCR 区域或安全检查点后停止；此时 CPU 和磁盘活动应接近零。"),
+                ("3. 切换模式", "只有显示“已暂停”时，普通模式和性能模式按钮才可用；切换不会重复解析已完成文件。"),
+                ("4. 点击继续", "剩余任务从安全检查点继续，并按新模式重建所需进程池；预计时间重新估算。"),
             ],
             y,
-            first_width=112,
-            row_height=44,
+            label_width=104,
+            min_height=42,
         )
         self.callout(
-            "暂停与取消的区别",
-            "暂停用于稍后继续，不破坏缓存和数据库；取消用于结束本轮索引。需要释放资源时优先等待“已暂停”，不要直接结束进程。",
+            "预计时间与卡滞判断",
+            "样本不足时显示“正在估算…”，稳定后显示“预计剩余约 N 分钟”，暂停时停止变化。长文件没有固定总耗时上限；只要页、区域或 ZIP 成员仍有有效进展就会继续，长期无进展才会回收并重试。",
+            y,
+        )
+        self.footer()
+
+        y = self.begin_page(
+            "03  搜索、黄显与打开命中位置",
+            "中间结果用于选择文件，右侧预览展示完整命中上下文并同步黄显关键词",
+        )
+        y = self.screenshot("search_results.png", y, max_height=305)
+        y = self.bullets(
+            [
+                "输入文件名、路径或正文关键词；中文查询会兼容常见空格差异，例如“拔掉 3 个传感器”可命中“拔掉3 个传感器”。",
+                "中间结果卡显示格式、文件名、命中位置、路径、大小和修改时间；同一文件多处命中时可展开查看。",
+                "右侧“命中上下文”显示当前文件的命中片段，关键词使用黄色背景突出显示；内容较长时在预览区滚动查看。",
+                "点击蓝色位置文本可尝试定位到 PDF 页、幻灯片、工作表/单元格或文本行；底部按钮用于普通打开、打开所在文件夹和复制路径。",
+            ],
+            y,
+            gap=3,
+        )
+        self.callout(
+            "定位失败不等于搜索失败",
+            "不同 PDF 阅读器、Microsoft Office 或 WPS 版本的定位能力不同。程序仍会打开原文件，并明确提示是否确认定位成功；不会把普通打开冒充为定位成功。",
+            y,
+            fill=PALE_BLUE,
+        )
+        self.footer()
+
+        y = self.begin_page(
+            "04  匹配方式与支持格式",
+            "需要缩小结果时，优先增加关键词、限定格式或缩小搜索范围",
+        )
+        y = self.screenshot("search_controls.png", y, max_height=135)
+        table_y = y - 2
+        left_x = MARGIN_X
+        column_gap = 10
+        column_width = (CONTENT_WIDTH - column_gap) / 2
+        left_bottom = self.mini_table(
+            "匹配方式",
+            [
+                ("完全包含", "按输入内容直接匹配，适合普通查询。"),
+                ("完整短语", "要求词序连续，适合固定术语。"),
+                ("全部关键词", "每个关键词都必须出现。"),
+                ("任意关键词", "出现任一关键词即可。"),
+                ("正则表达式", "适合明确规则；可能需要扫描更多记录。"),
+            ],
+            x=left_x,
+            y=table_y,
+            width=column_width,
+        )
+        right_bottom = self.mini_table(
+            "索引格式",
+            [
+                ("PDF", "原生文字直接提取；扫描页按需 OCR。"),
+                ("Word", "docx 直接解析；doc 需本机 Office/WPS 等软件转换。"),
+                ("Excel", ".xlsx/.xlsm；大型工作簿分段读取；.xls 走转换车道。"),
+                ("PowerPoint", ".pptx；.ppt 走本机转换车道。"),
+                ("图片", "JPG/PNG/BMP/TIFF，采用 960 检测、原图区域识别和低质量分块。"),
+                ("文本/ZIP", "常见文本直接读取；ZIP 在安全限制内递归解析受支持成员。"),
+            ],
+            x=left_x + column_width + column_gap,
+            y=table_y,
+            width=column_width,
+        )
+        y = min(left_bottom, right_bottom) - 12
+        self.callout(
+            "视频文件",
+            "视频不在解析范围内。界面会显示“排除视频 N”，不会把视频算成索引失败，也不会尝试提取画面、字幕或音轨。",
+            y,
+            fill=PALE_AMBER,
+        )
+        self.footer()
+
+        y = self.begin_page(
+            "05  未成功索引与保底开放",
+            "先正常重试；确认文件无法修复或无需搜索后，再排除或使用最终保底流程",
+        )
+        y = self.screenshot("failed_files.png", y, max_height=300)
+        y = self.numbered_steps(
+            [
+                ("重新尝试", "文件已修复、解密或转换软件恢复时使用；不会排除文件。"),
+                ("从范围排除", "确认文件不需要搜索时使用；只改索引，源文件不会删除。"),
+                ("保底完成", "先做最后一次重试；仍失败时再次确认排除并开放其他文件。"),
+            ],
+            y,
+            height=86,
+        )
+        self.callout(
+            "保底操作有两次确认",
+            "第一次只确认最后一次正常重试，不会立即排除文件；仍失败后第二次才确认排除。若阻断项为 0 但仍有残留任务或未发布全文索引，保底按钮也可修复状态，不会新增人工排除记录。",
+            y,
+            fill=PALE_RED,
+        )
+        self.footer()
+
+        y = self.begin_page(
+            "06  设置与数据库迁移",
+            "索引数据库默认位于本机用户目录；C 盘空间不足时可迁移到本机固定磁盘",
+        )
+        y = self.screenshot("database_settings_detail.png", y, max_height=215)
+        y = self.table(
+            [
+                ("1. 选择目录", "在“设置 > 索引数据库”中选择本机固定磁盘上的目标目录；网络共享、程序安装目录和不可写目录会被拒绝。"),
+                ("2. 确认空间", "界面显示当前数据库大小和目标磁盘可用空间；迁移前请停止搜索、索引和失败文件处理任务。"),
+                ("3. 开始迁移", "程序依次执行准备、传输、完整性校验、切换路径和重新打开；失败或取消会继续使用原数据库。"),
+                ("4. 核对完成", "迁移成功后无需重新索引。原数据库保留为带时间戳的回滚备份，当前路径写入用户级位置配置。"),
+            ],
+            y,
+            label_width=102,
+            min_height=45,
+        )
+        self.callout(
+            "升级与重复启动",
+            "升级时把完整 ZIP 解压到新目录，不要只覆盖 EXE，也不要混用不同版本的 _internal。新版本会读取已迁移的数据库位置。程序采用单实例运行，重复启动会激活已有窗口，不会再创建一个写库进程。",
             y,
             fill=PALE_GREEN,
-            height=70,
         )
         self.footer()
 
-        y = self.new_page("03  搜索与命中高亮", "正文、文件名、表格、幻灯片和图片 OCR 文字统一检索")
-        y = self.screenshot("ui_validation.png", y, max_height=305)
-        y = self.heading("搜索结果说明", y)
+        y = self.begin_page(
+            "07  日常更新、故障排查与隐私",
+            "增量更新不会重复解析未变化文件；遇到异常时先保留数据库和日志",
+        )
+        y = self.screenshot("index_status.png", y, max_height=95)
+        y = self.heading("日常使用", y)
         y = self.bullets(
             [
-                "中间结果卡片和右侧“命中上下文”都会用黄色标出搜索内容。",
-                "空格差异可容忍，例如“拔掉3 个传感器”可由“拔掉 3 个传感器”命中。",
-                "结果卡会完整保留正文片段、路径和日期；内容较长时可在结果区滚动查看。",
-                "搜索框右侧按钮保留固定空间，不会覆盖输入文字；可按格式、范围和匹配方式筛选。",
-                "普通名称和正文查询优先使用本地 FTS 倒排索引，不重新读取源文件；文件名结果先显示。",
-                "慢搜索显示阶段、已找到数量和耗时；扫描型搜索显示真实百分比，并可点击停止。",
-                "双击结果或使用右侧按钮打开原文件；也可打开所在文件夹、复制完整路径。",
+                "点击“更新”或“更新全部”只处理新增、修改和失效文件；内容未变化时会复用已有解析结果与缓存。",
+                "普通模式适合边办公边更新；性能模式适合电脑空闲时的首次全量索引。首次运行 OCR 可能需要加载本地模型，后续任务复用常驻进程。",
+                "取消会结束本轮更新并按事务边界回滚未发布内容；安全暂停用于稍后继续，两者含义不同。",
             ],
             y,
         )
-        self.footer()
-
-        y = self.new_page("04  支持格式与处理方式", "不同格式进入独立解析车道，避免一个慢文件拖住其他类型")
+        y = self.heading("最短排查顺序", y)
         y = self.table(
             [
-                ("PDF", "先提取可复制正文；扫描页或图纸按需进入 OCR。PDF 使用独立进程车道。"),
-                ("Word", "DOCX 直接解析；DOC 通过本机可用的 Office/兼容转换组件转为临时 DOCX 后解析。"),
-                ("Excel", "XLSX/XLSM 使用流式读取，大表按工作表分段；XLS 走旧版 Office 专用车道。"),
-                ("PowerPoint", "PPTX 提取幻灯片及备注文字；PPT 走旧版 Office 专用车道。"),
-                ("图片", "JPG、PNG、BMP、TIFF 等进入自适应 OCR，索引识别出的文字。"),
-                ("压缩包", "ZIP 成员按内部格式分派；受成员数量、解压总量和嵌套层级限制。"),
-                ("视频", "不解析、不 OCR，不计入失败；状态条单独显示“排除视频”。"),
+                ("索引像是卡住", "观察完成数、当前阶段、页/区域进度和“距上次进展”；长期无有效进展时程序会自动回收并重试。"),
+                ("文件搜不到", "确认索引已经开放、查询范围/格式正确，再到“未成功索引”检查该文件是否失败或被人工排除。"),
+                ("程序点了没反应", "确认完整解压且 _internal 与 EXE 同目录；查看任务栏中是否已有窗口，并收集启动日志。"),
+                ("需要提供日志", "复制 %LOCALAPPDATA%\\LocalFullTextSearch\\logs，重点包括 startup.log、startup-state.json 和 app.log。"),
             ],
             y,
-            first_width=100,
-            row_height=48,
-        )
-        y = self.callout(
-            "旧版 Office 的前提",
-            "DOC、XLS、PPT 的转换能力取决于电脑上可调用的 Office 或兼容组件。转换结果会缓存，文件未变化时不会重复转换。",
-            y,
-            fill=PALE_AMBER,
-            height=72,
-        )
-        self.footer()
-
-        y = self.new_page("05  图片与 PDF OCR", "960 检测 + 原图文字区域识别 + 低质量时原图分块")
-        y = self.heading("图片 OCR 的三步策略", y)
-        y = self.table(
-            [
-                ("快速检测", "把整图限制到最长边 960 像素，仅用于寻找可能的文字区域。"),
-                ("原图识别", "识别时回到原始像素裁剪文字区域，不用 960 像素缩略图识别正文。"),
-                ("质量兜底", "区域太少、置信度偏低或小字密集时，对原图分块并批量识别，优先保证召回。"),
-            ],
-            y,
-            first_width=112,
-            row_height=60,
-        )
-        y = self.heading("PDF 动态分辨率", y)
-        y = self.bullets(
-            [
-                "150 DPI 用于低成本预检；普通文字区域以 200 DPI 识别。",
-                "只有低置信度或小字号区域升级到 300 DPI，避免整页无差别高分辨率渲染。",
-                "大型图纸若区域结果过少，会自动回退到完整分块识别；因此个别极端页面仍可能耗时较长。",
-                "OCR 模型在进程中常驻，同一批任务复用模型；模型或算法指纹变化时自动失效旧缓存。",
-            ],
-            y,
+            label_width=110,
+            min_height=46,
         )
         self.callout(
-            "精度原则",
-            "缩放图只负责“找文字”，最终文字识别使用原图区域。保底分块不会为了速度跳过不确定区域，因此首次索引可能较慢，但可降低漏字风险。",
+            "隐私与数据位置",
+            "文件正文、OCR、索引和搜索记录均不上传。\n默认数据目录：%LOCALAPPDATA%\\LocalFullTextSearch。数据库、设置、日志和 OCR 缓存均保存在这里；不要为解决单个失败文件直接删除整个目录。",
             y,
             fill=PALE_GREEN,
-            height=76,
         )
         self.footer()
 
-        y = self.new_page("06  长文件、卡滞与失败", "超时依据“是否有有效进展”，不是限制文件总耗时")
-        y = self.heading("无进展超时如何工作", y)
-        y = self.table(
-            [
-                ("有效进展", "页码、工作表、ZIP 成员、OCR 区域或输出块等语义游标发生前进。"),
-                ("不算进展", "只重复发送心跳、阶段和游标均未变化，不会重置超时计时。"),
-                ("到达阈值", "回收对应解析进程并从安全检查点重试，其他文件和界面不被永久卡住。"),
-                ("重复卡点", "同一阶段、同一游标连续失败后进入“未成功索引”，保留诊断信息。"),
-            ],
-            y,
-            first_width=112,
-            row_height=56,
-        )
-        y = self.heading("遇到失败时", y)
-        y = self.bullets(
-            [
-                "在“未成功索引”页面查看文件、失败分类和原因；先确认原文件是否能正常打开。",
-                "密码保护、文件损坏、缺少旧版 Office 转换组件或 ZIP 超过安全限制都可能失败。",
-                "修复原文件或环境后执行更新；已完成且未变化的文件会跳过，不必重建全部内容。",
-                "不要删除本地索引数据库来解决单文件问题，除非需要彻底重建或数据库已损坏。",
-            ],
-            y,
-        )
-        self.footer()
-
-        y = self.new_page("07  未成功索引与保底完成", "优先正常恢复；确认无法解析后再排除，源文件始终保留")
-        y = self.heading("三个控件怎么选", y)
-        y = self.table(
-            [
-                ("重新尝试", "先用当前文件和环境再处理一次。原文件修复、解密或补齐转换组件后优先使用。"),
-                ("从当前范围排除", "确认后立即转入后台，显示审计、清理、重建和状态刷新阶段；排除最后一个阻断项后自动开放搜索。"),
-                ("强力完成本次索引", "用于最终保底。有阻断时先正常重试，仍失败才确认排除；零阻断残留状态则直接修复并发布索引。"),
-            ],
-            y,
-            first_width=132,
-            row_height=66,
-        )
-        y = self.heading("“强力完成本次索引”按钮状态", y)
-        y = self.bullets(
-            [
-                "按钮固定显示在“未成功索引”页面顶部操作栏，不需要滚动查找。",
-                "人工排除期间显示忙碌进度和大型 FTS 状态；搜索、索引、恢复和强力完成暂时禁用。",
-                "索引真正就绪，或索引/后台更新任务仍在运行：按钮为灰色禁用。",
-                "存在阻断项，或零阻断但有残留任务、未发布候选、未收敛批次、待发布 FTS：按钮为蓝色可用。",
-                "人工排除和强力完成都不会删除原文件；被排除文件的文件名、路径和正文不参与搜索。",
-                "点击“取消索引更新”会回滚本次事务；原文件始终保留，旧排除记录会在源文件变化后失效。",
-            ],
-            y,
-        )
-        y = self.callout(
-            "二次确认保护",
-            "强力完成不会静默跳过文件。第一次确认只执行最后一次正常恢复；仍有阻断项时会再次列出文件，只有用户第二次明确确认后才排除并开放搜索。",
-            y,
-            fill=PALE_AMBER,
-            height=76,
-        )
-        self.footer()
-
-        y = self.new_page("08  性能模式与异常演示", "电脑空闲时提高资源利用；演示入口与正式索引完全隔离")
-        y = self.heading("普通模式和性能模式", y)
-        y = self.table(
-            [
-                ("普通模式", "适合边索引边办公，CPU、磁盘与内存占用更克制。"),
-                ("性能模式", "适合电脑空闲时首次全量索引；根据 CPU、可用内存和磁盘情况动态提高各解析车道并发。"),
-                ("切换方法", "运行中先点击暂停，确认界面显示“已暂停”后切换，再点击继续。"),
-                ("时间判断", "预计时间是动态参考；更应关注完成数、当前阶段和进度是否持续前进。"),
-            ],
-            y,
-            first_width=112,
-            row_height=53,
-        )
-        y = self.heading("亲自验证搜索保底", y)
-        y = self.bullets(
-            [
-                "关闭正式程序，双击发行目录根部的“异常文件保底功能演示.bat”。",
-                "演示会重置包内 failure-fallback-demo-data，模拟损坏 PDF、密码 Word、失败图片和超限 ZIP。",
-                "在“未成功索引”中亲自测试重新尝试、从当前索引范围排除和强力完成。",
-                "开放搜索后输入 DEMO_SEARCH_OK，应命中正常演示文件。再次运行批处理可重置演示。",
-            ],
-            y,
-        )
-        self.callout(
-            "不会影响正式数据库",
-            "演示入口使用独立数据目录，不读取或修改 %LOCALAPPDATA%\\LocalFullTextSearch\\data\\search_index.db。演示中的排除和搜索结果不会写入正式索引。",
-            y,
-            fill=PALE_GREEN,
-            height=76,
-        )
-        self.footer()
-
-        y = self.new_page("09  升级、数据库与启动日志", "整包升级可继续使用原索引；点 EXE 没反应时先收集启动日志")
-        y = self.heading("升级版本的正确方式", y)
-        y = self.table(
-            [
-                ("1. 退出旧版", "确认旧程序已经关闭，保留当前数据库和日志。"),
-                ("2. 解压整包", "把新版 ZIP 解压到完整的新目录，不要只把新 EXE 覆盖进旧 _internal。"),
-                ("3. 启动新版", "新版自动复用 %LOCALAPPDATA%\\LocalFullTextSearch\\data\\search_index.db，并按需迁移。"),
-                ("4. 增量更新", "解析规则更新后可执行“更新全部”；未变化且仍有效的内容会尽量复用。"),
-            ],
-            y,
-            first_width=112,
-            row_height=54,
-        )
-        y = self.heading("程序点了没反应时", y)
-        y = self.bullets(
-            [
-                "优先复制整个 %LOCALAPPDATA%\\LocalFullTextSearch\\logs 目录。",
-                "重点文件：startup.log、startup-state.json、app.log 以及 app.log.*。",
-                "本地数据目录不可写时，再检查 %TEMP%\\LocalFullTextSearch。",
-                "若被 Windows 安全提示、EDR 或 DLL 加载阶段拦截，可能来不及生成日志；同时提供完整目录结构、提示截图和安全软件记录。",
-            ],
-            y,
-        )
-        y = self.callout(
-            "不要轻易删除数据库",
-            "单个文件失败不需要删除数据库。只有明确确认数据库损坏或需要彻底重建时才清空数据目录；回滚旧版时不要混用不同版本的 _internal。",
-            y,
-            fill=PALE_AMBER,
-            height=76,
-        )
-        y = self.heading("交付检查", y)
-        self.bullets(
-            [
-                "完整目录应包含 EXE、_internal、说明书、异常演示入口和“发行资料”。",
-                "保留发行资料中的 BUILD-INFO、SHA256SUMS 和验证结果，便于核对版本。",
-            ],
-            y,
-        )
-        self.footer()
-
+        if self.page_number != PAGE_TOTAL:
+            raise RuntimeError(
+                f"Guide page count mismatch: built={self.page_number}; expected={PAGE_TOTAL}"
+            )
         self.canvas.save()
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Generate the release user guide PDF")
+    parser = argparse.ArgumentParser(description="Generate the illustrated release user guide PDF")
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--assets", type=Path, default=Path.cwd())
+    parser.add_argument(
+        "--assets",
+        type=Path,
+        default=Path.cwd() / "docs" / "assets" / "user-guide",
+    )
     args = parser.parse_args()
     args.output.parent.mkdir(parents=True, exist_ok=True)
     register_fonts()

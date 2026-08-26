@@ -42,6 +42,10 @@ ocr_smoke.png
 ocr_validation_probe.png
 ui_snapshots/
 tmp/
+temp/
+tmp-frozen-check/
+tmp-test-data*/
+tmp-test-temp/
 output/pdf/
 *_validation_result.json
 index_status_layout_screenshots/

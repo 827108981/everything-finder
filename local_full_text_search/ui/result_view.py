@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMenu,
     QPushButton,
+    QSizePolicy,
     QVBoxLayout,
 )
 
@@ -25,6 +26,7 @@ from local_full_text_search.models.search_result import SearchHit, SearchResult
 class ResultView(QListWidget):
     open_requested = Signal(str)
     open_folder_requested = Signal(str)
+    open_location_requested = Signal(str, object)
     reindex_requested = Signal(str)
     selected_result_changed = Signal(object)
 
@@ -54,6 +56,7 @@ class ResultView(QListWidget):
             self.addItem(item)
             self._cards.append(card)
             self.setItemWidget(item, card)
+            card.open_location_requested.connect(self.open_location_requested.emit)
             card.height_changed.connect(
                 lambda current_card=card, current_item=item: current_item.setSizeHint(
                     QSize(100, current_card.preferred_row_height(self.viewport().width()))
@@ -131,6 +134,7 @@ class ResultView(QListWidget):
 
 class ResultCard(QFrame):
     height_changed = Signal()
+    open_location_requested = Signal(str, object)
 
     def __init__(self, result: SearchResult, query_text: str) -> None:
         super().__init__()
@@ -154,14 +158,11 @@ class ResultCard(QFrame):
         hit.setObjectName("HitBadge")
         hit.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        location = QLabel(f"{format_type(result)} · {result.location_text}")
-        location.setObjectName("ResultMeta")
-        location.setWordWrap(True)
-
-        self.context = QLabel(render_context_html(result, query_text))
-        self.context.setObjectName("ResultContext")
-        self.context.setTextFormat(Qt.TextFormat.RichText)
-        self.context.setWordWrap(True)
+        self.location_panel = QFrame()
+        self.location_panel.setObjectName("HitLocationPanel")
+        self.location_layout = QVBoxLayout(self.location_panel)
+        self.location_layout.setContentsMargins(0, 0, 0, 0)
+        self.location_layout.setSpacing(2)
 
         self.expand_button = QPushButton()
         self.expand_button.setObjectName("LinkButton")
@@ -170,7 +171,9 @@ class ResultCard(QFrame):
         self.expand_button.setVisible(hidden_hit_count(result) > 0)
         self._update_expand_button()
 
-        self.path_label = QLabel(f"{wrap_path(result.file_path)}\n{modified}")
+        self.path_label = QLabel(
+            f"{wrap_path(result.file_path)}\n{format_size(result.size_bytes)} · 修改于 {modified}"
+        )
         self.path_label.setObjectName("ResultPath")
         self.path_label.setToolTip(result.file_path)
         self.path_label.setWordWrap(True)
@@ -203,8 +206,7 @@ class ResultCard(QFrame):
         body.setContentsMargins(0, 0, 0, 0)
         body.setSpacing(5)
         body.addLayout(top)
-        body.addWidget(location)
-        body.addWidget(self.context)
+        body.addWidget(self.location_panel)
         body.addWidget(self.expand_button, alignment=Qt.AlignmentFlag.AlignLeft)
         body.addWidget(self.path_label)
         body.addLayout(badge_layout)
@@ -218,6 +220,7 @@ class ResultCard(QFrame):
         self.accent.setFixedWidth(3)
         layout.addWidget(self.accent)
         layout.addLayout(body, 1)
+        self._refresh_location_buttons()
 
     def preferred_row_height(self, width: int) -> int:
         card_width = max(280, width - 8)
@@ -228,15 +231,39 @@ class ResultCard(QFrame):
         card_layout.invalidate()
         calculated = card_layout.heightForWidth(card_width)
         hinted = card_layout.sizeHint().height()
-        return max(180, calculated, hinted) + 4
+        return max(145, calculated, hinted) + 4
 
     def _toggle_expanded(self) -> None:
         self._expanded = not self._expanded
-        self.context.setText(
-            render_context_html(self.result, self.query_text, expanded=self._expanded)
-        )
+        self._refresh_location_buttons()
         self._update_expand_button()
         self.height_changed.emit()
+
+    def _refresh_location_buttons(self) -> None:
+        while self.location_layout.count():
+            item = self.location_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        hits = visible_hits(self.result, expanded=self._expanded)
+        for hit in hits:
+            button = QPushButton(hit_label(hit))
+            button.setObjectName("HitLocationButton")
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.setToolTip("点击打开文件并尝试定位到此处")
+            button.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
+            button.clicked.connect(
+                lambda _checked=False, current_hit=hit: self.open_location_requested.emit(
+                    self.result.file_path, current_hit
+                )
+            )
+            self.location_layout.addWidget(button, alignment=Qt.AlignmentFlag.AlignLeft)
+        if hidden_hit_count(self.result, expanded=self._expanded) > 0:
+            remaining = QLabel(
+                f"另有 {hidden_hit_count(self.result, expanded=self._expanded)} 段命中，展开查看"
+            )
+            remaining.setObjectName("ResultMeta")
+            self.location_layout.addWidget(remaining, alignment=Qt.AlignmentFlag.AlignLeft)
 
     def _update_expand_button(self) -> None:
         total = len(result_hits(self.result))
@@ -244,7 +271,7 @@ class ResultCard(QFrame):
             self.expand_button.setVisible(False)
             return
         self.expand_button.setText(
-            "收起命中" if self._expanded else f"展开全部 {total} 段命中"
+            "收起命中位置" if self._expanded else f"展开全部 {total} 处命中位置"
         )
 
     def set_selected(self, selected: bool) -> None:
@@ -308,6 +335,13 @@ def result_hits(result: SearchResult) -> list[SearchHit]:
             context=result.context,
             hit_count=result.hit_count,
             source_type=result.source_type,
+            page_number=result.page_number,
+            slide_number=result.slide_number,
+            sheet_name=result.sheet_name,
+            cell_start=result.cell_start,
+            cell_end=result.cell_end,
+            line_start=result.line_start,
+            line_end=result.line_end,
             ocr_confidence=result.ocr_confidence,
             is_fuzzy=result.has_fuzzy_match,
         )
@@ -334,6 +368,15 @@ def hit_label(hit: SearchHit) -> str:
 
 def wrap_path(path: str) -> str:
     return path.replace("\\", "\\\u200b").replace("/", "/\u200b")
+
+
+def format_size(size: int) -> str:
+    value = float(size)
+    for unit in ("B", "KB", "MB", "GB"):
+        if value < 1024 or unit == "GB":
+            return f"{value:.1f} {unit}" if unit != "B" else f"{int(value)} B"
+        value /= 1024
+    return f"{value:.1f} GB"
 
 
 def ocr_label(result: SearchResult) -> str:

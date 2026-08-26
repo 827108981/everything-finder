@@ -219,7 +219,7 @@ def test_schema_v7_migrates_to_v8_with_content_and_history_preserved(
         )
     ).total_confirmed
 
-    assert version == SCHEMA_VERSION == 8
+    assert version == SCHEMA_VERSION == 9
     assert table_exists == 1
     assert hits == 1
     assert migrated.search_history() == ["SCHEMA_V7_HISTORY"]
@@ -349,7 +349,7 @@ def test_schema_v8_validator_covers_v7_upgrade_and_failure_restore(
     result = validator(tmp_path)
 
     assert result["passed"] is True
-    assert result["schema_version"] == 8
+    assert result["schema_version"] == 9
     assert result["checks"]["v7_to_latest"]["passed"] is True
     assert result["checks"]["failure_restore_v8"]["passed"] is True
     assert result["checks"]["v4_to_latest"]["from_version"] == 4

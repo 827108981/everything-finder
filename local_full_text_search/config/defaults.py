@@ -7,7 +7,7 @@ from .constants import DEFAULT_EXCLUDED_DIRS, DEFAULT_EXCLUDED_FILE_PATTERNS
 
 @dataclass(slots=True)
 class AppSettings:
-    settings_version: int = 9
+    settings_version: int = 10
     default_search_mode: str = "exact"
     case_sensitive: bool = False
     auto_search: bool = False
@@ -15,7 +15,9 @@ class AppSettings:
     page_size: int = 100
     max_results: int = 1000
     parser_workers: int = 4
-    ocr_workers: int = 1
+    # Two OCR workers are the balanced default. Runtime admission still
+    # reduces this to one when memory, CPU, or I/O pressure is sustained.
+    ocr_workers: int = 2
     slow_file_workers: int = 1
     process_parser_workers: int = 1
     pdf_parser_workers: int = 1
@@ -56,12 +58,13 @@ class AppSettings:
     db_write_max_delay_ms: int = 500
     parse_result_spool_threshold_bytes: int = 4 * 1024 * 1024
     defer_fts_during_full_scan: bool = True
+    partial_search_during_index: bool = True
     pdf_parallel_min_bytes: int = 64 * 1024 * 1024
     pdf_parallel_min_pages: int = 500
     legacy_conversion_cache: bool = True
-    auto_scan_on_start: bool = False
+    auto_scan_on_start: bool = True
     monitor_file_changes: bool = False
-    retry_failed_files: bool = True
+    retry_failed_files: bool = False
     normal_no_progress_timeout_seconds: int = 300
     ocr_no_progress_timeout_seconds: int = 900
     archive_no_progress_timeout_seconds: int = 900
@@ -104,7 +107,11 @@ class AppSettings:
         previous_version = int(data.get("settings_version", 0) or 0)
         if previous_version < 4 and data.get("max_ocr_image_side", 2400) == 2400:
             values["max_ocr_image_side"] = 960
-        values["settings_version"] = 9
+        if previous_version < 10:
+            # Terminal failures now require an explicit retry request. A
+            # changed source identity is still scheduled automatically.
+            values["retry_failed_files"] = False
+        values["settings_version"] = 10
         return cls(**values)
 
 

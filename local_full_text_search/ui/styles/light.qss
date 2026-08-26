@@ -381,6 +381,23 @@ QLabel#ResultContext {
     font-size: 13px;
 }
 
+QPushButton#HitLocationButton, QPushButton#LinkButton {
+    min-height: 22px;
+    padding: 0;
+    border: none;
+    border-radius: 0;
+    background: transparent;
+    color: #1769E0;
+    text-align: left;
+}
+
+QPushButton#HitLocationButton:hover, QPushButton#LinkButton:hover {
+    border: none;
+    background: transparent;
+    color: #174EA6;
+    text-decoration: underline;
+}
+
 QLabel#HitBadge, QLabel#OcrBadge, QLabel#StatusBadge, QLabel#SuccessBadge {
     border-radius: 6px;
     padding: 2px 8px;
@@ -430,7 +447,7 @@ QLabel#SectionTitle {
     color: #344054;
 }
 
-QTextEdit#PreviewContext, QTextEdit {
+QTextBrowser#PreviewContext, QTextEdit#PreviewContext, QTextEdit {
     background: #FFFFFF;
     border: 1px solid #E4E7EC;
     border-radius: 8px;
@@ -461,6 +478,99 @@ QFrame#SettingsCard {
     border: none;
     border-bottom: 1px solid #E4E7EC;
     border-radius: 0;
+}
+
+QFrame#FailedActionGuide {
+    background: #F8FAFC;
+    border: 1px solid #DCE3EC;
+    border-radius: 6px;
+}
+
+QLabel#FailedActionGuideText {
+    color: #475467;
+    font-size: 12px;
+}
+
+QLabel#FailedActionGuideTitle {
+    color: #182230;
+    font-size: 13px;
+    font-weight: 600;
+}
+
+QLabel#FailedRiskBanner {
+    min-height: 34px;
+    padding: 8px 12px;
+    border-radius: 6px;
+    font-weight: 600;
+}
+
+QLabel#FailedRiskBanner[state="error"] {
+    color: #B42318;
+    background: #FEF3F2;
+    border: 1px solid #FDA29B;
+}
+
+QLabel#FailedRiskBanner[state="warning"] {
+    color: #B54708;
+    background: #FFFAEB;
+    border: 1px solid #FEC84B;
+}
+
+QLabel#FailedActionRecommendation {
+    color: #174EA6;
+    font-size: 12px;
+    font-weight: 600;
+}
+
+QLabel#FailedActionRecommendation[state="error"] {
+    color: #B42318;
+}
+
+QLabel#FailedActionRecommendation[state="warning"] {
+    color: #B54708;
+}
+
+QLabel#FailedActionRecommendation[state="ready"] {
+    color: #067647;
+}
+
+QLabel#ContentHeading[state="error"] {
+    color: #B42318;
+}
+
+QPushButton#NavButton[alert="true"] {
+    color: #B42318;
+    background: #FEF3F2;
+    font-weight: 600;
+}
+
+QPushButton#NavButton[alert="true"]:hover {
+    color: #912018;
+    background: #FEE4E2;
+}
+
+QFrame#FailedActionToolbar {
+    background: transparent;
+    border: none;
+}
+
+QFrame#FailedActionToolbar QPushButton,
+QFrame#FailedActionToolbar QComboBox {
+    min-height: 36px;
+    max-height: 36px;
+}
+
+QFrame#FailedActionSeparator {
+    min-width: 1px;
+    max-width: 1px;
+    min-height: 24px;
+    max-height: 24px;
+    background: #D0D5DD;
+    border: none;
+}
+
+QLineEdit#DatabasePath {
+    background: #FFFFFF;
 }
 
 QLabel#ScopeTitle {
