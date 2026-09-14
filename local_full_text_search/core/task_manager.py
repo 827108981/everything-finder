@@ -7,7 +7,7 @@ import time
 import uuid
 from pathlib import Path
 
-from .errors import CancelledError, PauseRequestedError
+from .errors import CancelledError, PauseRequestedError, SearchTimeout
 
 
 PAUSE_MARKER_NAME = ".pause_requested"
@@ -21,11 +21,17 @@ class CancelToken:
         self._cancelled = threading.Event()
         self._force_cancelled = threading.Event()
         self._paused = threading.Event()
+        self._cancel_reason = "USER_CANCELLED"
         self._state_changed = threading.Condition()
 
-    def cancel(self, *, force: bool = False) -> None:
+    def cancel(self, *, force: bool = False, reason: str = "USER_CANCELLED") -> None:
         if force:
             self._force_cancelled.set()
+        # Keep the first meaningful source.  A later forced shutdown must not
+        # overwrite a user cancellation that was already recorded, because
+        # the source is part of the post-mortem report.
+        if not self._cancelled.is_set() or self._cancel_reason == "USER_CANCELLED":
+            self._cancel_reason = str(reason or "USER_CANCELLED")
         self._cancelled.set()
         with self._state_changed:
             self._state_changed.notify_all()
@@ -49,11 +55,17 @@ class CancelToken:
         return self._force_cancelled.is_set()
 
     @property
+    def cancel_reason(self) -> str:
+        return self._cancel_reason
+
+    @property
     def paused(self) -> bool:
         return self._paused.is_set()
 
     def throw_if_cancelled(self) -> None:
         if self.cancelled:
+            if self.cancel_reason == "SEARCH_TIMEOUT":
+                raise SearchTimeout("搜索达到时间上限")
             raise CancelledError("任务已取消")
 
     def wait_if_paused(self) -> None:

@@ -43,6 +43,19 @@ ZIP_MEMBER_EXTENSIONS = {
 }
 
 
+def is_archive_metadata_member(path: str) -> bool:
+    """Return whether a ZIP member is platform metadata, not user content."""
+
+    normalized = str(path or "").replace("\\", "/")
+    parts = PurePosixPath(normalized).parts
+    filename = parts[-1] if parts else ""
+    return (
+        "__MACOSX" in parts
+        or filename.startswith("._")
+        or filename in {".DS_Store", "Thumbs.db"}
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class ZipMemberDescriptor:
     member_index: int
@@ -103,6 +116,15 @@ def scan_zip_manifest(
             safe_name = safe_zip_member_name(decoded_name)
             if safe_name is None:
                 unsafe += 1
+                _report_manifest_progress(
+                    progress_reporter,
+                    member_index,
+                    len(infos),
+                    decoded_name,
+                )
+                continue
+            if is_archive_metadata_member(safe_name):
+                skipped += 1
                 _report_manifest_progress(
                     progress_reporter,
                     member_index,
@@ -269,6 +291,10 @@ class ZipParser(BaseParser):
                             "成员路径不安全，已拒绝解压",
                         )
                         self._report_member_progress(member_index, len(infos), decoded_name)
+                        continue
+                    if is_archive_metadata_member(safe_name):
+                        skipped_members += 1
+                        self._report_member_progress(member_index, len(infos), safe_name)
                         continue
                     parser = self._parser_for_member(safe_name)
                     if parser is None:

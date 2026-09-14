@@ -14,6 +14,7 @@ from local_full_text_search.core.errors import PlanningNoProgressError
 from local_full_text_search.core.planning_worker import (
     PlanningProgressReporter,
     RecoverablePlanningRunner,
+    _terminate_process_tree,
     _read_progress,
 )
 from local_full_text_search.core.run_control import (
@@ -22,6 +23,19 @@ from local_full_text_search.core.run_control import (
 )
 from local_full_text_search.core.planning_tasks import _raise_walk_error
 from local_full_text_search.core.task_manager import ProcessRunControlToken
+
+
+def test_process_tree_cleanup_ignores_process_that_exits_before_children_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class GoneProcess:
+        def children(self, recursive: bool = False) -> list[object]:
+            del recursive
+            raise psutil.NoSuchProcess(12345)
+
+    monkeypatch.setattr(psutil, "Process", lambda _pid: GoneProcess())
+
+    _terminate_process_tree(12345)
 
 
 def _hang_without_progress(

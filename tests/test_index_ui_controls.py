@@ -99,6 +99,19 @@ def test_planning_progress_exposes_discovered_and_planned_counts() -> None:
     assert "18.png" in page.task_file.text()
 
 
+def test_writer_commit_progress_distinguishes_durable_database_writes() -> None:
+    _app()
+    page = IndexPage()
+    page.set_task_running(True)
+
+    page.set_writer_commit_progress(7, 143, 2)
+
+    assert page.task_units.text() == "数据库已提交 7 批 / 143 个结果 · 待写 2"
+    page.set_task_running(False)
+    page.set_writer_commit_progress(8, 160, 0)
+    assert page.task_units.text() == ""
+
+
 def test_active_phase_has_readable_labels_and_safe_fallback() -> None:
     assert format_active_phase("pdf_ocr_tile_detect") == "OCR 分块检测文字区域"
     assert (
@@ -139,6 +152,41 @@ def test_partial_index_availability_keeps_search_controls_enabled() -> None:
     assert page.index_ready() is True
     assert page.search_box.isEnabled()
     assert page.mode_combo.isEnabled()
+
+
+def test_active_scan_never_reports_background_tasks_as_converged() -> None:
+    text = format_index_scope_status(
+        {
+            "complete_files": 47766,
+            "eligible_files": 47771,
+            "blocking_files": 5,
+            "search_available": True,
+            "ready": False,
+            "background_task_state": "converged",
+            "unfinished_tasks": 0,
+            "scan_active": True,
+        }
+    )
+
+    assert "索引扫描收尾中" in text
+    assert "后台任务已收敛" not in text
+
+
+def test_finishing_snapshot_is_not_rendered_as_ready() -> None:
+    text = format_index_scope_status(
+        {
+            "complete_files": 10,
+            "eligible_files": 10,
+            "blocking_files": 0,
+            "search_available": True,
+            "ready": False,
+            "background_task_state": "finishing",
+            "unfinished_tasks": 0,
+        }
+    )
+
+    assert "索引收尾中" in text
+    assert "当前范围完成" not in text
 
 
 def test_mode_switch_is_enabled_only_after_safe_pause_confirmation() -> None:
@@ -186,8 +234,8 @@ def test_settings_page_exposes_guarded_database_migration_controls(tmp_path) -> 
     page = SettingsPage(AppSettings())
     page.set_database_info(database_path)
 
-    assert str(database_path.resolve()) in page.database_path_value.text()
-    assert page.database_path_value.toolTip() == str(database_path.resolve())
+    assert str(database_path.parent.resolve()) in page.database_path_value.text()
+    assert page.database_path_value.toolTip() == str(database_path.parent.resolve())
     assert "schema v" in page.database_schema_value.text()
     assert page.database_choose_button.text() == "选择目录"
     assert page.database_migrate_button.text() == "迁移数据库"
@@ -195,7 +243,7 @@ def test_settings_page_exposes_guarded_database_migration_controls(tmp_path) -> 
     assert page.settings_content.maximumWidth() == 1100
 
     page.database_copy_button.click()
-    assert QApplication.clipboard().text() == str(database_path.resolve())
+    assert QApplication.clipboard().text() == str(database_path.parent.resolve())
 
     page.database_target.setText(str(tmp_path / "new-data"))
     page._refresh_database_actions()
@@ -318,6 +366,68 @@ def test_fts_02r_failed_page_separates_scope_states_and_supports_bulk_actions() 
     assert "field file cannot be repaired" in page.table.item(0, 7).text()
 
 
+def test_failed_page_export_requests_all_scope_rows_with_active_filters() -> None:
+    _app()
+    page = FailedPage()
+    page.set_rows(
+        [
+            {
+                "id": 31,
+                "path": r"E:\scope\failed.txt",
+                "filename": "failed.txt",
+                "extension": ".txt",
+                "parse_status": "failed",
+            },
+            {
+                "id": 32,
+                "path": r"E:\scope\retry.pdf",
+                "filename": "retry.pdf",
+                "extension": ".pdf",
+                "parse_status": "failed_retryable",
+            },
+        ],
+        totals={"blocking": 2},
+    )
+    requests: list[tuple[str, str, str]] = []
+    page.export_requested.connect(lambda scope, status, extension: requests.append((scope, status, extension)))
+
+    page.status_filter.setCurrentText("failed")
+    page.extension_filter.setCurrentText(".txt")
+    page.export_button.click()
+
+    assert requests == [("blocking", "failed", ".txt")]
+
+
+def test_failed_page_can_select_all_blockers_across_pages() -> None:
+    _app()
+    page = FailedPage()
+    rows = [
+        {
+            "id": index,
+            "path": rf"E:\scope\failed-{index}.txt",
+            "filename": f"failed-{index}.txt",
+            "extension": ".txt",
+            "parse_status": "pending",
+        }
+        for index in range(1, 6)
+    ]
+    page.page_size = 2
+    page.set_rows(rows[:2], totals={"blocking": 5}, all_blocking_ids=[1, 2, 3, 4, 5])
+    page.select_all_matching.click()
+    assert page.selected_file_ids() == [1, 2, 3, 4, 5]
+    assert [
+        page.table.item(row, 0).checkState() == Qt.CheckState.Checked
+        for row in range(page.table.rowCount())
+    ] == [True, True]
+    page.page_by_scope["blocking"] = 1
+    page.set_rows(rows[2:4], totals={"blocking": 5}, all_blocking_ids=[1, 2, 3, 4, 5])
+    assert page.selected_file_ids() == [1, 2, 3, 4, 5]
+    assert [
+        page.table.item(row, 0).checkState() == Qt.CheckState.Checked
+        for row in range(page.table.rowCount())
+    ] == [True, True]
+
+
 def test_failed_page_exposes_force_complete_control() -> None:
     app = _app()
     page = FailedPage()
@@ -371,6 +481,20 @@ def test_failed_page_exposes_force_complete_control() -> None:
     page.force_complete_button.click()
     assert requests == [True]
     page.close()
+
+
+def test_failed_page_disables_force_complete_while_search_runs() -> None:
+    _app()
+    page = FailedPage()
+    page.set_rows(
+        [{"id": 1, "path": r"E:\scope\stale.txt", "filename": "stale.txt", "extension": ".txt", "parse_status": "failed"}]
+    )
+    page.set_readiness({"ready": False, "repairable": True, "not_ready_reasons": ["blocking_files"]})
+    page.set_search_running(True)
+    assert not page.force_complete_button.isEnabled()
+    assert "搜索正在进行" in page.force_complete_button.toolTip()
+    page.set_search_running(False)
+    assert page.force_complete_button.isEnabled()
 
 
 def test_failed_page_always_explains_actions_and_disables_processing_when_ready() -> None:

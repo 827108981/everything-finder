@@ -14,7 +14,7 @@ MANIFEST_NAME = Path(RELEASE_INFO_DIR) / "SHA256SUMS.txt"
 USER_GUIDE_NAME = "本地多格式全文搜索工具-使用说明.pdf"
 ROOT_DOCUMENTS = (
     "启动与分发说明.md",
-    "首次全量索引性能优化验证报告-20260730.md",
+    "当前实现进度与注意事项.md",
 )
 BUILD_INFO_NAME = "BUILD-INFO.txt"
 FAILURE_DEMO_LAUNCHER = "异常文件保底功能演示.bat"

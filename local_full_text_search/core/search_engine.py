@@ -1,19 +1,27 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import logging
 import re
 import sqlite3
+import threading
 import time
+import uuid
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, replace
 from typing import Any
 
 from local_full_text_search.core.database import DatabaseManager
-from local_full_text_search.core.errors import CancelledError, IndexNotReadyError
-from local_full_text_search.core.foreground_activity import (
-    acquire_search_lease,
-    search_active,
+from local_full_text_search.core.errors import (
+    CancelledError,
+    IndexNotReadyError,
+    OperationCancelled,
+    SearchTimeout,
+)
+from local_full_text_search.core.foreground_activity import search_active
+from local_full_text_search.core.search_index_coordinator import (
+    get_search_index_coordinator,
 )
 from local_full_text_search.core.normalizer import (
     contains_cjk,
@@ -23,10 +31,17 @@ from local_full_text_search.core.normalizer import (
     parse_terms,
 )
 from local_full_text_search.core.task_manager import CancelToken
+from local_full_text_search.services.logging_service import log_event, log_exception
 from local_full_text_search.models.search_query import SearchQuery
 from local_full_text_search.models.search_result import SearchHit, SearchResult
 
 logger = logging.getLogger(__name__)
+
+# Context is presentation data, not the searchable source of truth.  Keep a
+# hard per-block budget so one pathological log/worksheet cannot monopolise a
+# search worker or allocate an offsets array proportional to the whole block.
+MAX_CONTEXT_CHARS = 256 * 1024
+MAX_SEARCH_SECONDS = 120.0
 
 
 def _optional_int(value: object) -> int | None:
@@ -54,8 +69,17 @@ class SearchPage:
 
 
 class SearchEngine:
-    def __init__(self, db: DatabaseManager) -> None:
+    def __init__(
+        self,
+        db: DatabaseManager,
+        *,
+        generation_isolated: bool = False,
+        snapshot_generation: int | None = None,
+    ) -> None:
         self.db = db
+        self.generation_isolated = bool(generation_isolated)
+        self.snapshot_generation = snapshot_generation
+        self.compact_snapshot = self._detect_compact_snapshot()
         self._trigram_tables: dict[str, bool] = {}
         self._snapshot_connection: sqlite3.Connection | None = None
 
@@ -64,6 +88,8 @@ class SearchEngine:
         query: SearchQuery,
         cancel_token: CancelToken | None = None,
         *,
+        request_id: str | None = None,
+        status_callback: Callable[[str], None] | None = None,
         progress_callback: Callable[[dict[str, object]], None] | None = None,
         partial_callback: Callable[[SearchPage], None] | None = None,
     ) -> SearchPage:
@@ -71,34 +97,159 @@ class SearchEngine:
 
         Keeping one read-only connection for the complete query prevents the
         metadata and content phases from observing different index commits.
-        The foreground search lease prevents the index writer from publishing
-        a new projection while this snapshot is active.
+        In legacy mode the foreground search lease prevents a shared writer
+        from publishing during the read.  In generation-isolated mode the
+        selected immutable snapshot has no writer to pause.
         """
 
         lease = None
-        if not search_active():
-            lease = acquire_search_lease(
-                f"engine:{id(self)}",
-                cancel_event=None,
-                max_wait_seconds=2.0,
-            )
+        request_id = str(request_id or f"search-{uuid.uuid4().hex}")
+        query_hash = hashlib.sha256(query.text.encode("utf-8")).hexdigest()
+        token = cancel_token or CancelToken()
+        timeout_timer: threading.Timer | None = None
+        log_event(
+            "search.requested",
+            component="search_engine",
+            request_id=request_id,
+            query_hash=query_hash,
+            query_length=len(query.text),
+            query_mode=query.mode,
+        )
         try:
+            if self.generation_isolated:
+                # The active generation is immutable and the indexer writes a
+                # different candidate file. There is no shared SQLite writer
+                # to pause and no search lease should throttle indexing.
+                log_event(
+                    "search.snapshot.active",
+                    component="search_engine",
+                    request_id=request_id,
+                    query_hash=query_hash,
+                    generation=self.snapshot_generation,
+                    database_path=str(self.db.db_path),
+                    generation_isolated=True,
+                )
+                if token.cancelled:
+                    raise CancelledError("搜索已取消")
+            else:
+                log_event(
+                    "search.waiting_for_index" if not search_active() else "search.waiting_for_lease",
+                    component="search_engine",
+                    request_id=request_id,
+                    query_hash=query_hash,
+                )
+                if status_callback is not None:
+                    status_callback(
+                        "waiting_for_index" if not search_active() else "waiting"
+                    )
+                lease = get_search_index_coordinator().request_search(
+                    request_id,
+                    cancel_event=None,
+                    readiness_checker=self.db.search_projection_readiness,
+                    cancel_checker=lambda: token.cancelled,
+                    max_wait_seconds=10.0,
+                )
+            if lease is not None:
+                log_event(
+                    "search.lease.acquired",
+                    component="search_engine",
+                    request_id=request_id,
+                    query_hash=query_hash,
+                    database_path=str(self.db.db_path),
+                    generation_isolated=False,
+                )
+                if status_callback is not None:
+                    status_callback("active")
+            elif status_callback is not None:
+                # An immutable published generation never pauses the writer;
+                # it is a read-only snapshot alongside the candidate file.
+                status_callback("snapshot_active")
+            timeout_timer = threading.Timer(
+                MAX_SEARCH_SECONDS,
+                lambda: token.cancel(reason="SEARCH_TIMEOUT"),
+            )
+            timeout_timer.daemon = True
+            timeout_timer.start()
             with self.db.connect_read_only(timeout_seconds=2.0) as connection:
                 connection.execute("BEGIN")
                 previous = self._snapshot_connection
                 self._snapshot_connection = connection
                 try:
-                    return self._search_impl(
+                    result = self._search_impl(
                         query,
-                        cancel_token,
+                        token,
                         progress_callback=progress_callback,
                         partial_callback=partial_callback,
                     )
+                    log_event(
+                        "search.completed",
+                        component="search_engine",
+                        request_id=request_id,
+                        query_hash=query_hash,
+                        generation=self.snapshot_generation,
+                        database_path=str(self.db.db_path),
+                        generation_isolated=self.generation_isolated,
+                        elapsed_ms=result.elapsed_ms,
+                        checked_candidates=result.total_candidates,
+                        confirmed_files=result.total_confirmed,
+                    )
+                    return result
                 finally:
                     self._snapshot_connection = previous
+        except SearchTimeout as exc:
+            log_event(
+                "search.timeout",
+                level=logging.WARNING,
+                component="search_engine",
+                request_id=request_id,
+                query_hash=query_hash,
+                error_type=type(exc).__name__,
+                error_message=str(exc),
+            )
+            raise
+        except CancelledError as exc:
+            log_event(
+                "search.cancelled",
+                component="search_engine",
+                request_id=request_id,
+                query_hash=query_hash,
+                error_type=type(exc).__name__,
+                error_message=str(exc),
+            )
+            raise
+        except OperationCancelled as exc:
+            if token.cancelled:
+                cancelled = CancelledError("搜索已取消")
+                log_event(
+                    "search.cancelled",
+                    component="search_engine",
+                    request_id=request_id,
+                    query_hash=query_hash,
+                    error_type=type(cancelled).__name__,
+                    error_message=str(cancelled),
+                )
+                raise cancelled from exc
+            raise
+        except Exception as exc:
+            log_exception(
+                "search.failed",
+                exc,
+                component="search_engine",
+                request_id=request_id,
+                query_hash=query_hash,
+            )
+            raise
         finally:
+            if timeout_timer is not None:
+                timeout_timer.cancel()
             if lease is not None:
                 lease.release()
+                log_event(
+                    "search.lease.released",
+                    component="search_engine",
+                    request_id=request_id,
+                    query_hash=query_hash,
+                )
 
     def _search_impl(
         self,
@@ -110,12 +261,16 @@ class SearchEngine:
     ) -> SearchPage:
         # Full readiness diagnostics scan large tables. Keep the foreground
         # search on the bounded committed-projection gate instead.
-        readiness = self.db.quick_index_readiness()
+        readiness = (
+            self._compact_readiness()
+            if self.compact_snapshot
+            else self.db.search_projection_readiness()
+        )
         if not bool(readiness.get("search_available", readiness["ready"])):
             raise IndexNotReadyError(
                 "尚无已经完成并提交的可搜索文件："
-                f"{readiness['complete_files']}/{readiness['eligible_files']} 个范围内文件完成，"
-                f"仍有 {readiness['blocking_files']} 个文件需要处理"
+                f"{readiness.get('complete_files', 0)}/{readiness.get('eligible_files', 0)} 个范围内文件完成，"
+                f"仍有 {readiness.get('blocking_files', 0)} 个文件需要处理"
             )
         if (
             query.mode != "regex"
@@ -143,6 +298,14 @@ class SearchEngine:
             return SearchPage([], 0, 0, 0, query.page, query.page_size, 0, False)
         search_filename, search_path, search_content = self._source_flags(query)
         confirmed_by_file: dict[int, SearchResult] = {}
+        page_start = max(0, (max(1, int(query.page)) - 1) * max(1, int(query.page_size)))
+        page_end = page_start + max(1, min(100, int(query.page_size)))
+        display_file_limit = max(1, min(100, int(query.page_size)))
+        max_blocks_per_file = 20
+        pending_content_rows: dict[int, list[sqlite3.Row]] = {}
+        content_candidate_file_ids: set[int] = set()
+        content_candidate_file_order: list[int] = []
+        content_candidate_file_indexes: dict[int, int] = {}
         total_candidates = 0
         full_scan = self._requires_full_scan(query)
         total_to_scan = 0
@@ -198,19 +361,60 @@ class SearchEngine:
             stage: str,
             phase_label: str,
             reason: str,
+            defer_content_hydration: bool = False,
         ) -> None:
             nonlocal total_candidates
             last_reported = total_candidates
             for row in rows:
                 token.throw_if_cancelled()
                 total_candidates += 1
-                if self._matches(row, normalized_terms, query, regex_pattern):
+                if defer_content_hydration:
+                    file_id = int(row["file_id"])
+                    if file_id not in content_candidate_file_ids:
+                        content_candidate_file_ids.add(file_id)
+                        content_candidate_file_indexes[file_id] = len(content_candidate_file_order)
+                        content_candidate_file_order.append(file_id)
+                    candidate_index = content_candidate_file_indexes[file_id]
+                    if file_id in pending_content_rows or page_start <= candidate_index < page_end:
+                        pending_content_rows.setdefault(file_id, []).append(row)
+                    if total_candidates - last_reported >= 256:
+                        self._report_progress(
+                            progress_callback,
+                            stage=stage,
+                            phase_label=phase_label,
+                            started=started,
+                            progress_kind="determinate" if full_scan else "busy",
+                            checked_candidates=total_candidates,
+                            total_candidates=total_to_scan if full_scan else 0,
+                            confirmed_files=len(confirmed_by_file),
+                            can_cancel=True,
+                            slow_reason=reason,
+                        )
+                        last_reported = total_candidates
+                    continue
+                file_id = int(row["file_id"])
+                existing = confirmed_by_file.get(file_id)
+                if (
+                    not full_scan
+                    and existing is None
+                    and len(confirmed_by_file) >= display_file_limit
+                ):
+                    continue
+                if existing is not None and len(existing.matches) >= max_blocks_per_file:
+                    continue
+                if int(row["candidate_only"] or 0):
+                    hydrated = self._hydrate_content_row(row, token)
+                    if hydrated is None:
+                        continue
+                    row = hydrated
+                if self._matches(row, normalized_terms, query, regex_pattern, token):
                     result = self._row_to_result(
                         row,
                         raw_terms,
                         normalized_terms,
                         query,
                         regex_pattern,
+                        token,
                     )
                     existing = confirmed_by_file.get(result.file_id)
                     if existing is None:
@@ -290,7 +494,36 @@ class SearchEngine:
                     "正在扫描正文..." if full_scan else "正在搜索正文..."
                 ),
                 reason=slow_reason(content_strategy),
+                defer_content_hydration=(
+                    not full_scan
+                    and content_strategy != "scan"
+                ),
             )
+
+            # Confirm only the selected result window. The candidate query
+            # above still visits every lightweight block so counts remain
+            # honest, but raw_text/context are fetched for at most 100 files
+            # and 20 blocks per file.
+            for file_id, candidates in pending_content_rows.items():
+                token.throw_if_cancelled()
+                for candidate in candidates[:max_blocks_per_file]:
+                    hydrated = self._hydrate_content_row(candidate, token)
+                    if hydrated is None:
+                        continue
+                    if self._matches(hydrated, normalized_terms, query, regex_pattern, token):
+                        result = self._row_to_result(
+                            hydrated,
+                            raw_terms,
+                            normalized_terms,
+                            query,
+                            regex_pattern,
+                            token,
+                        )
+                        existing = confirmed_by_file.get(result.file_id)
+                        if existing is None:
+                            confirmed_by_file[result.file_id] = result
+                        else:
+                            self._merge_result(existing, result)
 
         self._report_progress(
             progress_callback,
@@ -309,6 +542,12 @@ class SearchEngine:
             total_candidates,
             started,
             partial=False,
+            total_confirmed_override=(
+                len(set(confirmed_by_file).union(content_candidate_file_ids))
+                if content_candidate_file_ids
+                else None
+            ),
+            page_already_selected=bool(content_candidate_file_ids),
         )
         self._report_progress(
             progress_callback,
@@ -341,18 +580,23 @@ class SearchEngine:
         started: float,
         *,
         partial: bool,
+        total_confirmed_override: int | None = None,
+        page_already_selected: bool = False,
     ) -> SearchPage:
         confirmed = copy.deepcopy(list(confirmed_by_file.values()))
         for result in confirmed:
             self._finalize_result(result)
         confirmed.sort(key=lambda item: self._result_sort_key(item, query.sort_by))
-        total_confirmed = len(confirmed)
+        total_confirmed = max(
+            len(confirmed),
+            int(total_confirmed_override or 0),
+        )
         max_results = max(1, int(query.max_results or total_confirmed or 1))
         available_results = min(total_confirmed, max_results)
         confirmed = confirmed[:available_results]
         page = max(1, query.page)
-        start = (page - 1) * query.page_size
-        end = start + query.page_size
+        start = 0 if page_already_selected else (page - 1) * query.page_size
+        end = len(confirmed) if page_already_selected else start + query.page_size
         return SearchPage(
             confirmed[start:end],
             total_candidates,
@@ -435,44 +679,77 @@ class SearchEngine:
         normalized_terms: list[str],
         token: CancelToken,
     ) -> Iterator[sqlite3.Row]:
-        sql, params, _strategy = self._content_query(query, normalized_terms)
+        sql, params, _strategy = self._content_query(
+            query,
+            normalized_terms,
+            include_text=self._requires_full_scan(query),
+        )
         yield from self._stream_rows(sql, params, token)
 
     def _content_query(
         self,
         query: SearchQuery,
         normalized_terms: list[str],
+        *,
+        include_text: bool = True,
     ) -> tuple[str, list[Any], str]:
-        where: list[str] = [
-            "f.is_deleted = 0",
-            "f.parse_status IN ('success', 'metadata_only')",
-            """NOT EXISTS (
-                SELECT 1 FROM index_scope_exclusions excluded
-                WHERE excluded.file_id = f.id
-                  AND excluded.revoked_at IS NULL
-                  AND excluded.invalidated_at IS NULL
-            )""",
-        ]
+        where: list[str] = (
+            ["1 = 1"]
+            if self.compact_snapshot
+            else [
+                "f.is_deleted = 0",
+                "f.parse_status IN ('success', 'metadata_only')",
+                """NOT EXISTS (
+                    SELECT 1 FROM index_scope_exclusions excluded
+                    WHERE excluded.file_id = f.id
+                      AND excluded.revoked_at IS NULL
+                      AND excluded.invalidated_at IS NULL
+                )""",
+            ]
+        )
         params: list[Any] = []
         source_params: list[Any] = []
         source_where: list[str] = []
         strategy = "scan"
+        source_grouping = ""
+        source_table = "content_fts"
+        source_id_expression = self._fts_rowid_expression("content_fts")
         if self._can_use_fts_match("content_fts", query, normalized_terms):
             source_where.append("content_fts MATCH ?")
             source_params.append(
                 self._fts_match_expression(
                     normalized_terms,
                     query.mode,
-                    column="normalized_text",
+                    column=None if self.compact_snapshot else "normalized_text",
+                    phrase=not self.compact_snapshot,
                 )
             )
             strategy = "fts_match"
         elif not self._requires_full_scan(query):
-            text_predicates = self._like_predicates(
-                ["normalized_text"], query, normalized_terms, source_params
-            )
-            source_where.append("(" + text_predicates + ")")
-            strategy = "like"
+            if self.compact_snapshot:
+                # The compact snapshot intentionally does not persist a
+                # second normalized-text column. A two-character query scans
+                # compressed blocks in bounded batches and verifies matches
+                # in Python.
+                source_table = "search_blocks"
+                source_id_expression = "CAST(id AS INTEGER)"
+                # Trigram FTS5 cannot return a two-character CJK term.  Use
+                # the decoded compact view for a coarse candidate filter, then
+                # keep the Python matcher as the exact verifier.  Returning
+                # every block here made the total counter include unverified
+                # files while the hydration window could contain none of them.
+                like_predicates = ["raw_text LIKE ?" for _ in normalized_terms]
+                source_where.append(
+                    "(" + (" OR " if query.mode == "any" else " AND ").join(like_predicates) + ")"
+                )
+                source_params.extend(f"%{term}%" for term in normalized_terms)
+                strategy = "compatibility_scan"
+            else:
+                text_predicates = self._like_predicates(
+                    ["normalized_text"], query, normalized_terms, source_params
+                )
+                source_where.append("(" + text_predicates + ")")
+                strategy = "like"
         where.append("(cb.source_type IS NULL OR cb.source_type != 'metadata')")
         self._append_filters(where, params, query)
         if not query.include_ocr:
@@ -482,37 +759,137 @@ class SearchEngine:
                 "(cb.source_type IS NULL OR cb.source_type != 'ocr' OR COALESCE(cb.ocr_confidence, 0) >= ?)"
             )
             params.append(float(query.ocr_min_confidence))
-        columns = """
+        text_columns = (
+            "cb.raw_text, cb.normalized_text, 0 AS candidate_only"
+            if include_text
+            else "NULL AS raw_text, NULL AS normalized_text, 1 AS candidate_only"
+        )
+        outer_columns = """
+            block_id, file_id, path, filename, extension, size_bytes,
+            modified_time, parse_status, location_text, page_number,
+            slide_number, sheet_name, cell_start, cell_end, line_start,
+            line_end, raw_text, normalized_text, source_type, ocr_confidence,
+            candidate_only
+        """
+        columns = f"""
             cb.id AS block_id, f.id AS file_id, f.path, f.filename, f.extension,
             f.size_bytes, f.modified_time, f.parse_status, cb.location_text,
             cb.page_number, cb.slide_number, cb.sheet_name,
             cb.cell_start, cb.cell_end, cb.line_start, cb.line_end,
-            cb.raw_text, cb.normalized_text, cb.source_type, cb.ocr_confidence
+            {text_columns}, cb.source_type, cb.ocr_confidence
         """
         predicates = " AND ".join(where)
         source_predicates = " AND ".join(source_where) or "1 = 1"
+        block_source = "search_blocks" if self.compact_snapshot else "content_blocks"
         # Materialize the expensive FTS/LIKE candidate set once. The old query
         # scanned content_fts independently for document-owned and file-owned
         # blocks, which made short CJK searches pay the same full scan twice.
         sql = f"""
             WITH matched_blocks(block_id) AS MATERIALIZED (
-                SELECT CAST(block_id AS INTEGER)
-                FROM content_fts
+                SELECT DISTINCT {source_id_expression}
+                FROM {source_table}
                 WHERE {source_predicates}
+                {source_grouping}
             )
             SELECT {columns}
             FROM matched_blocks mb
-            JOIN content_blocks cb ON cb.id = mb.block_id
+            JOIN {block_source} cb ON cb.id = mb.block_id
             JOIN files f ON f.document_id = cb.document_id
             WHERE cb.document_id IS NOT NULL AND {predicates}
             UNION ALL
             SELECT {columns}
             FROM matched_blocks mb
-            JOIN content_blocks cb ON cb.id = mb.block_id
+            JOIN {block_source} cb ON cb.id = mb.block_id
             JOIN files f ON f.id = cb.file_id
             WHERE cb.document_id IS NULL AND {predicates}
         """
         return sql, [*source_params, *params, *params], strategy
+
+    def _hydrate_content_row(
+        self,
+        candidate: sqlite3.Row,
+        token: CancelToken,
+    ) -> sqlite3.Row | None:
+        token.throw_if_cancelled()
+        connection = self._snapshot_connection
+        owns_connection = connection is None
+        if owns_connection:
+            context = self.db.connect_read_only(timeout_seconds=0.75)
+            connection = context.__enter__()
+        block_source = "search_blocks" if self.compact_snapshot else "content_blocks"
+        try:
+            assert connection is not None
+            row = connection.execute(
+                f"""
+                SELECT cb.id AS block_id, f.id AS file_id, f.path, f.filename,
+                       f.extension, f.size_bytes, f.modified_time,
+                       f.parse_status, cb.location_text, cb.page_number,
+                       cb.slide_number, cb.sheet_name, cb.cell_start, cb.cell_end,
+                       cb.line_start, cb.line_end, cb.raw_text, cb.normalized_text,
+                       cb.source_type, cb.ocr_confidence, 0 AS candidate_only
+                FROM {block_source} cb
+                JOIN files f ON f.id = ?
+                WHERE cb.id = ?
+                  AND {"1 = 1" if self.compact_snapshot else "f.is_deleted = 0"}
+                  AND f.parse_status IN ('success', 'metadata_only')
+                  AND (
+                      cb.document_id IS NULL
+                      OR cb.document_id = f.document_id
+                      OR (cb.document_id = -f.id AND f.document_id IS NULL)
+                  )
+                """,
+                (int(candidate["file_id"]), int(candidate["block_id"])),
+            ).fetchone()
+            return row
+        finally:
+            if owns_connection:
+                context.__exit__(None, None, None)
+
+    def _detect_compact_snapshot(self) -> bool:
+        try:
+            with self.db.connect_read_only(timeout_seconds=0.5) as con:
+                return (
+                    con.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='snapshot_meta'"
+                    ).fetchone()
+                    is not None
+                    and con.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type='view' AND name='search_blocks'"
+                    ).fetchone()
+                    is not None
+                )
+        except sqlite3.Error:
+            return False
+
+    def _compact_readiness(self) -> dict[str, object]:
+        connection = self._snapshot_connection
+        owns_connection = connection is None
+        context = None
+        if owns_connection:
+            context = self.db.connect_read_only(timeout_seconds=1.0)
+            connection = context.__enter__()
+        try:
+            assert connection is not None
+            row = connection.execute(
+                "SELECT * FROM snapshot_meta WHERE id = 1"
+            ).fetchone()
+            if row is None or int(row["state"]) != 1:
+                return {"search_available": False, "ready": False}
+            return {
+                "search_available": True,
+                "ready": True,
+                "index_complete": True,
+                "search_is_partial": False,
+                "active_generation": int(row["generation"]),
+                "complete_files": int(row["file_count"]),
+                "eligible_files": int(row["file_count"]),
+                "blocking_files": 0,
+                "document_count": int(row["document_count"]),
+                "block_count": int(row["block_count"]),
+            }
+        finally:
+            if owns_connection and context is not None:
+                context.__exit__(None, None, None)
 
     def _metadata_candidates(
         self,
@@ -537,16 +914,20 @@ class SearchEngine:
         search_filename: bool,
         search_path: bool,
     ) -> tuple[str, list[Any], str]:
-        where: list[str] = [
-            "f.is_deleted = 0",
-            "f.parse_status IN ('success', 'metadata_only')",
-            """NOT EXISTS (
-                SELECT 1 FROM index_scope_exclusions excluded
-                WHERE excluded.file_id = f.id
-                  AND excluded.revoked_at IS NULL
-                  AND excluded.invalidated_at IS NULL
-            )""",
-        ]
+        where: list[str] = (
+            ["1 = 1"]
+            if self.compact_snapshot
+            else [
+                "f.is_deleted = 0",
+                "f.parse_status IN ('success', 'metadata_only')",
+                """NOT EXISTS (
+                    SELECT 1 FROM index_scope_exclusions excluded
+                    WHERE excluded.file_id = f.id
+                      AND excluded.revoked_at IS NULL
+                      AND excluded.invalidated_at IS NULL
+                )""",
+            ]
+        )
         params: list[Any] = []
         fields: list[str] = []
         if search_filename:
@@ -558,7 +939,9 @@ class SearchEngine:
         use_fts = self._can_use_fts_match("files_fts", query, normalized_terms)
         strategy = "scan"
         if use_fts:
-            if search_filename and not search_path:
+            if self.compact_snapshot:
+                column = None
+            elif search_filename and not search_path:
                 column = "filename"
             elif search_path and not search_filename:
                 column = "path"
@@ -570,6 +953,7 @@ class SearchEngine:
                     normalized_terms,
                     query.mode,
                     column=column,
+                    phrase=not self.compact_snapshot,
                 )
             )
             strategy = "fts_match"
@@ -585,7 +969,7 @@ class SearchEngine:
             raw_expression = "f.filename"
         from_clause = (
             "FROM files_fts JOIN files f "
-            "ON f.id = CAST(files_fts.file_id AS INTEGER)"
+            f"ON f.id = {self._fts_rowid_expression('files_fts')}"
             if use_fts
             else "FROM files f"
         )
@@ -597,7 +981,8 @@ class SearchEngine:
                 NULL AS cell_start, NULL AS cell_end, NULL AS line_start, NULL AS line_end,
                 {raw_expression} AS raw_text,
                 {raw_expression} AS normalized_text,
-                'metadata' AS source_type, NULL AS ocr_confidence
+                'metadata' AS source_type, NULL AS ocr_confidence,
+                0 AS candidate_only
             {from_clause}
             WHERE {' AND '.join(where)}
         """
@@ -637,18 +1022,53 @@ class SearchEngine:
         self._trigram_tables[table] = available
         return available
 
+    def _fts_rowid_expression(self, table: str) -> str:
+        """Return the row identity for legacy or compact contentless FTS."""
+
+        connection = self._snapshot_connection
+        if connection is not None:
+            row = connection.execute(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+                (table,),
+            ).fetchone()
+        else:
+            with self.db.connect_read_only(timeout_seconds=0.5) as con:
+                row = con.execute(
+                    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+                    (table,),
+                ).fetchone()
+        definition = str(row["sql"] or "") if row is not None else ""
+        return f"CAST({table}.rowid AS INTEGER)" if "content=''" in definition.lower() else (
+            "CAST(block_id AS INTEGER)" if table == "content_fts" else "CAST(file_id AS INTEGER)"
+        )
+
     @staticmethod
     def _fts_match_expression(
         normalized_terms: list[str],
         mode: str,
         *,
         column: str | None,
+        phrase: bool = True,
     ) -> str:
         glue = " OR " if mode == "any" else " AND "
         expressions: list[str] = []
         for term in normalized_terms:
-            quoted = '"' + term.replace('"', '""') + '"'
-            expressions.append(f"{column} : {quoted}" if column else quoted)
+            if phrase:
+                terms = ['"' + term.replace('"', '""') + '"']
+            else:
+                # detail=none cannot execute a multi-token phrase. Expand a
+                # long term into its trigram tokens and let the raw-text
+                # verification phase enforce order and exact semantics.
+                terms = [
+                    '"' + term[index : index + 3].replace('"', '""') + '"'
+                    for index in range(max(1, len(term) - 2))
+                ]
+            term_expression = " AND ".join(terms)
+            if len(terms) > 1:
+                term_expression = f"({term_expression})"
+            expressions.append(
+                f"{column} : {term_expression}" if column else term_expression
+            )
         return glue.join(expressions)
 
     def _requires_full_scan(self, query: SearchQuery) -> bool:
@@ -684,6 +1104,8 @@ class SearchEngine:
             except sqlite3.OperationalError as exc:
                 message = str(exc).lower()
                 if token.cancelled and "interrupt" in message:
+                    if token.cancel_reason == "SEARCH_TIMEOUT":
+                        raise SearchTimeout("搜索达到时间上限") from exc
                     raise CancelledError("搜索已取消") from exc
                 if "database is locked" in message or "database is busy" in message:
                     if attempt < 2:
@@ -779,6 +1201,8 @@ class SearchEngine:
             except sqlite3.OperationalError as exc:
                 message = str(exc).lower()
                 if token.cancelled and "interrupt" in message:
+                    if token.cancel_reason == "SEARCH_TIMEOUT":
+                        raise SearchTimeout("搜索达到时间上限") from exc
                     raise CancelledError("搜索已取消") from exc
                 if "database is locked" in message or "database is busy" in message:
                     if attempt < 2:
@@ -831,7 +1255,10 @@ class SearchEngine:
         terms: list[str],
         query: SearchQuery,
         regex_pattern: re.Pattern[str] | None,
+        token: CancelToken | None = None,
     ) -> bool:
+        if token is not None:
+            token.throw_if_cancelled()
         if regex_pattern is not None:
             text = str(row["raw_text"] or "")
             if query.ignore_spaces or query.ignore_hyphens:
@@ -842,12 +1269,24 @@ class SearchEngine:
                     ignore_hyphens=query.ignore_hyphens,
                 )
             return regex_pattern.search(text) is not None
-        text = normalize_text(
-            str(row["normalized_text"] or ""),
-            case_sensitive=query.case_sensitive,
-            ignore_spaces=query.ignore_spaces,
-            ignore_hyphens=query.ignore_hyphens,
-        )
+        stored_normalized = str(row["normalized_text"] or "")
+        if (
+            stored_normalized
+            and not query.case_sensitive
+            and not query.ignore_spaces
+            and not query.ignore_hyphens
+        ):
+            # Parsers persist this exact normalization for the normal query
+            # path.  Re-normalizing it here was the dominant cost for huge
+            # blocks and provided no additional correctness.
+            text = stored_normalized
+        else:
+            text = normalize_text(
+                str(row["raw_text"] or ""),
+                case_sensitive=query.case_sensitive,
+                ignore_spaces=query.ignore_spaces,
+                ignore_hyphens=query.ignore_hyphens,
+            )
         mode = query.mode
         if mode in {"exact", "phrase", "filename"}:
             return terms[0] in text
@@ -864,18 +1303,32 @@ class SearchEngine:
         normalized_terms: list[str],
         query: SearchQuery,
         regex_pattern: re.Pattern[str] | None,
+        token: CancelToken | None = None,
     ) -> SearchResult:
+        if token is not None:
+            token.throw_if_cancelled()
         raw_text = str(row["raw_text"] or "")
-        normalized_text = normalize_text(
-            raw_text,
-            case_sensitive=query.case_sensitive,
-            ignore_spaces=query.ignore_spaces,
-            ignore_hyphens=query.ignore_hyphens,
-        )
+        stored_normalized = str(row["normalized_text"] or "")
+        if (
+            stored_normalized
+            and not query.case_sensitive
+            and not query.ignore_spaces
+            and not query.ignore_hyphens
+        ):
+            normalized_text = stored_normalized
+        else:
+            normalized_text = normalize_text(
+                raw_text,
+                case_sensitive=query.case_sensitive,
+                ignore_spaces=query.ignore_spaces,
+                ignore_hyphens=query.ignore_hyphens,
+            )
         if regex_pattern is None:
             hits = count_hits(normalized_text, normalized_terms)
+            if token is not None:
+                token.throw_if_cancelled()
             context = make_context(
-                raw_text,
+                raw_text[:MAX_CONTEXT_CHARS],
                 raw_terms,
                 case_sensitive=query.case_sensitive,
                 ignore_spaces=query.ignore_spaces,
@@ -885,10 +1338,15 @@ class SearchEngine:
             first_match: re.Match[str] | None = None
             hits = 0
             for regex_match in regex_pattern.finditer(raw_text):
+                if token is not None and hits % 256 == 0:
+                    token.throw_if_cancelled()
                 if first_match is None:
                     first_match = regex_match
                 hits += 1
-            context = make_regex_context(raw_text, first_match)
+            context = make_regex_context(
+                raw_text,
+                first_match,
+            )
         filename_norm = normalize_text(
             str(row["filename"]),
             case_sensitive=query.case_sensitive,

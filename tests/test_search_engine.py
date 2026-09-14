@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -24,20 +25,79 @@ class SearchEngineTests(unittest.TestCase):
             database.initialize()
             engine = SearchEngine(database)
             query = SearchQuery(
-                text="真空",
+                text="ab",
                 mode="exact",
                 search_filename=False,
                 search_path=False,
                 search_content=True,
             )
 
-            sql, params, strategy = engine._content_query(query, ["真空"])
+            sql, params, strategy = engine._content_query(query, ["ab"])
 
             self.assertEqual(strategy, "like")
             self.assertIn("JOIN files f ON f.document_id = cb.document_id", sql)
             self.assertIn("JOIN files f ON f.id = cb.file_id", sql)
             self.assertNotIn("OR (cb.document_id IS NULL", sql)
-            self.assertEqual(params, ["%真空%", 0.6, 0.6])
+            self.assertEqual(params, ["%ab%", 0.6, 0.6])
+
+    def test_two_character_chinese_query_uses_compatibility_scan(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = base / "files"
+            root.mkdir()
+            (root / "vacuum.txt").write_text("真空泵", encoding="utf-8")
+            db = DatabaseManager(base / "index.db")
+            db.initialize()
+            root_id = db.add_root(root)
+            IndexManager(db, AppSettings(enable_ocr=False)).index_root(root_id)
+            query = SearchQuery(
+                text="真空",
+                search_filename=False,
+                search_path=False,
+                search_content=True,
+            )
+            sql, params, strategy = SearchEngine(db)._content_query(query, ["真空"])
+            self.assertEqual(strategy, "like")
+            self.assertNotIn("short2", sql)
+            self.assertEqual(params[0], "%真空%")
+            self.assertFalse((base / "index.short2.db").exists())
+            self.assertEqual(SearchEngine(db).search(query).total_confirmed, 1)
+
+    def test_two_and_three_short_chinese_terms_use_bigram_intersection(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = base / "files"
+            root.mkdir()
+            (root / "all.txt").write_text("真空 校准 吸光", encoding="utf-8")
+            (root / "partial.txt").write_text("真空 维护 记录", encoding="utf-8")
+            db = DatabaseManager(base / "index.db")
+            db.initialize()
+            root_id = db.add_root(root)
+            IndexManager(db, AppSettings(enable_ocr=False)).index_root(root_id)
+            engine = SearchEngine(db)
+
+            two_terms = ["真空", "校准"]
+            sql, params, strategy = engine._content_query(
+                SearchQuery(text="真空 校准", mode="all"),
+                two_terms,
+            )
+            self.assertEqual(strategy, "like")
+            self.assertNotIn("short2", sql)
+            self.assertEqual(params[:2], ["%真空%", "%校准%"])
+            self.assertEqual(
+                engine.search(SearchQuery(text="真空 校准", mode="all")).total_confirmed,
+                1,
+            )
+            self.assertEqual(
+                engine.search(
+                    SearchQuery(text="真空 校准 吸光", mode="all")
+                ).total_confirmed,
+                1,
+            )
+            self.assertEqual(
+                engine.search(SearchQuery(text="校准 维护", mode="any")).total_confirmed,
+                2,
+            )
 
     def test_search_result_preserves_structured_slide_location(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -68,6 +128,16 @@ class SearchEngineTests(unittest.TestCase):
                 parser_name="pptx",
             )
             db.update_root_scan_time(root_id, "ready")
+            with db.connect() as con:
+                con.execute(
+                    "INSERT INTO index_state(key, value) VALUES ('search_projection_generation', '1') "
+                    "ON CONFLICT(key) DO UPDATE SET value='1'"
+                )
+                con.execute(
+                    "INSERT INTO index_state(key, value) VALUES ('content_fts_active_generation', '1') "
+                    "ON CONFLICT(key) DO UPDATE SET value='1'"
+                )
+            db.rebuild_index_counters()
 
             page = SearchEngine(db).search(
                 SearchQuery(
@@ -185,7 +255,7 @@ class SearchEngineTests(unittest.TestCase):
             with self.assertRaises(IndexNotReadyError):
                 SearchEngine(db).search(SearchQuery(text="anything"))
 
-    def test_committed_partial_projection_is_searchable_before_scope_complete(self) -> None:
+    def test_incomplete_projection_is_not_searchable_before_scope_complete(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             root = base / "files"
@@ -219,31 +289,20 @@ class SearchEngineTests(unittest.TestCase):
 
             readiness = db.index_readiness()
             self.assertFalse(readiness["ready"])
-            self.assertTrue(readiness["search_available"])
-            self.assertTrue(readiness["search_is_partial"])
+            self.assertFalse(readiness["search_available"])
+            self.assertFalse(readiness["search_is_partial"])
             self.assertGreater(int(readiness["search_projection_generation"]), 0)
 
-            page = SearchEngine(db).search(
-                SearchQuery(
-                    text="PARTIAL_INDEX_HIT",
-                    mode="exact",
-                    search_filename=False,
-                    search_path=False,
-                    search_content=True,
+            with self.assertRaises(IndexNotReadyError):
+                SearchEngine(db).search(
+                    SearchQuery(
+                        text="PARTIAL_INDEX_HIT",
+                        mode="exact",
+                        search_filename=False,
+                        search_path=False,
+                        search_content=True,
+                    )
                 )
-            )
-            self.assertEqual(page.total_confirmed, 1)
-
-            hidden = SearchEngine(db).search(
-                SearchQuery(
-                    text="pending",
-                    mode="exact",
-                    search_filename=True,
-                    search_path=False,
-                    search_content=False,
-                )
-            )
-            self.assertEqual(hidden.total_confirmed, 0)
 
     def test_extension_filter(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -375,6 +434,12 @@ class SearchEngineTests(unittest.TestCase):
                     ],
                 )
             db.update_root_scan_time(root_id, "ready")
+            db.rebuild_index_counters()
+            with db.connect() as con:
+                con.execute(
+                    "UPDATE index_state SET value = '1' WHERE key IN "
+                    "('search_projection_generation', 'content_fts_active_generation')"
+                )
             token = CancelToken()
 
             def cancel_during_scan(payload: dict[str, object]) -> None:
@@ -460,6 +525,16 @@ class SearchEngineTests(unittest.TestCase):
                     fts_rows,
                 )
             db.update_root_scan_time(root_id, "ready")
+            with db.connect() as con:
+                con.execute(
+                    "INSERT INTO index_state(key, value) VALUES ('search_projection_generation', '1') "
+                    "ON CONFLICT(key) DO UPDATE SET value='1'"
+                )
+                con.execute(
+                    "INSERT INTO index_state(key, value) VALUES ('content_fts_active_generation', '1') "
+                    "ON CONFLICT(key) DO UPDATE SET value='1'"
+                )
+            db.rebuild_index_counters()
 
             page = SearchEngine(db).search(
                 SearchQuery(

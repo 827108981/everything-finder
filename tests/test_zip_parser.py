@@ -46,6 +46,21 @@ class ZipParserTests(unittest.TestCase):
             self.assertEqual(diagnostic["error_code"], "UnicodeError")
             self.assertIn("does not start with BOM", diagnostic["error_message"])
 
+    def test_archive_metadata_members_do_not_enter_ocr_or_block_publication(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            archive = Path(tmp) / "macos-metadata.zip"
+            with zipfile.ZipFile(archive, "w") as handle:
+                handle.writestr("__MACOSX/._emoji.png", b"not an image")
+                handle.writestr("assets/._thumbnail.png", b"not an image")
+                handle.writestr(".DS_Store", b"metadata")
+
+            parser = ZipParser(AppSettings(enable_ocr=True, ocr_images=True))
+            blocks = list(parser.parse(archive, CancelToken()))
+
+            self.assertEqual(blocks, [])
+            self.assertEqual(parser.last_error_code, "ZIP_NO_SUPPORTED_MEMBER")
+            self.assertEqual(parser.last_diagnostics, [])
+
     def test_member_diagnostics_round_trip_through_failed_file_query(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)

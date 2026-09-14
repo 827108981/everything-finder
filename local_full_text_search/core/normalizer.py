@@ -71,6 +71,28 @@ def make_context(
 ) -> str:
     if not raw_text:
         return ""
+    # The common search path already has a normalized column for matching.
+    # Do not build a normalized copy plus one offset tuple per character just
+    # to render a short snippet from a potentially multi-hundred-megabyte
+    # block.  Direct matching keeps work proportional to the returned window.
+    if not ignore_spaces and not ignore_hyphens:
+        direct_context = _make_direct_context(
+            raw_text,
+            terms,
+            context_before=context_before,
+            context_after=context_after,
+            case_sensitive=case_sensitive,
+        )
+        # Preserve NFKC-only matches for ordinary-sized blocks.  For huge
+        # blocks a direct literal miss is still preferable to allocating a
+        # full normalized copy just to show a best-effort leading snippet.
+        flags = 0 if case_sensitive else re.IGNORECASE
+        if len(raw_text) > 1_048_576 or any(
+            re.search(re.escape(str(term or "")), raw_text, flags)
+            for term in terms
+            if str(term or "")
+        ):
+            return direct_context
     normalized_raw, raw_offsets = _normalize_with_raw_offsets(
         raw_text,
         case_sensitive=case_sensitive,
@@ -99,6 +121,39 @@ def make_context(
     raw_match_end = raw_offsets[min(len(raw_offsets) - 1, best_index + best_length - 1)][1]
     start = max(0, raw_match_start - context_before)
     end = min(len(raw_text), raw_match_end + context_after)
+    prefix = "..." if start > 0 else ""
+    suffix = "..." if end < len(raw_text) else ""
+    return prefix + raw_text[start:end].replace("\n", " ") + suffix
+
+
+def _make_direct_context(
+    raw_text: str,
+    terms: list[str],
+    *,
+    context_before: int,
+    context_after: int,
+    case_sensitive: bool,
+) -> str:
+    """Find the first literal/Unicode-case match without whole-text offsets."""
+
+    flags = 0 if case_sensitive else re.IGNORECASE
+    best: tuple[int, int] | None = None
+    for term in terms:
+        value = str(term or "")
+        if not value:
+            continue
+        match = re.search(re.escape(value), raw_text, flags)
+        if match is None:
+            continue
+        candidate = (match.start(), match.end())
+        if best is None or candidate[0] < best[0]:
+            best = candidate
+    if best is None:
+        end = min(len(raw_text), context_before + context_after)
+        snippet = raw_text[:end]
+        return snippet + ("..." if end < len(raw_text) else "")
+    start = max(0, best[0] - context_before)
+    end = min(len(raw_text), best[1] + context_after)
     prefix = "..." if start > 0 else ""
     suffix = "..." if end < len(raw_text) else ""
     return prefix + raw_text[start:end].replace("\n", " ") + suffix
@@ -155,3 +210,14 @@ def count_hits(normalized_text: str, normalized_terms: list[str]) -> int:
 
 def contains_cjk(text: str | None) -> bool:
     return bool(text and CJK_PATTERN.search(text))
+
+
+def is_cjk_bigram(text: str | None) -> bool:
+    """Return true for a two-character CJK term used by compatibility scans."""
+
+    return bool(
+        text
+        and len(text) == 2
+        and CJK_PATTERN.fullmatch(text[0])
+        and CJK_PATTERN.fullmatch(text[1])
+    )

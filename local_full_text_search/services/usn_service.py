@@ -16,8 +16,13 @@ from pathlib import Path
 
 from local_full_text_search.core.usn_journal import (
     UsnCheckpoint,
+    UsnChangeSetLimitExceeded,
     UsnJournalUnavailable,
+    _DEFAULT_USN_PAGE_BYTES,
+    _MAX_USN_PAGE_BYTES,
+    _MIN_USN_PAGE_BYTES,
     _changes_since_direct,
+    _changes_since_page_direct,
     _current_checkpoint_direct,
 )
 
@@ -54,6 +59,41 @@ def dispatch_request(request: dict[str, object]) -> dict[str, object]:
         result = _changes_since_direct(root_path, checkpoint, max_records=max_records)
         return {
             "checkpoint": asdict(result.checkpoint),
+            "records": [asdict(record) for record in result.records],
+        }
+    if operation == "changes_since_page":
+        raw_checkpoint = request.get("checkpoint")
+        if not isinstance(raw_checkpoint, dict):
+            raise ValueError("checkpoint is required")
+        checkpoint = UsnCheckpoint(
+            journal_id=int(raw_checkpoint["journal_id"]),
+            next_usn=int(raw_checkpoint["next_usn"]),
+            volume_serial=int(raw_checkpoint["volume_serial"]),
+        )
+        raw_target = request.get("target_checkpoint")
+        target_checkpoint = None
+        if raw_target is not None:
+            if not isinstance(raw_target, dict):
+                raise ValueError("target_checkpoint must be an object")
+            target_checkpoint = UsnCheckpoint(
+                journal_id=int(raw_target["journal_id"]),
+                next_usn=int(raw_target["next_usn"]),
+                volume_serial=int(raw_target["volume_serial"]),
+            )
+        try:
+            page_bytes = int(request.get("page_bytes", _DEFAULT_USN_PAGE_BYTES))
+        except (TypeError, ValueError):
+            page_bytes = _DEFAULT_USN_PAGE_BYTES
+        page_bytes = max(_MIN_USN_PAGE_BYTES, min(page_bytes, _MAX_USN_PAGE_BYTES))
+        result = _changes_since_page_direct(
+            root_path,
+            checkpoint,
+            target_checkpoint=target_checkpoint,
+            page_bytes=page_bytes,
+        )
+        return {
+            "checkpoint": asdict(result.checkpoint),
+            "target_checkpoint": asdict(result.target_checkpoint),
             "records": [asdict(record) for record in result.records],
         }
     raise ValueError("unsupported USN helper operation")
@@ -111,6 +151,8 @@ def _write_all(handle, data: bytes) -> None:
 
 
 def _serve_connection(handle) -> None:
+    import servicemanager
+
     try:
         request_size = struct.unpack("<I", _read_exact(handle, 4))[0]
         if request_size <= 0 or request_size > MAX_REQUEST_BYTES:
@@ -118,10 +160,27 @@ def _serve_connection(handle) -> None:
         request = json.loads(_read_exact(handle, request_size).decode("utf-8"))
         if not isinstance(request, dict):
             raise ValueError("USN helper request must be an object")
+        servicemanager.LogInfoMsg(
+            f"{SERVICE_NAME} request operation={request.get('operation', '')}"
+        )
         result = dispatch_request(request)
         response: dict[str, object] = {"ok": True, "result": result}
     except (KeyError, TypeError, ValueError, OSError, UsnJournalUnavailable) as exc:
-        response = {"ok": False, "error": f"{exc.__class__.__name__}: {exc}"}
+        servicemanager.LogErrorMsg(
+            f"{SERVICE_NAME} request failed: {exc.__class__.__name__}: {exc}"
+        )
+        response = {
+            "ok": False,
+            "error_code": str(
+                getattr(exc, "error_code", "") or "USN_HELPER_ERROR"
+            ),
+            "error": f"{exc.__class__.__name__}: {exc}",
+        }
+        if isinstance(exc, UsnChangeSetLimitExceeded):
+            response["details"] = {
+                "limit": int(exc.limit),
+                "records_seen": exc.records_seen,
+            }
     body = json.dumps(response, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     if len(body) > MAX_RESPONSE_BYTES:
         body = json.dumps(
@@ -129,6 +188,12 @@ def _serve_connection(handle) -> None:
             separators=(",", ":"),
         ).encode("utf-8")
     _write_all(handle, struct.pack("<I", len(body)) + body)
+    # The service disconnects the pipe immediately after one request.  Flush
+    # before that disconnect so a successful WriteFile cannot be discarded
+    # before the interactive client reads the response (error 233).
+    import win32file
+
+    win32file.FlushFileBuffers(handle)
 
 
 import servicemanager
@@ -212,7 +277,10 @@ def _wake_pipe() -> None:
 def run_service_dispatcher() -> int:
     import servicemanager
 
-    service_class = UsnJournalService.service_class()
+    # ``PrepareToHostSingle`` expects the actual ServiceFramework class.
+    # The old name did not exist, so the installed service exited with a
+    # NameError immediately after SCM started it.
+    service_class = UsnJournalWindowsService
     servicemanager.Initialize()
     servicemanager.PrepareToHostSingle(service_class)
     servicemanager.StartServiceCtrlDispatcher()
@@ -225,6 +293,14 @@ def install_or_update_service() -> int:
     import win32serviceutil
 
     executable = str(Path(sys.executable).resolve())
+    # A source checkout launched by PyCharm needs the application script in
+    # the service command line.  For a frozen build the executable itself is
+    # the service host and must receive only the mode switch.
+    if getattr(sys, "frozen", False):
+        service_args = "--run-usn-service"
+    else:
+        service_script = Path(__file__).resolve().parents[2] / "app.py"
+        service_args = f'"{service_script}" --run-usn-service'
     try:
         win32serviceutil.InstallService(
             f"{__name__}.UsnJournalWindowsService",
@@ -232,19 +308,32 @@ def install_or_update_service() -> int:
             SERVICE_DISPLAY_NAME,
             startType=win32service.SERVICE_AUTO_START,
             exeName=executable,
-            exeArgs="--run-usn-service",
+            exeArgs=service_args,
             description=SERVICE_DESCRIPTION,
             delayedstart=False,
         )
     except pywintypes.error as exc:
         if exc.winerror != 1073:
             raise
+        try:
+            win32serviceutil.StopService(SERVICE_NAME)
+            try:
+                win32serviceutil.WaitForServiceStatus(
+                    SERVICE_NAME,
+                    win32service.SERVICE_STOPPED,
+                    10,
+                )
+            except pywintypes.error:
+                pass
+        except pywintypes.error as stop_error:
+            if stop_error.winerror not in {1060, 1062}:
+                raise
         win32serviceutil.ChangeServiceConfig(
             f"{__name__}.UsnJournalWindowsService",
             SERVICE_NAME,
             startType=win32service.SERVICE_AUTO_START,
             exeName=executable,
-            exeArgs="--run-usn-service",
+            exeArgs=service_args,
             displayName=SERVICE_DISPLAY_NAME,
             description=SERVICE_DESCRIPTION,
             delayedstart=False,

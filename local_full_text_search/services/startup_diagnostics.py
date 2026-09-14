@@ -6,6 +6,7 @@ import json
 import os
 import platform
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import threading
@@ -101,6 +102,13 @@ class StartupDiagnostics:
         self._fault_stream: TextIO | None = None
         self._last_status = "created"
         self.previous_failure: dict[str, object] | None = None
+        self.process_role = "gui"
+        # The numeric parent PID alone is not enough on Windows: an installer,
+        # an IDE launcher, Restart Manager, or another copy of the application
+        # can all be the parent.  Capture the identity at startup so a later
+        # exit record can be correlated with the process that launched us.
+        self.parent_process = _process_snapshot(os.getppid())
+        self._monitor_process: subprocess.Popen[bytes] | None = None
 
     def begin(self) -> None:
         self._prepare_paths()
@@ -115,6 +123,54 @@ class StartupDiagnostics:
         )
         self._write_state("running")
         self._install_exception_hooks()
+
+    def start_external_monitor(self) -> None:
+        """Start a detached helper that can record a hard process termination."""
+
+        if "--monitor-parent" in sys.argv or self._monitor_process is not None:
+            return
+        output_path = self.log_path.parent / "process-exit.jsonl"
+        try:
+            if bool(getattr(sys, "frozen", False)):
+                command = [
+                    sys.executable,
+                    "--monitor-parent",
+                    str(os.getpid()),
+                    str(output_path),
+                    str(self.state_path),
+                ]
+            else:
+                command = [
+                    sys.executable,
+                    str(Path(sys.argv[0]).resolve()),
+                    "--monitor-parent",
+                    str(os.getpid()),
+                    str(output_path),
+                    str(self.state_path),
+                ]
+            creation_flags = 0
+            if os.name == "nt":
+                creation_flags = 0x00000008 | 0x08000000  # DETACHED_PROCESS | CREATE_NO_WINDOW
+            self._monitor_process = subprocess.Popen(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                close_fds=True,
+                creationflags=creation_flags,
+            )
+            self.runtime_event(
+                "PROCESS_MONITOR_STARTED",
+                monitor_pid=self._monitor_process.pid,
+                monitor_output=str(output_path),
+            )
+        except Exception as exc:
+            self._monitor_process = None
+            self.runtime_event(
+                "PROCESS_MONITOR_START_FAILED",
+                error_type=type(exc).__name__,
+                error_message=str(exc)[:1000],
+            )
 
     def stage_started(self, name: str) -> None:
         with self._lock:
@@ -156,25 +212,127 @@ class StartupDiagnostics:
 
     def mark_window_visible(self) -> None:
         with self._lock:
+            # Showing the window is not the end of the application's
+            # lifetime.  The first background scan is deliberately started
+            # after this point, so marking startup complete here used to hide
+            # the exact failure window when the process disappeared during
+            # scan initialization.
+            self.current_stage = "运行中"
+            self._write(
+                "WINDOW_VISIBLE",
+                {
+                    "elapsed_ms": int((time.perf_counter() - self._started_at) * 1000),
+                    "startup_complete": False,
+                },
+            )
+            self._write_state("running", stage=self.current_stage)
+
+    def runtime_event(self, event: str, **fields: object) -> None:
+        """Record a post-window lifecycle event without changing the stage timer."""
+
+        with self._lock:
+            if self._complete:
+                return
+            self._write(str(event), dict(fields))
+            self._write_state("running", stage=self.current_stage)
+
+    def verify_crash_dump_configuration(self) -> None:
+        """Record whether Windows native dump capture is available."""
+
+        dump_dir = (
+            Path(os.environ.get("LOCALAPPDATA", tempfile.gettempdir()))
+            / "LocalFullTextSearch"
+            / "crash-dumps"
+        )
+        registry_values: dict[str, object] = {}
+        try:
+            dump_dir.mkdir(parents=True, exist_ok=True)
+            probe = dump_dir / f".write-probe-{os.getpid()}"
+            probe.write_bytes(b"ok")
+            probe.unlink(missing_ok=True)
+            if os.name == "nt":
+                import winreg
+
+                key_path = (
+                    "SOFTWARE\\Microsoft\\Windows\\Windows Error Reporting\\LocalDumps\\"
+                    + Path(sys.executable).name
+                )
+                try:
+                    with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, key_path) as key:
+                        for name in ("DumpFolder", "DumpType", "DumpCount"):
+                            try:
+                                registry_values[name] = winreg.QueryValueEx(key, name)[0]
+                            except OSError:
+                                registry_values[name] = None
+                except OSError:
+                    registry_values["key"] = "missing"
+        except Exception as exc:
+            self.runtime_event(
+                "CRASH_DUMP_CONFIGURATION_FAILED",
+                dump_dir=str(dump_dir),
+                error_type=type(exc).__name__,
+                error_message=str(exc)[:1000],
+            )
+            return
+        self.runtime_event(
+            "CRASH_DUMP_CONFIGURATION",
+            dump_dir=str(dump_dir),
+            executable_name=Path(sys.executable).name,
+            registry_values=registry_values,
+            writable=True,
+        )
+
+    def mark_interrupted(
+        self,
+        source: str = "IDE_OR_CONSOLE_INTERRUPT",
+        *,
+        stage: str | None = None,
+        exit_code: int = 130,
+    ) -> None:
+        """Record an operator/IDE interrupt without calling it a clean exit."""
+
+        with self._lock:
+            if self._complete:
+                return
             self._complete = True
             self._cancel_timer_locked()
             self._write(
-                "WINDOW_VISIBLE",
-                {"elapsed_ms": int((time.perf_counter() - self._started_at) * 1000)},
+                "APP_INTERRUPTED",
+                {
+                    "source": str(source),
+                    "stage": stage or self.current_stage,
+                    "exit_code": int(exit_code),
+                    "elapsed_ms": int((time.perf_counter() - self._started_at) * 1000),
+                },
             )
-            self._write_state("complete")
+            self._write_state("interrupted", stage=stage or self.current_stage)
+
+    def mark_clean_exit(
+        self,
+        reason: str = "event_loop_returned",
+        *,
+        exit_code: int | None = None,
+    ) -> None:
+        """Mark the process as normally terminated after all runtime work ended."""
+
+        with self._lock:
+            if self._complete:
+                return
+            self._complete = True
+            self._cancel_timer_locked()
+            payload: dict[str, object] = {
+                "reason": str(reason),
+                "elapsed_ms": int((time.perf_counter() - self._started_at) * 1000),
+            }
+            if exit_code is not None:
+                payload["exit_code"] = int(exit_code)
+            self._write("APP_CLEAN_EXIT", payload)
+            self._write_state("complete", stage="已正常退出")
 
     def mark_completed(self) -> None:
         """Finish a non-UI validation command without recording a false failure."""
 
-        with self._lock:
-            self._complete = True
-            self._cancel_timer_locked()
-            self._write(
-                "STARTUP_COMPLETED",
-                {"elapsed_ms": int((time.perf_counter() - self._started_at) * 1000)},
-            )
-            self._write_state("complete")
+        self.mark_clean_exit("command_completed")
 
     def format_error_message(self, exc: BaseException) -> str:
         error_code, suggestion = classify_startup_error(exc, self.current_stage)
@@ -214,7 +372,11 @@ class StartupDiagnostics:
             data = json.loads(self.state_path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return None
-        if isinstance(data, dict) and data.get("status") in {"running", "failed"}:
+        if isinstance(data, dict) and data.get("status") in {
+            "running",
+            "failed",
+            "interrupted",
+        }:
             return data
         return None
 
@@ -231,6 +393,10 @@ class StartupDiagnostics:
             "error": error,
             "updated_at": time.time(),
             "log_path": str(self.log_path),
+            "pid": os.getpid(),
+            "parent_pid": os.getppid(),
+            "process_role": self.process_role,
+            "parent_process": self.parent_process,
         }
         try:
             temporary = self.state_path.with_suffix(".tmp")
@@ -246,8 +412,9 @@ class StartupDiagnostics:
             "STAGE_COMPLETED": "running",
             "STAGE_SLOW": "slow",
             "STAGE_FAILED": "failed",
-            "WINDOW_VISIBLE": "complete",
-            "STARTUP_COMPLETED": "complete",
+            "WINDOW_VISIBLE": "running",
+            "APP_CLEAN_EXIT": "complete",
+            "APP_INTERRUPTED": "interrupted",
         }.get(event, self._last_status)
         record = {
             "timestamp": time.time(),
@@ -266,6 +433,9 @@ class StartupDiagnostics:
             "app_name": self.app_name,
             "app_version": self.app_version,
             "executable": sys.executable,
+            "parent_pid": os.getppid(),
+            "parent_process": self.parent_process,
+            "process_role": self.process_role,
             "cwd": os.getcwd(),
             "frozen": bool(getattr(sys, "frozen", False)),
             "platform": platform.platform(),
@@ -323,8 +493,115 @@ class StartupDiagnostics:
 
 
 def _default_base_dir(app_name: str) -> Path:
+    isolated = os.environ.get("LFTS_APP_DATA_DIR")
+    if isolated:
+        return Path(isolated).resolve()
     base = os.environ.get("LOCALAPPDATA")
     return Path(base) / app_name if base else Path.home() / f".{app_name}"
+
+
+def _process_snapshot(pid: int) -> dict[str, object]:
+    """Return best-effort identity data for a process that launched us."""
+
+    result: dict[str, object] = {"pid": int(pid)}
+    if int(pid) <= 0:
+        result["status"] = "unknown"
+        return result
+    try:
+        import psutil
+
+        process = psutil.Process(int(pid))
+        result.update(
+            {
+                "name": process.name(),
+                "exe": process.exe(),
+                "create_time": process.create_time(),
+                "cmdline": process.cmdline()[:8],
+                "status": process.status(),
+            }
+        )
+    except Exception as exc:
+        result.update(
+            {
+                "status": "unknown",
+                "error_type": type(exc).__name__,
+                "error_message": str(exc)[:300],
+            }
+        )
+    return result
+
+
+def run_process_monitor(
+    parent_pid: int,
+    output_path: Path,
+    state_path: Path,
+) -> int:
+    """Wait outside the GUI process and persist its real exit code."""
+
+    exit_code: int | None = None
+    handle = None
+    try:
+        if os.name == "nt":
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            process_synchronize = 0x00100000
+            process_query_limited_information = 0x1000
+            kernel32.OpenProcess.restype = ctypes.c_void_p
+            handle = kernel32.OpenProcess(
+                process_synchronize | process_query_limited_information,
+                False,
+                int(parent_pid),
+            )
+            if handle:
+                kernel32.WaitForSingleObject(handle, 0xFFFFFFFF)
+                value = ctypes.c_ulong()
+                if kernel32.GetExitCodeProcess(handle, ctypes.byref(value)):
+                    exit_code = int(value.value)
+        else:
+            _, status = os.waitpid(int(parent_pid), 0)
+            exit_code = os.waitstatus_to_exitcode(status)
+    except Exception as exc:
+        monitor_error = f"{type(exc).__name__}: {exc}"
+    else:
+        monitor_error = ""
+    finally:
+        if handle:
+            try:
+                ctypes.WinDLL("kernel32", use_last_error=True).CloseHandle(handle)
+            except Exception:
+                pass
+
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        state = {}
+    if not isinstance(state, dict):
+        state = {}
+    clean = state.get("status") == "complete"
+    interrupted = state.get("status") == "interrupted"
+    if clean and exit_code == 0:
+        classification = "clean_exit"
+    elif interrupted or exit_code in {0xC000013A, 130}:
+        classification = "operator_or_ide_interrupt"
+    else:
+        classification = "abrupt_process_exit"
+    record = {
+        "timestamp": time.time(),
+        "event": "PROCESS_EXIT_OBSERVED",
+        "parent_pid": int(parent_pid),
+        "exit_code": exit_code,
+        "exit_code_hex": f"0x{exit_code:08X}" if exit_code is not None else None,
+        "classification": classification,
+        "clean_exit_marker": bool(clean),
+        "last_state": state,
+        "monitor_error": monitor_error,
+    }
+    try:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with output_path.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+    except OSError:
+        pass
+    return 0
 
 
 def classify_startup_error(

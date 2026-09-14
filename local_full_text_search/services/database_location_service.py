@@ -10,7 +10,7 @@ from pathlib import Path
 from local_full_text_search.config.constants import CONFIG_DIR, DB_PATH
 
 
-LOCATION_FORMAT_VERSION = 1
+LOCATION_FORMAT_VERSION = 2
 STARTUP_PROBE_TIMEOUT_SECONDS = 0.75
 
 
@@ -23,6 +23,15 @@ class DatabaseLocationResolution:
     path: Path
     source: str
     warning: str = ""
+    index_store_root: Path | None = None
+
+    @property
+    def store_root(self) -> Path:
+        """The directory containing control DB, manifest and generations."""
+
+        return self.index_store_root or (
+            self.path.parent if self.path.suffix.lower() == ".db" else self.path
+        )
 
 
 class DatabaseLocationService:
@@ -51,42 +60,59 @@ class DatabaseLocationService:
                 continue
             try:
                 payload = self._read_payload(candidate)
-                path = self._path_for_payload(payload)
+                path, migrated_from_legacy_file = self._path_for_payload(payload)
                 state = str(payload.get("migration_state") or "")
                 if state == "pending":
                     previous = self._optional_path(
-                        payload.get("previous_database_path")
+                        payload.get("previous_index_store_root")
+                        or payload.get("previous_database_path")
                     )
-                    if previous is not None and self._database_is_usable(previous):
-                        self.restore_verified(previous)
-                        return DatabaseLocationResolution(
-                            previous,
-                            "pending_recovery",
-                            "检测到未完成的数据库迁移，已继续使用迁移前数据库。",
-                        )
+                    if previous is not None:
+                        if previous.suffix.lower() == ".db":
+                            previous = previous.parent
+                        if self._store_is_usable(previous):
+                            self.restore_verified(previous)
+                            return DatabaseLocationResolution(
+                                previous / self.default_db_path.name,
+                                "pending_recovery",
+                                "检测到未完成的索引存储目录迁移，已继续使用迁移前目录。",
+                                previous,
+                            )
                     raise DatabaseLocationError(
-                        "数据库迁移尚未完成，且迁移前数据库不可用"
+                        "索引存储目录迁移尚未完成，且迁移前目录不可用"
                     )
                 if state != "verified":
                     raise DatabaseLocationError(
                         f"数据库位置配置状态无效：{state or 'missing'}"
                     )
-                if not self._database_is_usable(path):
-                    raise DatabaseLocationError(
-                        f"配置的数据库不存在或校验失败：{path}"
-                    )
+                configured_directory = bool(payload.get("index_store_root"))
+                if not path.is_dir() or (
+                    not configured_directory and not self._store_is_usable(path)
+                ):
+                    raise DatabaseLocationError(f"配置的索引存储目录不存在或不可用：{path}")
                 warning = ""
+                if migrated_from_legacy_file:
+                    self.save_verified(path)
+                    warning = "已将旧版数据库文件配置转换为索引存储目录配置。"
                 if source == "config_backup":
-                    self._write_payload(payload)
+                    self.save_verified(path)
                     warning = "数据库位置配置已损坏，当前使用上一次有效配置。"
-                return DatabaseLocationResolution(path, source, warning)
+                return DatabaseLocationResolution(
+                    path / self.default_db_path.name,
+                    source,
+                    warning,
+                    path,
+                )
             except (OSError, ValueError, sqlite3.Error, DatabaseLocationError) as exc:
                 primary_error = str(exc) or exc.__class__.__name__
 
-        if self.default_db_path.is_file():
-            if not self._database_is_usable(self.default_db_path):
+        default_root = self.default_db_path.parent
+        if self._store_is_usable(default_root):
+            if not self._database_is_usable(self.default_db_path) and not (
+                default_root / "index_control.db"
+            ).is_file():
                 raise DatabaseLocationError(
-                    f"默认数据库存在但校验失败：{self.default_db_path}"
+                    f"默认索引存储目录存在但校验失败：{default_root}"
                 )
             warning = (
                 f"数据库位置配置不可用，已回退默认数据库：{primary_error}"
@@ -97,6 +123,7 @@ class DatabaseLocationService:
                 self.default_db_path,
                 "legacy_default",
                 warning,
+                default_root,
             )
 
         if primary_error:
@@ -107,35 +134,29 @@ class DatabaseLocationService:
         return DatabaseLocationResolution(
             self.default_db_path,
             "new_default",
+            "",
+            default_root,
         )
 
     def save_pending(self, source: Path, target: Path) -> None:
+        source_root = self._store_root(source)
+        target_root = self._store_root(target)
         self._write_payload(
             {
                 "format_version": LOCATION_FORMAT_VERSION,
-                "database_root": str(Path(target).parent),
-                "database_file": Path(target).name,
-                "database_path": str(Path(target)),
-                "previous_database_path": str(Path(source)),
-                "database_schema": self._database_version(source),
+                "index_store_root": str(target_root),
+                "previous_index_store_root": str(source_root),
                 "last_verified": self._now(),
                 "migration_state": "pending",
             }
         )
 
     def save_verified(self, path: Path, *, schema_version: int | None = None) -> None:
-        database_path = Path(path).resolve()
+        store_root = self._store_root(path)
         self._write_payload(
             {
                 "format_version": LOCATION_FORMAT_VERSION,
-                "database_root": str(database_path.parent),
-                "database_file": database_path.name,
-                "database_path": str(database_path),
-                "database_schema": (
-                    int(schema_version)
-                    if schema_version is not None
-                    else self._database_version(database_path)
-                ),
+                "index_store_root": str(store_root),
                 "last_verified": self._now(),
                 "migration_state": "verified",
             }
@@ -177,15 +198,39 @@ class DatabaseLocationService:
         return payload
 
     @staticmethod
-    def _path_for_payload(payload: dict[str, object]) -> Path:
+    def _path_for_payload(payload: dict[str, object]) -> tuple[Path, bool]:
+        store_root = str(payload.get("index_store_root") or "").strip()
+        if store_root:
+            return Path(store_root).expanduser().resolve(), False
         explicit = str(payload.get("database_path") or "").strip()
         if explicit:
-            return Path(explicit).expanduser().resolve()
+            return Path(explicit).expanduser().resolve().parent, True
         root = str(payload.get("database_root") or "").strip()
         filename = str(payload.get("database_file") or "").strip()
         if not root or not filename:
             raise ValueError("数据库位置配置缺少路径")
-        return (Path(root).expanduser() / filename).resolve()
+        return (Path(root).expanduser() / filename).resolve().parent, True
+
+    @staticmethod
+    def _store_root(path: Path) -> Path:
+        resolved = Path(path).expanduser().resolve()
+        if resolved.suffix.lower() == ".db":
+            return resolved.parent
+        return resolved
+
+    @classmethod
+    def _store_is_usable(cls, path: Path) -> bool:
+        root = cls._store_root(path)
+        if not root.is_dir():
+            return False
+        manifest = root / "search_index.manifest.json"
+        control = root / "index_control.db"
+        legacy = root / "search_index.db"
+        return (
+            manifest.is_file()
+            or cls._database_is_usable(control)
+            or cls._database_is_usable(legacy)
+        )
 
     @staticmethod
     def _optional_path(value: object) -> Path | None:
@@ -196,29 +241,16 @@ class DatabaseLocationService:
     def _database_is_usable(path: Path) -> bool:
         if not path.is_file() or path.stat().st_size <= 0:
             return False
-        # Startup only needs to prove that the configured path is a readable
-        # SQLite database.  A full quick_check scans every page and can keep
-        # the GUI hidden for minutes on a large index.  Schema/migration work
-        # is performed by DatabaseManager after this bounded probe.
-        connection = sqlite3.connect(
-            f"file:{path.as_posix()}?mode=ro",
-            uri=True,
-            timeout=STARTUP_PROBE_TIMEOUT_SECONDS,
-        )
         try:
-            connection.execute(
-                f"PRAGMA busy_timeout = {int(STARTUP_PROBE_TIMEOUT_SECONDS * 1000)}"
-            )
-            row = connection.execute(
-                "SELECT 1 FROM sqlite_master "
-                "WHERE type = 'table' LIMIT 1"
-            ).fetchone()
-            if row is None:
-                return False
-            connection.execute("PRAGMA schema_version").fetchone()
-            return True
-        finally:
-            connection.close()
+            # Do not open SQLite during GUI startup. Opening a WAL database can
+            # replay/checkpoint a multi-gigabyte log before returning, which
+            # blocks the main thread before QApplication can show a window.
+            # DatabaseManager performs the real schema/integrity work in the
+            # background scan after the window is visible.
+            with path.open("rb") as handle:
+                return handle.read(16) == b"SQLite format 3\x00"
+        except OSError:
+            return False
 
     @staticmethod
     def _database_version(path: Path) -> int:

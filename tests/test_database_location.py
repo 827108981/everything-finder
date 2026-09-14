@@ -43,19 +43,6 @@ def test_verified_custom_location_survives_future_upgrade(tmp_path: Path) -> Non
 def test_startup_database_probe_is_lightweight(tmp_path: Path) -> None:
     database_path = tmp_path / "search_index.db"
     database_path.write_bytes(b"SQLite format 3\x00" + b"0" * 64)
-    executed: list[str] = []
-
-    class Result:
-        def fetchone(self) -> tuple[int]:
-            return (1,)
-
-    class Connection:
-        def execute(self, statement: str) -> Result:
-            executed.append(statement)
-            return Result()
-
-        def close(self) -> None:
-            return None
 
     service = DatabaseLocationService(
         tmp_path / "config" / "database-location.json",
@@ -63,13 +50,39 @@ def test_startup_database_probe_is_lightweight(tmp_path: Path) -> None:
     )
     with patch(
         "local_full_text_search.services.database_location_service.sqlite3.connect",
-        return_value=Connection(),
     ) as connect:
         assert service._database_is_usable(database_path) is True
 
-    assert not any("quick_check" in statement for statement in executed)
-    assert any("sqlite_master" in statement for statement in executed)
-    assert connect.call_args.kwargs["timeout"] <= 1
+    connect.assert_not_called()
+
+
+def test_v1_single_file_config_is_normalized_to_store_directory(tmp_path: Path) -> None:
+    store = tmp_path / "store"
+    store.mkdir()
+    database_path = store / "search_index.db"
+    _initialized_database(database_path)
+    config_path = tmp_path / "config" / "database-location.json"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(
+        json.dumps(
+            {
+                "format_version": 1,
+                "database_path": str(database_path),
+                "migration_state": "verified",
+            }
+        ),
+        encoding="utf-8",
+    )
+    service = DatabaseLocationService(config_path, tmp_path / "default" / "search_index.db")
+
+    resolution = service.resolve()
+
+    assert resolution.store_root == store.resolve()
+    assert resolution.path == database_path.resolve()
+    saved = json.loads(config_path.read_text(encoding="utf-8"))
+    assert saved["format_version"] == 2
+    assert saved["index_store_root"] == str(store.resolve())
+    assert "database_path" not in saved
 
 
 def test_corrupt_primary_location_uses_verified_config_backup(tmp_path: Path) -> None:
@@ -87,7 +100,8 @@ def test_corrupt_primary_location_uses_verified_config_backup(tmp_path: Path) ->
     assert resolution.source == "config_backup"
     assert "上一次有效配置" in resolution.warning
     repaired = json.loads(config_path.read_text(encoding="utf-8"))
-    assert Path(str(repaired["database_path"])) == custom_path.resolve()
+    assert repaired["format_version"] == 2
+    assert Path(str(repaired["index_store_root"])) == custom_path.parent.resolve()
 
 
 def test_pending_migration_keeps_using_previous_database(tmp_path: Path) -> None:
@@ -169,7 +183,42 @@ def test_database_worker_migrates_and_persists_new_location(tmp_path: Path) -> N
         "migration_state"
     ] == "verified"
     backup_payload = json.loads(service.backup_path.read_text(encoding="utf-8"))
-    assert Path(str(backup_payload["database_path"])) == target.resolve()
+    assert backup_payload["format_version"] == 2
+    assert Path(str(backup_payload["index_store_root"])) == target.parent.resolve()
+
+
+def test_database_worker_migrates_complete_store_directory(tmp_path: Path) -> None:
+    source_root = tmp_path / "store-source"
+    source_root.mkdir()
+    _initialized_database(source_root / "index_control.db")
+    (source_root / "search_index.manifest.json").write_text(
+        '{"format_version": 1}', encoding="utf-8"
+    )
+    target_root = tmp_path / "store-target"
+    service = DatabaseLocationService(
+        tmp_path / "config" / "database-location.json",
+        source_root / "search_index.db",
+    )
+    service.save_verified(source_root)
+    worker = DatabaseMigrationWorker(
+        source_root,
+        target_root,
+        service,
+        allow_other_instances=True,
+    )
+    finished: list[dict[str, object]] = []
+    failed: list[str] = []
+    worker.finished.connect(finished.append)
+    worker.failed.connect(failed.append)
+
+    worker.run()
+
+    assert failed == []
+    assert len(finished) == 1
+    assert (target_root / "index_control.db").is_file()
+    assert (target_root / "search_index.manifest.json").is_file()
+    assert not source_root.exists()
+    assert service.resolve().store_root == target_root.resolve()
 
 
 def test_failed_migration_keeps_original_database_and_location(tmp_path: Path) -> None:

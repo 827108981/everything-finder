@@ -18,6 +18,7 @@ from local_full_text_search.config.constants import APP_DISPLAY_NAME
 from local_full_text_search.services.database_location_service import (
     DatabaseLocationService,
 )
+from local_full_text_search.services.logging_service import log_event, log_exception
 
 
 logger = logging.getLogger(__name__)
@@ -62,6 +63,9 @@ class DatabaseMigrationWorker(QObject):
 
     @Slot()
     def run(self) -> None:
+        if self.source_path.is_dir():
+            self._run_store_directory_migration()
+            return
         temporary = self.target_path.with_suffix(
             self.target_path.suffix + ".migration.tmp"
         )
@@ -211,6 +215,128 @@ class DatabaseMigrationWorker(QObject):
             if self.source_path.is_file():
                 self.target_path.unlink(missing_ok=True)
             self.failed.emit(str(exc) or exc.__class__.__name__)
+
+    def _run_store_directory_migration(self) -> None:
+        """Move the complete generation store, not a single SQLite file."""
+
+        source_root = self.source_path
+        target_root = self.target_directory
+        temporary_root = target_root.with_name(target_root.name + ".migration.tmp")
+        archived_source: Path | None = None
+        location_pending = False
+        try:
+            self._emit("preparing", "正在准备索引存储目录迁移", 0)
+            self._validate_store_paths(source_root, target_root)
+            files = [
+                path
+                for path in source_root.rglob("*")
+                if path.is_file()
+                and not path.name.endswith(("-wal", "-shm", "-journal"))
+                and ".migration.tmp" not in path.name
+            ]
+            total_bytes = sum(path.stat().st_size for path in files)
+            free = shutil.disk_usage(target_root.parent).free
+            required = total_bytes + max(MIGRATION_MARGIN_BYTES, total_bytes // 4)
+            if free < required:
+                raise RuntimeError(
+                    f"目标磁盘空间不足，需要至少 {_format_bytes(required)}，"
+                    f"当前可用 {_format_bytes(free)}"
+                )
+            if temporary_root.exists():
+                shutil.rmtree(temporary_root)
+            self.location_service.save_pending(source_root, target_root)
+            location_pending = True
+            temporary_root.mkdir(parents=True, exist_ok=True)
+            copied = 0
+            self._emit("transferring", "正在传输索引存储目录", 5, total_bytes=total_bytes)
+            for source_file in files:
+                self._throw_if_cancelled()
+                relative = source_file.relative_to(source_root)
+                destination = temporary_root / relative
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source_file, destination)
+                copied += source_file.stat().st_size
+                percent = 5 + int(70 * copied / max(1, total_bytes))
+                self._emit(
+                    "transferring",
+                    "正在传输索引存储目录",
+                    percent,
+                    processed_bytes=copied,
+                    total_bytes=total_bytes,
+                )
+            self._throw_if_cancelled()
+            self._emit("verifying", "正在校验索引存储目录", 80)
+            if not self.location_service._store_is_usable(temporary_root) and files:
+                raise RuntimeError("迁移后的索引存储目录缺少有效数据库或活动清单")
+            if target_root.exists():
+                target_root.rmdir()
+            os.replace(temporary_root, target_root)
+            self._emit("switching", "正在切换索引存储目录", 90)
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+            archived_source = source_root.with_name(
+                f"{source_root.name}.migrated-{stamp}.backup"
+            )
+            os.replace(source_root, archived_source)
+            self.location_service.save_verified(target_root)
+            location_pending = False
+            self._emit("completed", "索引存储目录迁移完成", 100)
+            payload = {
+                "database_path": str(target_root / "search_index.db"),
+                "index_store_root": str(target_root),
+                "previous_database_backup": str(archived_source),
+                "database_size_bytes": sum(
+                    path.stat().st_size for path in target_root.rglob("*") if path.is_file()
+                ),
+            }
+            self.finished.emit(payload)
+            log_event(
+                "database.store_migration.completed",
+                component="database_migration_worker",
+                source_root=str(source_root),
+                target_root=str(target_root),
+                file_count=len(files),
+                database_size_bytes=payload["database_size_bytes"],
+            )
+        except DatabaseMigrationCancelled:
+            if temporary_root.exists():
+                shutil.rmtree(temporary_root, ignore_errors=True)
+            if location_pending:
+                self.location_service.restore_verified(source_root)
+            self.cancelled.emit()
+        except Exception as exc:
+            log_exception(
+                "database.store_migration.failed",
+                exc,
+                component="database_migration_worker",
+                source_root=str(source_root),
+                target_root=str(target_root),
+                location_pending=location_pending,
+            )
+            if temporary_root.exists():
+                shutil.rmtree(temporary_root, ignore_errors=True)
+            if archived_source is not None and not source_root.exists():
+                os.replace(archived_source, source_root)
+            if location_pending:
+                try:
+                    self.location_service.restore_verified(source_root)
+                except Exception:
+                    logger.exception("Failed to restore store location configuration")
+            self.failed.emit(str(exc) or exc.__class__.__name__)
+
+    @staticmethod
+    def _validate_store_paths(source_root: Path, target_root: Path) -> None:
+        if not source_root.is_dir():
+            raise RuntimeError(f"当前索引存储目录不存在：{source_root}")
+        if target_root == source_root:
+            raise RuntimeError("目标目录与当前索引存储目录相同")
+        if source_root in target_root.parents or target_root in source_root.parents:
+            raise RuntimeError("索引存储目录不能互相嵌套")
+        target_root.parent.mkdir(parents=True, exist_ok=True)
+        if target_root.exists() and any(target_root.iterdir()):
+            raise RuntimeError(f"目标索引存储目录不是空目录：{target_root}")
+        install_directory = Path(sys.executable).resolve().parent
+        if target_root == install_directory or install_directory in target_root.parents:
+            raise RuntimeError("索引存储目录不能位于程序安装目录")
 
     @Slot()
     def cancel(self) -> None:

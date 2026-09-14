@@ -113,4 +113,4 @@ build.bat
 
 ## 当前限制
 
-详见 [docs/已知限制.md](docs/已知限制.md)。重点限制：老版 DOC/XLS/PPT 需要本机安装 Microsoft Office、WPS Office 或 LibreOffice；PDF 页内坐标高亮、Office 内嵌图片 OCR、正则高级限时搜索仍为后续增强。
+详见 [docs/当前实现进度与注意事项.md](docs/当前实现进度与注意事项.md)。其中同时记录当前实现、未闭环现场、验证证据和开发安全边界。

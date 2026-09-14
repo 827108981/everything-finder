@@ -49,6 +49,38 @@ class IndexNotReadyError(AppError):
     """Raised when search is attempted before the complete index is published."""
 
 
+class IndexQuiescedForSearch(AppError):
+    """Index writes are intentionally deferred while a foreground search runs."""
+
+
+class SearchLeaseBusy(AppError):
+    """A foreground search could not obtain the process-local search lease."""
+
+
+class QuiesceTimeout(SearchLeaseBusy):
+    """Indexing did not reach a safe pause point before the search deadline."""
+
+
+class SearchTimeout(AppError):
+    """A search exceeded its query deadline."""
+
+
+class UserCancelled(AppError):
+    """A user explicitly cancelled a search."""
+
+
+class SQLiteBusy(AppError):
+    """A real SQLite busy/locked condition exhausted its bounded retry budget."""
+
+
+class SnapshotTimeout(AppError):
+    """Detailed readiness statistics exceeded their watchdog budget."""
+
+
+class OperationCancelled(AppError):
+    """An operation was cancelled by the user or shutdown supervisor."""
+
+
 class PlanningWorkerError(AppError):
     """Raised when a recoverable planning worker fails."""
 

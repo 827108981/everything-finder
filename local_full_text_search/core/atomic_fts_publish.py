@@ -27,6 +27,10 @@ class IndexPublishGateError(IndexPublishError):
         )
 
 
+class IndexPublishBusyError(IndexPublishError):
+    """The active search/read lease temporarily prevents FTS publication."""
+
+
 @dataclass(frozen=True, slots=True)
 class IndexPublishResult:
     version_id: int
@@ -112,21 +116,33 @@ class IndexVersionPublisher:
         writer_idle: bool,
         workers_idle: bool,
         golden_query_gate: Callable[[sqlite3.Connection], bool],
+        allow_incomplete_files: bool = False,
         failpoint: str = "",
     ) -> IndexPublishResult:
         # Publication replaces the active projection. It must wait for the
         # foreground read lease instead of competing with a live search.
-        wait_for_search_idle(None)
-        failed_gates = self._failed_gates(
-            int(version_id),
-            writer_idle=writer_idle,
-            workers_idle=workers_idle,
-            golden_query_gate=golden_query_gate,
-        )
+        if not wait_for_search_idle(0.5):
+            raise IndexPublishBusyError(
+                "搜索仍在使用数据库，候选全文索引保留待下次空闲时发布"
+            )
+        try:
+            failed_gates = self._failed_gates(
+                int(version_id),
+                writer_idle=writer_idle,
+                workers_idle=workers_idle,
+                golden_query_gate=golden_query_gate,
+                allow_incomplete_files=allow_incomplete_files,
+            )
+        except sqlite3.OperationalError as exc:
+            if _is_busy_error(exc):
+                raise IndexPublishBusyError(
+                    "数据库正忙，候选全文索引保留待下次空闲时发布"
+                ) from exc
+            raise
         if failed_gates:
             raise IndexPublishGateError(failed_gates)
         try:
-            with self.database.connect() as con:
+            with self.database.connect(timeout_seconds=0.75) as con:
                 version = con.execute(
                     """
                     SELECT id, root_id, run_id, status
@@ -314,8 +330,23 @@ class IndexVersionPublisher:
                 )
                 _set_state(con, "active_index_version", str(int(version_id)))
                 _set_state(con, "content_fts_dirty", "0")
-                _set_state(con, "full_batch_incomplete", "0")
-                _set_state(con, "partial_search_projection_active", "0")
+                full_batch_incomplete = "0"
+                if allow_incomplete_files:
+                    existing_state = con.execute(
+                        "SELECT value FROM index_state WHERE key = 'full_batch_incomplete'"
+                    ).fetchone()
+                    full_batch_incomplete = (
+                        "1"
+                        if existing_state is not None
+                        and str(existing_state["value"]) == "1"
+                        else "0"
+                    )
+                _set_state(con, "full_batch_incomplete", full_batch_incomplete)
+                _set_state(
+                    con,
+                    "partial_search_projection_active",
+                    "1" if allow_incomplete_files else "0",
+                )
                 con.execute(
                     """
                     INSERT INTO index_state(key, value)
@@ -324,6 +355,14 @@ class IndexVersionPublisher:
                         value = CAST(COALESCE(index_state.value, '0') AS INTEGER) + 1
                     """
                 )
+                generation_row = con.execute(
+                    "SELECT value FROM index_state WHERE key = 'search_projection_generation'"
+                ).fetchone()
+                _set_state(
+                    con,
+                    "content_fts_active_generation",
+                    str(generation_row["value"] if generation_row is not None else "1"),
+                )
                 _set_state(con, "search_projection_updated_at", now)
                 if version["root_id"] is not None:
                     con.execute(
@@ -331,7 +370,11 @@ class IndexVersionPublisher:
                         UPDATE roots SET status = ?, last_scan_at = ?
                         WHERE id = ?
                         """,
-                        ("ready", now, int(version["root_id"])),
+                        (
+                            "incomplete" if allow_incomplete_files else "ready",
+                            now,
+                            int(version["root_id"]),
+                        ),
                     )
                 self._drop_candidate(con)
                 return IndexPublishResult(
@@ -341,9 +384,13 @@ class IndexVersionPublisher:
                     fts_row_count=fts_row_count,
                     content_digest=content_digest,
                 )
-        except IndexPublishGateError:
+        except (IndexPublishGateError, IndexPublishBusyError):
             raise
         except Exception as exc:
+            if _is_busy_error(exc):
+                raise IndexPublishBusyError(
+                    "数据库正忙，候选全文索引保留待下次空闲时发布"
+                ) from exc
             with self.database.connect() as con:
                 con.execute(
                     """
@@ -357,7 +404,6 @@ class IndexVersionPublisher:
             if isinstance(exc, IndexPublishError):
                 raise
             raise IndexPublishError(str(exc)) from exc
-
     def _failed_gates(
         self,
         version_id: int,
@@ -365,6 +411,7 @@ class IndexVersionPublisher:
         writer_idle: bool,
         workers_idle: bool,
         golden_query_gate: Callable[[sqlite3.Connection], bool],
+        allow_incomplete_files: bool = False,
     ) -> list[str]:
         failed: list[str] = []
         if not writer_idle:
@@ -373,7 +420,7 @@ class IndexVersionPublisher:
             failed.append("workers_not_idle")
         video_extensions = tuple(sorted(VIDEO_EXTENSIONS))
         placeholders = ",".join("?" for _ in video_extensions)
-        with self.database.connect() as con:
+        with self.database.connect_read_only() as con:
             version = con.execute(
                 "SELECT root_id, run_id, status FROM index_versions WHERE id = ?",
                 (int(version_id),),
@@ -399,7 +446,7 @@ class IndexVersionPublisher:
                     (root_id, *video_extensions),
                 ).fetchone()[0]
             )
-            if blocking_files:
+            if blocking_files and not allow_incomplete_files:
                 failed.append("incomplete_files")
             terminal_placeholders = ",".join(
                 "?" for _ in TERMINAL_PARSE_TASK_STATUSES
@@ -531,3 +578,8 @@ def _set_state(con: sqlite3.Connection, key: str, value: str) -> None:
         """,
         (key, value),
     )
+
+
+def _is_busy_error(exc: BaseException) -> bool:
+    message = str(exc).lower()
+    return "database is locked" in message or "database is busy" in message

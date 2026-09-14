@@ -30,8 +30,7 @@ class FastIndexingTests(unittest.TestCase):
             summary = IndexManager(db, settings).index_root(root_id)
             self.assertEqual(summary.indexed, 30)
             self.assertEqual(db.stats()["blocks"], 30)
-            with db.connect() as con:
-                self.assertEqual(con.execute("SELECT COUNT(*) FROM short_tokens").fetchone()[0], 0)
+            self.assertFalse(list(base.glob("*.short2.db")))
             page = SearchEngine(db).search(SearchQuery(text="PARALLEL_HIT", mode="exact", page_size=100))
             self.assertEqual(page.total_confirmed, 30)
 

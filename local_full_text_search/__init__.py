@@ -1,3 +1,5 @@
 """LocalFullTextSearch package."""
 
-__version__ = "1.3.7"
+from .version import __build_timestamp__, __version__
+
+__all__ = ["__version__", "__build_timestamp__"]

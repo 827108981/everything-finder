@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fnmatch
 import hashlib
 import importlib.util
 import json
@@ -14,7 +15,9 @@ import traceback
 import tempfile
 import uuid
 import zipfile
+from contextlib import nullcontext
 from collections import deque
+from itertools import chain
 from collections.abc import Iterable
 from concurrent.futures import (
     FIRST_COMPLETED,
@@ -31,6 +34,8 @@ from typing import Callable, Sequence
 
 from local_full_text_search.config.constants import (
     ARCHIVE_EXTENSIONS,
+    DEFAULT_EXCLUDED_DIRS,
+    DEFAULT_EXCLUDED_FILE_PATTERNS,
     IMAGE_EXTENSIONS,
     LEGACY_OFFICE_EXTENSIONS,
     PARSER_VERSIONS,
@@ -41,6 +46,7 @@ from local_full_text_search.config.constants import (
 from local_full_text_search.config.defaults import AppSettings
 from local_full_text_search.core.block_coalescer import BlockCoalescer
 from local_full_text_search.core.atomic_fts_publish import (
+    IndexPublishBusyError,
     IndexPublishGateError,
     IndexVersionPublisher,
 )
@@ -51,7 +57,18 @@ from local_full_text_search.core.content_fingerprint import (
     sha256_file,
     sha256_file_to_spool,
 )
-from local_full_text_search.core.database import DatabaseManager
+from local_full_text_search.core.database import (
+    DatabaseManager,
+    SQLITE_BUSY_CIRCUIT_MAX_ATTEMPTS,
+    SQLITE_BUSY_CIRCUIT_MAX_SECONDS,
+    SQLiteBusyCircuit,
+    SQLiteBusyCircuitOpen,
+)
+from local_full_text_search.core.database_write_dispatcher import DatabaseWriteDispatcher
+from local_full_text_search.core.search_index_coordinator import (
+    get_search_index_coordinator,
+)
+from local_full_text_search.services.logging_service import log_event, log_exception
 from local_full_text_search.core.errors import (
     CancelledError,
     PlanningWorkerError,
@@ -66,10 +83,14 @@ from local_full_text_search.core.errors import (
 )
 from local_full_text_search.core.index_scheduler import estimate_parse_cost
 from local_full_text_search.core.index_time_estimator import IndexTimeEstimator
-from local_full_text_search.core.index_writer import IndexWriter
+from local_full_text_search.core.index_writer import (
+    IndexWriter,
+    WriterFinalizationTimeout,
+)
 from local_full_text_search.core.foreground_activity import wait_for_search_idle
 from local_full_text_search.core.usn_journal import (
     UsnCheckpoint,
+    UsnChangeSetLimitExceeded,
     UsnJournalUnavailable,
     changes_since,
     current_checkpoint,
@@ -139,11 +160,43 @@ logger = logging.getLogger(__name__)
 ProgressCallback = Callable[[dict[str, object]], None]
 
 
+def is_path_excluded_from_index_scope(
+    path: Path,
+    root_path: Path,
+    settings: AppSettings,
+) -> bool:
+    """Apply the same directory/file exclusions to USN paths as directory scans."""
+
+    path = Path(path)
+    root_path = Path(root_path)
+    try:
+        relative = path.relative_to(root_path)
+    except ValueError:
+        return False
+    parts = relative.parts
+    if not parts:
+        return False
+    excluded_dirs = {
+        str(value).casefold()
+        for value in (settings.excluded_dirs or DEFAULT_EXCLUDED_DIRS)
+    }
+    if any(str(part).casefold() in excluded_dirs for part in parts[:-1]):
+        return True
+    patterns = tuple(
+        str(value)
+        for value in (settings.excluded_file_patterns or DEFAULT_EXCLUDED_FILE_PATTERNS)
+    )
+    if any(fnmatch.fnmatch(path.name, pattern) for pattern in patterns):
+        return True
+    return not bool(settings.include_hidden_files) and path.name.startswith(".")
+
+
 @dataclass(slots=True)
 class IndexSummary:
     scanned: int = 0
     indexed: int = 0
     skipped: int = 0
+    reused: int = 0
     failed: int = 0
     unsupported: int = 0
     metadata_only: int = 0
@@ -204,6 +257,8 @@ class ParseJob:
     last_progress_monotonic: float = 0.0
     last_heartbeat_monotonic: float = 0.0
     last_db_progress_monotonic: float = 0.0
+    worker_start_requested_monotonic: float = 0.0
+    worker_start_confirmed: bool = False
     timeout_seconds: int = 0
     stall_signature: str = ""
     repeated_stall_count: int = 0
@@ -276,7 +331,7 @@ class SpoolParseResult:
 
 
 ParseResult = ParseOutcome | SpoolParseResult
-ProcessParseResult = ParseResult | list[SpoolParseResult]
+ProcessParseResult = ParseResult | list[SpoolParseResult | ParseOutcome]
 
 
 @dataclass(slots=True)
@@ -496,6 +551,7 @@ class ProcessLaneWatchdog:
         database: DatabaseManager | None = None,
         metrics: IndexRunMetrics | None = None,
         diagnostic_callback: Callable[[dict[str, object]], None] | None = None,
+        pause_check: Callable[[], bool] | None = None,
     ) -> None:
         self.lanes = lanes
         self.spool_dir = spool_dir
@@ -503,6 +559,7 @@ class ProcessLaneWatchdog:
         self.database = database
         self.metrics = metrics
         self.diagnostic_callback = diagnostic_callback
+        self.pause_check = pause_check
         self._stop = threading.Event()
         self._terminated: set[ProcessPoolExecutor] = set()
         self._thread = threading.Thread(
@@ -530,6 +587,8 @@ class ProcessLaneWatchdog:
                     )
                     + 1
                 )
+            if self.pause_check is not None and self.pause_check():
+                continue
             now = time.perf_counter()
             for lane in list(self.lanes.values()):
                 if not lane.process_based or not isinstance(lane.executor, ProcessPoolExecutor):
@@ -599,14 +658,30 @@ class ProcessLaneWatchdog:
                             self.settings,
                             active_job,
                         )
+                        # A heartbeat proves that the process is alive, but it
+                        # must not reset the no-progress budget. Otherwise an
+                        # OCR worker can keep touching its heartbeat forever
+                        # while its semantic cursor remains unchanged.
                         last_progress = (
-                            max(
-                                active_job.last_progress_monotonic,
-                                active_job.last_heartbeat_monotonic,
-                            )
+                            active_job.last_progress_monotonic
                             or active_job.started_monotonic
                         )
-                        if now - last_progress >= timeout_seconds:
+                        startup_overdue = bool(
+                            active_job.lane == "ocr"
+                            and not active_job.worker_start_confirmed
+                            and now
+                            - (
+                                active_job.worker_start_requested_monotonic
+                                or active_job.started_monotonic
+                            )
+                            >= max(
+                                1,
+                                int(
+                                    self.settings.ocr_thread_startup_timeout_seconds
+                                ),
+                            )
+                        )
+                        if startup_overdue or now - last_progress >= timeout_seconds:
                             if (
                                 not active_job.watchdog_timed_out
                                 and self.metrics is not None
@@ -634,7 +709,16 @@ class ProcessLaneWatchdog:
                                     + 1
                                 )
                             active_job.watchdog_timed_out = True
-                            active_job.timeout_seconds = timeout_seconds
+                            active_job.timeout_seconds = (
+                                max(
+                                    1,
+                                    int(
+                                        self.settings.ocr_thread_startup_timeout_seconds
+                                    ),
+                                )
+                                if startup_overdue
+                                else timeout_seconds
+                            )
                             job.watchdog_timed_out = True
                             overdue.append(active_job)
                 if not overdue:
@@ -688,6 +772,17 @@ class ProcessLaneWatchdog:
                             ),
                         )
                     ),
+                    "heartbeat_age_seconds": int(
+                        max(
+                            0.0,
+                            now
+                            - (
+                                representative.last_heartbeat_monotonic
+                                or representative.started_monotonic
+                                or now
+                            ),
+                        )
+                    ),
                     "timeout_seconds": int(representative.timeout_seconds),
                     "reason": (
                         f"{representative.progress_phase or '解析'} 阶段停在"
@@ -731,12 +826,182 @@ class ProcessLaneWatchdog:
             )
 
 
+class IndexFinalizationWatchdogError(RuntimeError):
+    """Raised when finalization has no semantic progress for too long."""
+
+
+class IndexFinalizationWatchdog:
+    """Watch FTS/cache finalization independently from parser heartbeats."""
+
+    def __init__(
+        self,
+        database: DatabaseManager,
+        *,
+        run_id: str,
+        root_id: int,
+        timeout_seconds: float = 30.0,
+        check_interval_seconds: float = 0.5,
+    ) -> None:
+        self.database = database
+        self.run_id = str(run_id)
+        self.root_id = int(root_id)
+        self.timeout_seconds = max(1.0, float(timeout_seconds))
+        self.check_interval_seconds = max(0.1, float(check_interval_seconds))
+        self.started_monotonic = time.monotonic()
+        self.last_progress_monotonic = self.started_monotonic
+        self.phase = "starting"
+        self.completed = 0
+        self.total = 0
+        self.detail = ""
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._timed_out = threading.Event()
+        self._thread = threading.Thread(
+            target=self._run,
+            name="index-finalization-watchdog",
+            daemon=True,
+        )
+        self._last_log_monotonic = 0.0
+
+    def start(self) -> None:
+        log_event(
+            "index.finalization.watchdog.started",
+            component="index_manager",
+            run_id=self.run_id,
+            database_path=str(self.database.db_path),
+            root_id=self.root_id,
+            timeout_seconds=self.timeout_seconds,
+        )
+        self._thread.start()
+
+    def stop(self, *, outcome: str = "completed") -> None:
+        self._stop.set()
+        self._thread.join(timeout=1.0)
+        with self._lock:
+            phase = self.phase
+            completed = self.completed
+            total = self.total
+            elapsed_ms = int((time.monotonic() - self.started_monotonic) * 1000)
+        log_event(
+            "index.finalization.watchdog.stopped",
+            component="index_manager",
+            run_id=self.run_id,
+            database_path=str(self.database.db_path),
+            root_id=self.root_id,
+            outcome=str(outcome),
+            phase=phase,
+            completed=completed,
+            total=total,
+            elapsed_ms=elapsed_ms,
+            timed_out=self._timed_out.is_set(),
+        )
+
+    def progress(
+        self,
+        phase: str,
+        *,
+        completed: int = 0,
+        total: int = 0,
+        detail: str = "",
+        force_log: bool = False,
+    ) -> None:
+        now = time.monotonic()
+        with self._lock:
+            changed = (
+                str(phase) != self.phase
+                or int(completed) != self.completed
+                or int(total) != self.total
+                or str(detail or "") != self.detail
+            )
+            self.phase = str(phase or "")
+            self.completed = max(0, int(completed))
+            self.total = max(0, int(total))
+            self.detail = str(detail or "")
+            if changed:
+                self.last_progress_monotonic = now
+            should_log = force_log or (
+                changed and now - self._last_log_monotonic >= 2.0
+            ) or (
+                self.total > 0 and self.completed >= self.total
+            )
+            if should_log:
+                self._last_log_monotonic = now
+            payload = {
+                "phase": self.phase,
+                "completed": self.completed,
+                "total": self.total,
+                "detail": self.detail,
+                "elapsed_ms": int((now - self.started_monotonic) * 1000),
+            }
+        if should_log:
+            log_event(
+                "index.finalization.progress",
+                component="index_manager",
+                run_id=self.run_id,
+                database_path=str(self.database.db_path),
+                root_id=self.root_id,
+                **payload,
+            )
+
+    def check(self) -> None:
+        if self._timed_out.is_set():
+            with self._lock:
+                phase = self.phase
+                completed = self.completed
+                total = self.total
+                stalled_ms = int(
+                    (time.monotonic() - self.last_progress_monotonic) * 1000
+                )
+            raise IndexFinalizationWatchdogError(
+                "索引收尾阶段超过无进展时间上限："
+                f"phase={phase} completed={completed}/{total} stalled_ms={stalled_ms}"
+            )
+
+    def _run(self) -> None:
+        while not self._stop.wait(self.check_interval_seconds):
+            now = time.monotonic()
+            with self._lock:
+                stalled_seconds = now - self.last_progress_monotonic
+                phase = self.phase
+                completed = self.completed
+                total = self.total
+                detail = self.detail
+            if stalled_seconds < self.timeout_seconds:
+                continue
+            if self._timed_out.is_set():
+                return
+            self._timed_out.set()
+            interrupted = self.database.interrupt_active_connections()
+            log_event(
+                "index.finalization.watchdog.timeout",
+                level=logging.ERROR,
+                component="index_manager",
+                run_id=self.run_id,
+                database_path=str(self.database.db_path),
+                root_id=self.root_id,
+                phase=phase,
+                completed=completed,
+                total=total,
+                detail=detail,
+                stalled_ms=int(stalled_seconds * 1000),
+                interrupted_connections=interrupted,
+            )
+            return
+
+
 _worker_state = threading.local()
 _process_registry: ParserRegistry | None = None
+_process_ocr_executor: ThreadPoolExecutor | None = None
+_process_ocr_executor_workers = 0
+_process_ocr_executor_lock = threading.Lock()
 
 
 def _pool_health_probe() -> bool:
     return True
+
+
+class ExecutorLifecycleError(RuntimeError):
+    """Raised when a scheduler observes a closed parser executor."""
 
 
 class IndexManager:
@@ -749,8 +1014,10 @@ class IndexManager:
     ) -> None:
         self.db = db
         self.settings = settings
+        self.write_dispatcher = DatabaseWriteDispatcher()
         self.run_context = dict(run_context or {})
         self._executor_lock = threading.Lock()
+        self._executor_lifecycle_lock = threading.RLock()
         self._active_process_executors: set[ProcessPoolExecutor] = set()
         self._active_process_registry_dirs: set[Path] = set()
         self._pause_lock = threading.Lock()
@@ -784,6 +1051,7 @@ class IndexManager:
         self._diagnostic_lock = threading.Lock()
         self._diagnostic_events: deque[dict[str, object]] = deque(maxlen=128)
         self._diagnostic_sequence = 0
+        self._coordinator = get_search_index_coordinator()
 
     def request_pause(self) -> None:
         requested_at = time.perf_counter()
@@ -957,6 +1225,17 @@ class IndexManager:
         ]
         planning_required = len(planning_pids)
         planning_received = len(planning_acknowledgements_list)
+        active_tasks = sum(
+            1
+            for lane in (self._pause_lanes or {}).values()
+            for future in lane.futures
+            if not future.done()
+        )
+        writer_queue_depth = (
+            self._pause_writer.queue_depth()
+            if self._pause_writer is not None
+            else 0
+        )
         with self._pause_lock:
             return {
                 "state": self._pause_state,
@@ -976,6 +1255,8 @@ class IndexManager:
                 ),
                 "planning_required_acknowledgements": planning_required,
                 "planning_received_acknowledgements": planning_received,
+                "active_tasks": active_tasks,
+                "writer_queue_depth": max(0, int(writer_queue_depth)),
             }
 
     def _record_pause_acknowledgement(
@@ -1398,6 +1679,7 @@ class IndexManager:
             "cancelled",
             "total_files",
             "discovered_files",
+            "reused_files",
         )
         aggregate_progress = {field: 0 for field in progress_fields}
 
@@ -1447,6 +1729,9 @@ class IndexManager:
                             "partial_success",
                         )
                     )
+                    normalized["reused_files"] = aggregate_progress[
+                        "reused_files"
+                    ]
                     progress_callback(normalized)
 
                 root_id = int(root["id"])
@@ -1498,16 +1783,104 @@ class IndexManager:
                     # repeats a full discovery and makes the other roots wait.
                     # Leave the root incomplete and let a later monitor/update
                     # pass retry it after the transient condition has cooled.
-                    root_summary = self.index_root(
-                        int(root["id"]),
-                        token,
-                        report_root_progress,
-                        target_file_ids=file_ids,
-                    )
+                    try:
+                        root_summary = self.index_root(
+                            int(root["id"]),
+                            token,
+                            report_root_progress,
+                            target_file_ids=file_ids,
+                        )
+                    except TypeError as exc:
+                        # Preserve compatibility with lightweight test
+                        # doubles and third-party integrations using the
+                        # pre-target_file_ids signature.
+                        if "target_file_ids" not in str(exc):
+                            raise
+                        root_summary = self.index_root(
+                            int(root["id"]),
+                            token,
+                            report_root_progress,
+                        )
                 except CancelledError:
                     raise
                 except Exception as exc:
+                    if isinstance(exc, SQLiteBusyCircuitOpen):
+                        log_event(
+                            "index.finalization.circuit_open",
+                            level=logging.ERROR,
+                            component="index_manager",
+                            root_id=int(root["id"]),
+                            root_path=str(root_path),
+                            error_type=type(exc).__name__,
+                            error_message=str(exc)[:1000],
+                        )
+                        raise RuntimeError(
+                            "索引收尾阶段持续无法获得 SQLite 写入机会，"
+                            "已安全停止本轮候选发布；上一版索引仍可搜索，请稍后重试"
+                        ) from exc
+                    if _is_database_busy_error(exc):
+                        log_event(
+                            "index.root.failed",
+                            level=logging.ERROR,
+                            component="index_manager",
+                            root_id=int(root["id"]),
+                            root_path=str(root_path),
+                            error_type=type(exc).__name__,
+                            error_message=str(exc)[:1000],
+                            busy_error=True,
+                        )
+                        raise RuntimeError(
+                            "数据库被其他进程或残留连接占用，已停止本轮索引；"
+                            "请关闭其他诊断/搜索进程后重试"
+                        ) from exc
+                    if isinstance(exc, PlanningWorkerError):
+                        log_event(
+                            "index.root.planning_failed",
+                            level=logging.ERROR,
+                            component="index_manager",
+                            root_id=int(root["id"]),
+                            root_path=str(root_path),
+                            error_type=type(exc).__name__,
+                            error_message=str(exc)[:1000],
+                        )
+                        raise RuntimeError(
+                            "目录发现子进程意外中断，已停止候选发布；"
+                            "上一版索引仍可搜索，请稍后重试"
+                        ) from exc
+                    if isinstance(
+                        exc,
+                        (
+                            IndexFinalizationWatchdogError,
+                            WriterFinalizationTimeout,
+                            ExecutorLifecycleError,
+                            BrokenProcessPool,
+                            TimeoutError,
+                            sqlite3.Error,
+                        ),
+                    ):
+                        log_event(
+                            "index.root.infrastructure_failed",
+                            level=logging.ERROR,
+                            component="index_manager",
+                            root_id=int(root["id"]),
+                            root_path=str(root_path),
+                            error_type=type(exc).__name__,
+                            error_message=str(exc)[:1000],
+                        )
+                        raise RuntimeError(
+                            "索引基础设施阶段失败，已停止候选发布并保留上一版索引"
+                        ) from exc
                     root_error = exc
+                    log_event(
+                        "index.root.failed",
+                        level=logging.ERROR,
+                        component="index_manager",
+                        root_id=int(root["id"]),
+                        root_path=str(root_path),
+                        error_type=type(exc).__name__,
+                        error_message=str(exc)[:1000],
+                        busy_error=False,
+                    )
                     logger.warning(
                         "Index root deferred after one isolated attempt: root=%s error=%s",
                         root_path,
@@ -1549,16 +1922,321 @@ class IndexManager:
                             "ready" if self.db.root_completion(int(root["id"]))["blocking"] == 0 else "incomplete",
                             timeout_seconds=0.25,
                         )
-                    except Exception:
+                    except Exception as exc:
+                        if _is_database_busy_error(exc):
+                            raise RuntimeError(
+                                "索引完成时数据库仍被其他进程占用，已停止本轮索引"
+                            ) from exc
                         logger.debug(
                             "Unable to clear root retry state after completion: %s",
                             root_path,
                             exc_info=True,
                         )
+            # FTS pending markers are scoped to the candidate database, not to
+            # the root currently being scanned.  A busy FTS replay in an
+            # earlier root must therefore be drained after all roots have had
+            # their parser writers closed; otherwise a later root can appear
+            # complete while the candidate is still unpublished.
+            self._drain_pending_content_fts(token, progress_callback)
         finally:
             self._shared_ocr_session_active = False
             self._close_shared_ocr_pool()
         return summary
+
+    def _drain_pending_content_fts(
+        self,
+        token: CancelToken,
+        progress_callback: ProgressCallback | None,
+    ) -> None:
+        """Drain all candidate FTS work before the generation publish gate.
+
+        Parser results are durable before this phase.  FTS is replayed in
+        bounded transactions and retried after transient SQLite contention so
+        one busy batch cannot make the whole candidate look corrupt.
+        """
+
+        pending_reader = getattr(self.db, "pending_content_fts_file_ids", None)
+        sync = getattr(self.db, "sync_content_fts_for_files", None)
+        if not callable(pending_reader) or not callable(sync):
+            return
+        scan_id = str(self.run_context.get("scan_id") or "global-fts-drain")
+        finalization_watchdog = IndexFinalizationWatchdog(
+            self.db,
+            run_id=scan_id,
+            root_id=0,
+            timeout_seconds=max(
+                1,
+                int(self.settings.finalization_no_progress_timeout_seconds),
+            ),
+        )
+        busy_circuit = SQLiteBusyCircuit(
+            "index_fts_global_drain",
+            max_attempts=SQLITE_BUSY_CIRCUIT_MAX_ATTEMPTS,
+            max_seconds=SQLITE_BUSY_CIRCUIT_MAX_SECONDS,
+            database_path=self.db.db_path,
+            run_id=scan_id,
+        )
+        finalization_watchdog.start()
+        attempts = 0
+        try:
+            while True:
+                token.wait_if_paused()
+                token.throw_if_cancelled()
+                pending = tuple(
+                    int(value)
+                    for value in self._run_finalization_operation(
+                        lambda: pending_reader(),
+                        watchdog=finalization_watchdog,
+                        run_id=scan_id,
+                        operation_name="fts_pending_read",
+                        busy_circuit=busy_circuit,
+                    )
+                )
+                if not pending:
+                    log_event(
+                        "index.fts.drain.completed",
+                        component="index_manager",
+                        run_id=scan_id,
+                        database_path=str(self.db.db_path),
+                        attempts=attempts,
+                    )
+                    return
+
+                attempts += 1
+                log_event(
+                    "index.fts.drain.started"
+                    if attempts == 1
+                    else "index.fts.drain.retry",
+                    component="index_manager",
+                    run_id=scan_id,
+                    database_path=str(self.db.db_path),
+                    pending_files=len(pending),
+                    attempt=attempts,
+                )
+                finalization_watchdog.progress(
+                    "fts_global_drain",
+                    total=len(pending),
+                    detail="读取全文索引待同步队列",
+                    force_log=True,
+                )
+
+                def report_fts_progress(completed: int, total: int) -> None:
+                    finalization_watchdog.progress(
+                        "fts_global_drain",
+                        completed=int(completed),
+                        total=int(total),
+                    )
+                    finalization_watchdog.check()
+                    if progress_callback is not None:
+                        progress_callback(
+                            {
+                                "stage": "fts",
+                                "active_phase": "fts_global_drain",
+                                "active_completed_units": int(completed),
+                                "active_total_units": int(total),
+                                "pending_fts_files": len(pending),
+                                "phase_label": (
+                                    f"正在完成全文索引 {int(completed):,}/{int(total):,}"
+                                ),
+                            }
+                        )
+
+                def sync_pending() -> int:
+                    try:
+                        result = sync(
+                            pending,
+                            progress_callback=report_fts_progress,
+                        )
+                        return int(result or 0)
+                    except TypeError as exc:
+                        if "progress_callback" not in str(exc):
+                            raise
+                        return int(sync(pending) or 0)
+
+                synced_blocks = int(
+                    self._run_finalization_operation(
+                        sync_pending,
+                        watchdog=finalization_watchdog,
+                        run_id=scan_id,
+                        operation_name="fts_global_drain",
+                        busy_circuit=busy_circuit,
+                        batch_size=len(pending),
+                    )
+                    or 0
+                )
+                remaining = tuple(
+                    int(value)
+                    for value in self._run_finalization_operation(
+                        lambda: pending_reader(),
+                        watchdog=finalization_watchdog,
+                        run_id=scan_id,
+                        operation_name="fts_pending_read",
+                        busy_circuit=busy_circuit,
+                    )
+                )
+                log_event(
+                    "index.fts.drain.batch_completed",
+                    component="index_manager",
+                    run_id=scan_id,
+                    database_path=str(self.db.db_path),
+                    pending_before=len(pending),
+                    synced_blocks=synced_blocks,
+                    pending_after=len(remaining),
+                    attempt=attempts,
+                )
+                if remaining and len(remaining) >= len(pending) and not synced_blocks:
+                    raise RuntimeError(
+                        f"全文索引收尾没有进展，仍有 {len(remaining)} 个文件待同步"
+                    )
+                if len(remaining) < len(pending):
+                    attempts = 0
+        finally:
+            finalization_watchdog.stop(
+                outcome="cancelled" if token.cancelled else "completed"
+            )
+
+    def _run_finalization_operation(
+        self,
+        operation: Callable[[], object],
+        *,
+        watchdog: IndexFinalizationWatchdog,
+        run_id: str,
+        operation_name: str,
+        busy_circuit: SQLiteBusyCircuit,
+        batch_size: int = 0,
+    ) -> object:
+        """Run one finalization operation with bounded busy retries.
+
+        The parser phase may continue while a short writer is busy, but the
+        finalization phase must not silently continue into thousands of
+        individual retries.  Every retry is logged and the circuit opens after
+        the configured budget, leaving the candidate unpublished for a safe
+        later retry.
+        """
+
+        retry_delays = (0.1, 0.25, 0.5, 1.0, 2.0, 4.0, 4.0, 4.0)
+        attempt = 0
+        started = time.perf_counter()
+        while True:
+            watchdog.check()
+            try:
+                result = operation()
+            except sqlite3.OperationalError as exc:
+                watchdog.check()
+                if not _is_database_busy_error(exc):
+                    raise
+                busy_circuit.note_busy(
+                    exc,
+                    stage=operation_name,
+                    batch_size=batch_size,
+                    wait_timeout_seconds=0.75,
+                )
+                attempt += 1
+                delay = retry_delays[min(attempt - 1, len(retry_delays) - 1)]
+                log_event(
+                    "index.finalization.retry_scheduled",
+                    level=logging.WARNING,
+                    component="index_manager",
+                    run_id=run_id,
+                    database_path=str(self.db.db_path),
+                    operation=operation_name,
+                    attempt=attempt,
+                    retry_delay_ms=int(delay * 1000),
+                    batch_size=batch_size,
+                    error_type=type(exc).__name__,
+                    error_message=str(exc)[:1000],
+                )
+                deadline = time.monotonic() + delay
+                while True:
+                    watchdog.check()
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    time.sleep(min(0.1, remaining))
+                continue
+            watchdog.check()
+            busy_circuit.reset_after_success(stage=operation_name)
+            # A successful operation is semantic finalization progress even
+            # when the underlying helper has no per-row callback (for example
+            # rebuilding readiness counters). Without this boundary the
+            # watchdog measures the following maintenance work from the last
+            # cache/FTS callback and can report a false timeout.
+            watchdog.progress(
+                operation_name,
+                completed=1,
+                total=1,
+                detail=f"{operation_name} 已完成",
+            )
+            log_event(
+                "index.finalization.operation_completed",
+                component="index_manager",
+                run_id=run_id,
+                database_path=str(self.db.db_path),
+                operation=operation_name,
+                batch_size=batch_size,
+                elapsed_ms=int((time.perf_counter() - started) * 1000),
+                retries=attempt,
+            )
+            return result
+
+    def _heartbeat_index_run(self, run_id: str, stop_event: threading.Event) -> None:
+        while not stop_event.wait(5.0):
+            try:
+                self.db.heartbeat_index_run(run_id)
+                log_event(
+                    "index.run.heartbeat",
+                    component="index_manager",
+                    run_id=run_id,
+                    database_path=str(self.db.db_path),
+                    active_connections=self.db.active_connection_count(),
+                )
+            except Exception:
+                logger.debug("Unable to persist index heartbeat: run_id=%s", run_id, exc_info=True)
+
+    def _schedule_parse_lanes_with_recovery(
+        self,
+        lanes: dict[str, ParseLane],
+        settings: AppSettings,
+        token: CancelToken,
+        spool_dir: Path,
+        *,
+        executors: list[Executor],
+        process_executors: list[ProcessPoolExecutor],
+        metrics: IndexRunMetrics | None,
+    ) -> list[int | None]:
+        try:
+            return schedule_parse_lanes(
+                lanes.values(),
+                settings,
+                token,
+                spool_dir,
+                metrics=metrics,
+                executor_lifecycle_lock=self._executor_lifecycle_lock,
+            )
+        except ExecutorLifecycleError as exc:
+            if token.cancelled:
+                raise CancelledError("任务已取消") from exc
+            self._record_scheduler_diagnostic(
+                {
+                    "state": "executor_lifecycle_recovery",
+                    "source": "index_manager",
+                    "reason": str(exc),
+                }
+            )
+            self._recycle_unhealthy_process_lanes(
+                lanes,
+                executors,
+                process_executors,
+                spool_dir,
+            )
+            return schedule_parse_lanes(
+                lanes.values(),
+                settings,
+                token,
+                spool_dir,
+                metrics=metrics,
+                executor_lifecycle_lock=self._executor_lifecycle_lock,
+            )
 
     def index_root(
         self,
@@ -1575,13 +2253,35 @@ class IndexManager:
 
         run_started = time.perf_counter()
         run_id = uuid.uuid4().hex
+        self.run_context["run_id"] = run_id
+        self.run_context["last_data_commit_at"] = None
+        self.run_context["last_data_commit_monotonic"] = None
+        self.run_context["writer_committed_batches"] = 0
+        self.run_context["writer_committed_artifacts"] = 0
+        run_id_callback = self.run_context.get("run_id_callback")
+        if callable(run_id_callback):
+            try:
+                run_id_callback(run_id)
+            except Exception:
+                logger.debug("Unable to register run ID with scan worker", exc_info=True)
+        log_event(
+            "index.run.started",
+            component="index_manager",
+            run_id=run_id,
+            scan_id=self.run_context.get("scan_id"),
+            root_id=root_id,
+            root_path=str(root["path"]),
+        )
         requires_full_rebuild = self.db.requires_full_rebuild()
         resumed_full_batch = self.db.has_incomplete_full_batch()
-        # ``full_batch_incomplete`` describes the publication state of the
-        # global FTS build.  It must not force every root back through a full
-        # directory walk: a root with a valid USN checkpoint can still use the
-        # incremental path while the remaining FTS work converges.
-        full_batch = self.db.active_file_count() == 0 or requires_full_rebuild
+        # A previously interrupted full batch has no trustworthy per-file
+        # retry boundary. Re-walk that database once so unchanged files can be
+        # counted/reconciled before the deferred FTS publication is retried.
+        full_batch = (
+            self.db.active_file_count() == 0
+            or requires_full_rebuild
+            or resumed_full_batch
+        )
         metrics = IndexRunMetrics(
             run_id=run_id,
             mode="full_batch" if full_batch else "incremental",
@@ -1606,27 +2306,8 @@ class IndexManager:
             self._current_metrics = metrics
         summary = IndexSummary()
         run_recorded = False
-        try:
-            self.db.start_index_run(metrics, timeout_seconds=0.25)
-            run_recorded = True
-        except Exception as exc:
-            if not _is_database_busy_error(exc):
-                raise
-            logger.warning(
-                "Index-run telemetry deferred because SQLite is busy: root_id=%s",
-                root_id,
-            )
-        try:
-            self.db.update_root_scan_time(
-                root_id, "indexing", timeout_seconds=0.25
-            )
-        except Exception as exc:
-            if not _is_database_busy_error(exc):
-                raise
-            logger.warning(
-                "Root indexing-state telemetry deferred because SQLite is busy: root_id=%s",
-                root_id,
-            )
+        heartbeat_stop = threading.Event()
+        heartbeat_thread: threading.Thread | None = None
         root_path = Path(str(root["path"]))
         target_ids = {int(value) for value in (target_file_ids or ())}
         target_paths = self.db.paths_for_files(target_ids, root_id=root_id)
@@ -1653,6 +2334,32 @@ class IndexManager:
                     len(usn_changed_paths),
                     len(usn_deleted_paths),
                 )
+                if (
+                    usn_fast
+                    and not target_ids
+                    and not usn_changed_paths
+                    and not usn_deleted_paths
+                ):
+                    # A clean USN page intentionally yields no filesystem
+                    # paths. Count the already indexed files as skipped so
+                    # run metrics and the progress UI do not look stalled or
+                    # report a misleading zero-file incremental pass.
+                    reused_count = self.db.active_file_count_for_root(root_id)
+                    summary.skipped += reused_count
+                    summary.reused += reused_count
+                    self._emit(
+                        progress_callback,
+                        "planning",
+                        summary,
+                        current_file="",
+                        pending=0,
+                        total_files=reused_count,
+                        discovered_files=reused_count,
+                        completed_files=summary.skipped,
+                        reused_files=summary.reused,
+                        phase_label="未发现变化，复用已发布索引",
+                        index_phase="planning",
+                    )
             except Exception:
                 logger.exception("USN incremental planning failed; falling back to directory scan")
                 usn_fast = False
@@ -1662,8 +2369,13 @@ class IndexManager:
             previous_paths = self.db.active_paths_for_root(root_id)
             try:
                 initial_usn_checkpoint = current_checkpoint(root_path)
-            except UsnJournalUnavailable:
+            except UsnJournalUnavailable as exc:
                 initial_usn_checkpoint = None
+                logger.info(
+                    "USN initial checkpoint unavailable; directory discovery will establish a new baseline: root=%s detail=%s",
+                    root_path,
+                    str(exc),
+                )
         else:
             previous_paths = set()
         spool_dir = TEMP_DIR / "process_results" / run_id
@@ -1693,6 +2405,7 @@ class IndexManager:
         resource_monitor: ProcessResourceMonitor | None = None
         resource_controller: RuntimeResourceController | None = None
         watchdog: ProcessLaneWatchdog | None = None
+        finalization_watchdog: IndexFinalizationWatchdog | None = None
         executors: list[Executor] = []
         process_executors: list[ProcessPoolExecutor] = []
         file_timings: list[FileTiming] = []
@@ -1705,15 +2418,53 @@ class IndexManager:
             self.settings.defer_fts_during_full_scan
             and (full_batch or resumed_full_batch or requires_full_rebuild)
         )
-        partial_search_projection = bool(
-            self.settings.partial_search_during_index
-        )
+        # Ordinary search is a complete-snapshot operation. The historical
+        # partial-search setting is retained for config compatibility, but it
+        # no longer opens an incomplete projection to users.
+        partial_search_projection = False
         candidate_version_id: int | None = None
         fts_published = True
+        finalization_busy_circuit = SQLiteBusyCircuit(
+            f"index_finalization.root_{root_id}",
+            max_attempts=SQLITE_BUSY_CIRCUIT_MAX_ATTEMPTS,
+            max_seconds=SQLITE_BUSY_CIRCUIT_MAX_SECONDS,
+            database_path=self.db.db_path,
+            run_id=run_id,
+        )
 
+        self._coordinator.register_index_manager(
+            self,
+            index_run_id=run_id,
+        )
         try:
-            if partial_search_projection:
-                self.db.set_partial_search_projection_active(True)
+            try:
+                self.db.start_index_run(metrics, timeout_seconds=0.25)
+                run_recorded = True
+                heartbeat_thread = threading.Thread(
+                    target=self._heartbeat_index_run,
+                    args=(run_id, heartbeat_stop),
+                    name="index-run-heartbeat",
+                    daemon=True,
+                )
+                heartbeat_thread.start()
+            except Exception as exc:
+                if not _is_database_busy_error(exc):
+                    raise
+                logger.warning(
+                    "Index-run telemetry deferred because SQLite is busy: root_id=%s",
+                    root_id,
+                )
+            try:
+                self.db.update_root_scan_time(
+                    root_id, "indexing", timeout_seconds=0.25
+                )
+            except Exception as exc:
+                if not _is_database_busy_error(exc):
+                    raise
+                logger.warning(
+                    "Root indexing-state telemetry deferred because SQLite is busy: root_id=%s",
+                    root_id,
+                )
             recovered = self._recover_spooled_tasks(root_id)
             if recovered:
                 summary.indexed += recovered
@@ -1774,23 +2525,76 @@ class IndexManager:
                 self.db,
                 metrics,
                 diagnostic_callback=self._record_scheduler_diagnostic,
+                pause_check=lambda: token.paused,
             )
             watchdog.start()
 
+            def report_writer_progress(artifacts: list[object], elapsed_ms: int) -> None:
+                committed_at = time.time()
+                committed_batches = writer.summary.batches if writer is not None else 0
+                committed_artifacts = (
+                    writer.summary.artifacts if writer is not None else len(artifacts)
+                )
+                self.run_context["last_data_commit_at"] = committed_at
+                self.run_context["last_data_commit_monotonic"] = time.monotonic()
+                self.run_context["writer_committed_batches"] = committed_batches
+                self.run_context["writer_committed_artifacts"] = committed_artifacts
+                log_event(
+                    "index.writer.batch_committed",
+                    component="index_manager",
+                    run_id=run_id,
+                    scan_id=self.run_context.get("scan_id"),
+                    root_id=root_id,
+                    database_path=str(self.db.db_path),
+                    batch_artifacts=len(artifacts),
+                    committed_artifacts=committed_artifacts,
+                    committed_batches=committed_batches,
+                    write_ms=int(elapsed_ms),
+                    writer_queue_depth=writer.queue_depth() if writer is not None else 0,
+                    last_data_commit_at=committed_at,
+                )
+                self._emit(
+                    progress_callback,
+                    "writer_commit",
+                    summary,
+                    phase_label=(
+                        f"数据库已提交 {committed_batches:,} 批 / "
+                        f"{committed_artifacts:,} 个结果"
+                    ),
+                    writer_committed_files=committed_artifacts,
+                    writer_committed_batches=committed_batches,
+                    writer_queue_depth=(
+                        writer.queue_depth() if writer is not None else 0
+                    ),
+                    last_data_commit_at=committed_at,
+                )
+                if finalization_watchdog is not None:
+                    finalization_watchdog.progress(
+                        "writer_drain",
+                        completed=committed_artifacts,
+                        detail=f"最近提交耗时 {int(elapsed_ms)} ms",
+                    )
+
             writer = IndexWriter(
                 self.db,
-                update_fts=(
-                    # Preserve the existing partial-search contract. The
-                    # search lease freezes this committed projection for the
-                    # duration of a foreground query, while deferred full
-                    # batches still publish through the candidate gate.
-                    not defer_fts
-                    or bool(self.settings.partial_search_during_index)
-                ),
+                # A full scan publishes one consistent candidate projection
+                # after parsing.  Updating the trigram FTS table for every
+                # document keeps the global SQLite writer lock for minutes on
+                # large databases and blocks PDF task bookkeeping. Incremental
+                # scans publish FTS in bounded batches after the
+                # parser/task writers drain.
+                update_fts=not defer_fts,
+                # Incremental runs also commit content/task state first. FTS5
+                # maintenance is replayed in bounded transactions after the
+                # parser lanes drain, so a large XLS/PDF cannot starve task
+                # confirmations or leave the rest of the queue pending.
+                defer_fts=not defer_fts,
                 batch_blocks=self.settings.db_write_batch_blocks,
                 batch_bytes=self.settings.db_write_batch_bytes,
                 max_delay_ms=self.settings.db_write_max_delay_ms,
                 queue_size=max(8, int(self.settings.index_write_batch_size or 32) * 2),
+                write_dispatcher=self.write_dispatcher,
+                on_written=report_writer_progress,
             )
             writer.start()
             with self._pause_lock:
@@ -1803,13 +2607,164 @@ class IndexManager:
             excluded_video_total = 0
             planning_batch: list[Path] = []
             planning_batch_size = max(
-                64,
-                min(512, int(self.settings.index_write_batch_size or 32) * 4),
+                32,
+                min(128, int(self.settings.index_write_batch_size or 32) * 2),
             )
             scan_and_plan_started = time.perf_counter()
             fingerprint_elapsed = 0.0
             deferred_fts_started = False
             last_prepare_progress_emit = 0.0
+            deferred_planning_results: list[
+                tuple[str, ParseJob, ParseResult, int | None]
+            ] = []
+
+            def drain_ready_during_planning() -> None:
+                """Commit finished non-PDF jobs while discovery is still running.
+
+                Directory discovery can take minutes for a large root.  If
+                completed futures are left in the lane until discovery ends,
+                executor admission stops after the first window and the UI
+                shows a growing discovered total with no completed writes.
+                PDF page results retain their existing merge/confirmation
+                path and are consumed by the main drain loop below.
+                """
+
+                completed_now = drain_completed_lanes(
+                    lanes.values(),
+                    token,
+                    spool_dir,
+                    block=False,
+                )
+                committed_count = 0
+                deferred_pdf_count = 0
+                for lane_name, job, result, descriptor_bytes in completed_now:
+                    outcome = self._outcome_from_result(job, result, spool_dir)
+                    if outcome.status == "paused":
+                        self._update_ocr_request_for_outcome(
+                            job,
+                            outcome,
+                            requeue=True,
+                        )
+                        self._record_pause_acknowledgement(job, outcome)
+                        checkpoint = load_partial_parse_checkpoint(
+                            job,
+                            spool_dir,
+                            consume=False,
+                        )
+                        if checkpoint is not None and checkpoint.resume_cursor > 0:
+                            job.resume_cursor = checkpoint.resume_cursor
+                        elif outcome.resume_cursor > 0:
+                            job.resume_cursor = outcome.resume_cursor
+                        reset_job_for_retry(job, time.perf_counter())
+                        lanes[lane_name].pending.appendleft(job)
+                        continue
+                    self._record_completed_pause_requirement(job, outcome)
+                    if (
+                        outcome.error_code
+                        in {
+                            "PROCESS_WORKER_CRASH",
+                            "PARSE_NO_PROGRESS",
+                            "WORKER_INTERRUPTED",
+                        }
+                        and job.retry_count
+                        < max(0, int(self.settings.no_progress_max_retries))
+                        and (
+                            outcome.error_code != "PARSE_NO_PROGRESS"
+                            or register_stall(job) < 2
+                        )
+                    ):
+                        if job.task_id is not None:
+                            self.db.mark_task_attempt_interrupted(
+                                int(job.task_id),
+                                str(outcome.error_code),
+                                outcome.error_message
+                                or "解析 worker 异常退出，任务将重新排队",
+                            )
+                        self._update_ocr_request_for_outcome(
+                            job,
+                            outcome,
+                            requeue=True,
+                        )
+                        job.retry_count += 1
+                        reset_job_for_retry(job, time.perf_counter())
+                        lanes[lane_name].pending.appendleft(job)
+                        continue
+                    if job.pdf_task_type:
+                        deferred_planning_results.append(
+                            (lane_name, job, outcome, descriptor_bytes)
+                        )
+                        deferred_pdf_count += 1
+                        continue
+                    self._update_ocr_request_for_outcome(job, outcome)
+                    writer.submit(outcome, cancel_token=token)
+                    committed_count += 1
+                    record_parse_outcome(
+                        summary,
+                        outcome.status,
+                        1 + len(outcome.alias_file_ids),
+                        extension=outcome.file_path.suffix.lower(),
+                    )
+                    metrics.parse_ms_by_lane[lane_name] = (
+                        metrics.parse_ms_by_lane.get(lane_name, 0)
+                        + outcome.parse_ms
+                    )
+                    metrics.normalize_ms += outcome.normalize_ms
+                    metrics.spool_write_ms += outcome.spool_write_ms
+                    metrics.spool_write_bytes += outcome.spool_bytes
+                    metrics.lane_output_blocks[lane_name] = (
+                        metrics.lane_output_blocks.get(lane_name, 0)
+                        + len(outcome.blocks)
+                    )
+                    if outcome.worker_pid:
+                        worker_pids.add(outcome.worker_pid)
+                    file_timings.append(
+                        FileTiming(
+                            file_id=outcome.file_id,
+                            extension=outcome.file_path.suffix.lower(),
+                            size_bytes=outcome.size_bytes,
+                            queue_name=lane_name,
+                            queue_wait_ms=outcome.queue_wait_ms,
+                            parse_ms=outcome.parse_ms,
+                            block_count=len(outcome.blocks),
+                            text_chars=sum(
+                                len(block.raw_text) for block in outcome.blocks
+                            ),
+                            spool_bytes=outcome.spool_bytes,
+                            worker_pid=outcome.worker_pid,
+                        )
+                    )
+                    estimator.observe(
+                        lane_name,
+                        job.estimated_cost,
+                        max(0.001, outcome.parse_ms / 1000.0),
+                    )
+                    self._emit_active_progress(
+                        progress_callback,
+                        summary,
+                        lanes,
+                        estimator,
+                        eligible_total,
+                        completed_queue=lane_name,
+                        completed_cost=max(0.0, job.estimated_cost),
+                        service_seconds=max(0.001, outcome.parse_ms / 1000.0),
+                        completed_file=str(outcome.file_path),
+                        worker_pid=outcome.worker_pid,
+                        process_result_bytes=outcome.spool_bytes or None,
+                        process_descriptor_bytes=descriptor_bytes,
+                    )
+                if completed_now:
+                    log_event(
+                        "index.planning.completed_results_drained",
+                        component="index_manager",
+                        run_id=run_id,
+                        scan_id=self.run_context.get("scan_id"),
+                        root_id=root_id,
+                        completed_results=len(completed_now),
+                        submitted_to_writer=committed_count,
+                        deferred_pdf_results=deferred_pdf_count,
+                        writer_queue_depth=writer.queue_depth(),
+                        discovered_files=metrics.discovered_files,
+                    )
 
             def report_prepare_progress(
                 progress: PlanningProgress,
@@ -1846,10 +2801,11 @@ class IndexManager:
                 nonlocal candidate_version_id, fts_published
                 if not paths:
                     return
+                drain_ready_during_planning()
                 # Foreground searches own CPU, disk and the SQLite read view.
                 # Pause at the batch boundary and resume without losing the
                 # planning cursor when the search is released.
-                wait_for_search_idle(None)
+                wait_for_search_idle(0.25)
                 fingerprint_started = time.perf_counter()
                 batch_jobs = self._prepare_jobs(
                     root_id,
@@ -1862,6 +2818,16 @@ class IndexManager:
                     report_prepare_progress,
                 )
                 fingerprint_elapsed += time.perf_counter() - fingerprint_started
+                self._emit_active_progress(
+                    progress_callback,
+                    summary,
+                    lanes,
+                    estimator,
+                    eligible_total,
+                    phase_label="正在确认复用文件",
+                    index_phase="planning",
+                    reused_files=int(summary.reused),
+                )
                 if not batch_jobs:
                     return
                 if defer_fts and not deferred_fts_started:
@@ -1892,21 +2858,24 @@ class IndexManager:
                         metrics.zip_metrics[lane_key] = (
                             metrics.zip_metrics.get(lane_key, 0) + 1
                         )
-                wait_for_search_idle(None)
-                submitted = schedule_parse_lanes(
-                    lanes.values(),
+                wait_for_search_idle(0.25)
+                submitted = self._schedule_parse_lanes_with_recovery(
+                    lanes,
                     self.settings,
                     token,
                     spool_dir,
+                    executors=executors,
+                    process_executors=process_executors,
                     metrics=metrics,
                 )
                 task_ids = [task_id for task_id in submitted if task_id is not None]
-                self._mark_submitted_tasks_running(task_ids)
+                self._mark_submitted_tasks_running(task_ids, run_id=run_id)
                 self._claim_submitted_ocr_requests(
                     all_jobs,
                     task_ids,
                     run_id,
                 )
+                drain_ready_during_planning()
 
             file_iterator = (
                 self._iter_explicit_paths(
@@ -1924,6 +2893,23 @@ class IndexManager:
                     progress_callback,
                 )
             )
+            # Recover metadata rows that were committed before a planning
+            # batch was interrupted. They must be scanned again, otherwise a
+            # directory compare sees no filesystem change and leaves them
+            # permanently orphaned in ``pending``.
+            orphan_paths = self.db.pending_source_paths_for_root(root_id)
+            base_file_iterator = file_iterator
+            if orphan_paths and not target_ids:
+                def with_orphans() -> Iterable[Path]:
+                    yielded: set[str] = set()
+                    for candidate in chain(base_file_iterator, sorted(orphan_paths, key=lambda item: str(item).casefold())):
+                        key = str(candidate)
+                        if key in yielded:
+                            continue
+                        yielded.add(key)
+                        yield candidate
+
+                file_iterator = with_orphans()
             if target_ids:
                 file_iterator = (
                     path for path in file_iterator
@@ -1964,8 +2950,13 @@ class IndexManager:
             if not usn_fast:
                 try:
                     final_usn_checkpoint = current_checkpoint(root_path)
-                except UsnJournalUnavailable:
+                except UsnJournalUnavailable as exc:
                     final_usn_checkpoint = None
+                    logger.info(
+                        "USN discovery checkpoint unavailable; continuing with directory baseline: root=%s detail=%s",
+                        root_path,
+                        str(exc),
+                    )
             metrics.fingerprint_ms = int(fingerprint_elapsed * 1000)
             metrics.scan_ms = max(
                 0,
@@ -1986,11 +2977,14 @@ class IndexManager:
 
             last_heartbeat = 0.0
             last_resource_control = 0.0
+            last_task_reconcile = 0.0
             last_resource_completed = 0
             pending_ocr_worker_target: int | None = None
             pending_ocr_resize_reason = ""
-            while pending_lane_tasks(lanes.values()):
-                recycled = self._recycle_unhealthy_process_lanes(
+            while pending_lane_tasks(lanes.values()) or deferred_planning_results:
+                recycled = list(deferred_planning_results)
+                deferred_planning_results.clear()
+                recycled += self._recycle_unhealthy_process_lanes(
                     lanes,
                     executors,
                     process_executors,
@@ -2025,23 +3019,44 @@ class IndexManager:
                     elif resize_state != "active_tasks":
                         pending_ocr_worker_target = None
                         pending_ocr_resize_reason = ""
-                wait_for_search_idle(None)
-                submitted = schedule_parse_lanes(
-                    lanes.values(),
+                wait_for_search_idle(0.25)
+                submitted = self._schedule_parse_lanes_with_recovery(
+                    lanes,
                     self.settings,
                     token,
                     spool_dir,
+                    executors=executors,
+                    process_executors=process_executors,
                     metrics=metrics,
                 )
                 if submitted:
                     task_ids = [task_id for task_id in submitted if task_id is not None]
-                    self._mark_submitted_tasks_running(task_ids)
+                    self._mark_submitted_tasks_running(task_ids, run_id=run_id)
                     self._claim_submitted_ocr_requests(
                         all_jobs,
                         task_ids,
                         run_id,
                     )
                 now = time.perf_counter()
+                if now - last_task_reconcile >= 5.0:
+                    try:
+                        recovered_tasks = self.db.reconcile_stale_parse_tasks(
+                            stale_after_seconds=120,
+                            no_worker_after_seconds=60,
+                            active_run_id=run_id,
+                        )
+                    except Exception:
+                        recovered_tasks = 0
+                        logger.debug(
+                            "Unable to reconcile stale parse tasks during active run",
+                            exc_info=True,
+                        )
+                    if recovered_tasks:
+                        logger.warning(
+                            "Recovered stale parse tasks while run was active: tasks=%s",
+                            recovered_tasks,
+                        )
+                    last_task_reconcile = now
                 if (
                     resource_monitor is not None
                     and resource_controller is not None
@@ -2143,7 +3158,11 @@ class IndexManager:
                         outcome,
                     )
                     if (
-                        outcome.error_code in {"PROCESS_WORKER_CRASH", "PARSE_NO_PROGRESS"}
+                        outcome.error_code in {
+                            "PROCESS_WORKER_CRASH",
+                            "PARSE_NO_PROGRESS",
+                            "WORKER_INTERRUPTED",
+                        }
                         and job.retry_count < max(0, int(self.settings.no_progress_max_retries))
                         and (
                             outcome.error_code != "PARSE_NO_PROGRESS"
@@ -2463,23 +3482,527 @@ class IndexManager:
                         process_descriptor_bytes=descriptor_bytes,
                     )
 
-            writer_summary = writer.finish()
-            metrics.database_write_ms = writer_summary.write_ms
-            cached_after_write = self.db.find_cached_documents(list(active_jobs))
-            for identity, job in active_jobs.items():
-                cached = cached_after_write.get(identity)
-                if cached is None:
+            # Parser telemetry is no longer needed once every parser lane has
+            # drained.  Both helpers write recovery metadata to the candidate
+            # database; keeping them alive during FTS/cache finalization makes
+            # them compete with the long, but bounded, finalization batches.
+            if watchdog is not None:
+                watchdog.stop()
+                watchdog = None
+            heartbeat_stop.set()
+            if heartbeat_thread is not None:
+                heartbeat_thread.join(timeout=1.0)
+                heartbeat_thread = None
+            log_event(
+                "index.finalization.exclusive_writes_started",
+                component="index_manager",
+                run_id=run_id,
+                scan_id=self.run_context.get("scan_id"),
+                database_path=str(self.db.db_path),
+                root_id=root_id,
+            )
+
+            # The writer must close before FTS replay.  Do not perform the
+            # replay inside finish(): task/content commits have priority and
+            # pending FTS IDs are durable in index_state for crash recovery.
+            finalization_watchdog = IndexFinalizationWatchdog(
+                self.db,
+                run_id=run_id,
+                root_id=root_id,
+                timeout_seconds=max(
+                    1,
+                    int(self.settings.finalization_no_progress_timeout_seconds),
+                ),
+            )
+            finalization_watchdog.start()
+            finalization_watchdog.progress(
+                "writer_drain",
+                detail="等待写入器提交已完成解析结果",
+                force_log=True,
+            )
+            writer_summary = writer.finish(
+                sync_deferred_fts=False,
+                max_wait_seconds=max(
+                    1,
+                    int(self.settings.finalization_no_progress_timeout_seconds),
+                ),
+                progress_check=finalization_watchdog.check,
+            )
+
+            # Parser lanes are drained and the normal writer is closed. Give
+            # buffered PDF confirmations a final bounded chance now that no
+            # competing index batch can hold the SQLite writer lease. Any
+            # merge outcomes are written through a short-lived writer so they
+            # are included before the candidate FTS publication below.
+            pending_pdf_merges: list[ParseOutcome] = []
+            for document_task_id in list(self._pdf_confirmation_buffers):
+                if not self._flush_pdf_page_confirmations(
+                    document_task_id,
+                    max_wait_seconds=10.0,
+                ):
                     continue
-                document_id, status = cached
-                self.db.link_cached_document(
-                    [job.file_id, *job.alias_file_ids],
-                    document_id,
-                    identity[0],
-                    identity[1],
-                    identity[2],
-                    status,
+                try:
+                    merged_pdf = self._merge_ready_pdf_document(
+                        document_task_id,
+                        current_metrics=metrics,
+                    )
+                except sqlite3.OperationalError as exc:
+                    if not _is_database_busy_error(exc):
+                        raise
+                    logger.warning(
+                        "PDF merge deferred because SQLite is busy: document_task_id=%s",
+                        document_task_id,
+                    )
+                    continue
+                if merged_pdf is None:
+                    continue
+                merged_outcome, _merged_job = merged_pdf
+                pending_pdf_merges.append(merged_outcome)
+            if pending_pdf_merges:
+                merge_writer = IndexWriter(
+                    self.db,
+                    update_fts=not defer_fts,
+                    defer_fts=not defer_fts,
+                    batch_blocks=self.settings.db_write_batch_blocks,
+                    batch_bytes=self.settings.db_write_batch_bytes,
+                    max_delay_ms=self.settings.db_write_max_delay_ms,
+                    queue_size=max(2, len(pending_pdf_merges) * 2),
+                    write_dispatcher=self.write_dispatcher,
+                    on_written=report_writer_progress,
                 )
-            self.db.record_file_metrics(run_id, file_timings)
+                for merged_outcome in pending_pdf_merges:
+                    merge_writer.submit(merged_outcome, cancel_token=token)
+                merge_summary = merge_writer.finish(
+                    sync_deferred_fts=False,
+                    max_wait_seconds=max(
+                        1,
+                        int(self.settings.finalization_no_progress_timeout_seconds),
+                    ),
+                    progress_check=finalization_watchdog.check,
+                )
+                writer_summary.artifacts += merge_summary.artifacts
+                writer_summary.blocks += merge_summary.blocks
+                writer_summary.text_bytes += merge_summary.text_bytes
+                writer_summary.batches += merge_summary.batches
+                writer_summary.write_ms += merge_summary.write_ms
+                for merged_outcome in pending_pdf_merges:
+                    metrics.pdf_metrics["document_merge_count"] = (
+                        metrics.pdf_metrics.get("document_merge_count", 0) + 1
+                    )
+                    record_parse_outcome(
+                        summary,
+                        merged_outcome.status,
+                        1 + len(merged_outcome.alias_file_ids),
+                        extension=".pdf",
+                    )
+                deferred_fts_ids = set(writer.deferred_fts_file_ids)
+                deferred_fts_ids.update(merge_writer.deferred_fts_file_ids)
+            else:
+                deferred_fts_ids = set(writer.deferred_fts_file_ids)
+
+            if not defer_fts:
+                # Include durable work left by a prior interruption. This is
+                # also the source of truth when a parser result committed but
+                # the process stopped before the in-memory set was updated.
+                deferred_fts_ids.update(
+                    # Pending FTS markers belong to the candidate database as
+                    # a whole.  Do not leave work from an earlier root behind
+                    # just because the current root has a different ID.
+                    self.db.pending_content_fts_file_ids()
+                )
+
+            if deferred_fts_ids:
+                # Incremental FTS replay is intentionally after all parser and
+                # PDF confirmation writes. Each database helper transaction is
+                # bounded and leaves the per-file marker on interruption.
+                fts_published = False
+                if finalization_watchdog is None:
+                    finalization_watchdog = IndexFinalizationWatchdog(
+                        self.db,
+                        run_id=run_id,
+                        root_id=root_id,
+                    )
+                    finalization_watchdog.start()
+                finalization_watchdog.progress(
+                    "fts_sync",
+                    total=len(deferred_fts_ids),
+                    detail="准备同步待更新文件",
+                    force_log=True,
+                )
+
+                def report_fts_progress(
+                    completed: int,
+                    total: int,
+                    *,
+                    completed_offset: int = 0,
+                ) -> None:
+                    overall_completed = int(completed_offset) + int(completed)
+                    overall_total = int(completed_offset) + int(total)
+                    if finalization_watchdog is not None:
+                        finalization_watchdog.progress(
+                            "fts_sync",
+                            completed=overall_completed,
+                            total=overall_total,
+                        )
+                        finalization_watchdog.check()
+                    self._emit(
+                        progress_callback,
+                        "fts",
+                        summary,
+                        current_file="",
+                        pending=0,
+                        total_files=eligible_total,
+                        completed_files=eligible_total,
+                        active_phase="fts_sync",
+                        active_completed_units=overall_completed,
+                        active_total_units=overall_total,
+                        phase_label=(
+                            f"正在更新全文索引 {overall_completed:,}/{overall_total:,}"
+                        ),
+                    )
+
+                fts_started = time.perf_counter()
+                sorted_fts_ids = tuple(sorted(deferred_fts_ids))
+                fts_id_chunks = tuple(
+                    sorted_fts_ids[offset : offset + 400]
+                    for offset in range(0, len(sorted_fts_ids), 400)
+                )
+                synced_blocks = 0
+                for chunk_index, chunk_ids in enumerate(fts_id_chunks, 1):
+                    chunk_offset = synced_blocks
+                    chunk_cursor = 0
+
+                    def update_chunk_cursor(value: int) -> None:
+                        nonlocal chunk_cursor
+                        chunk_cursor = max(chunk_cursor, int(value))
+
+                    def report_chunk_progress(
+                        completed: int,
+                        total: int,
+                    ) -> None:
+                        report_fts_progress(
+                            completed,
+                            total,
+                            completed_offset=chunk_offset,
+                        )
+
+                    def sync_fts_chunk() -> int:
+                        kwargs = {
+                            "progress_callback": report_chunk_progress,
+                            "start_block_id": chunk_cursor,
+                            "cursor_callback": update_chunk_cursor,
+                        }
+                        try:
+                            result = self.db.sync_content_fts_for_files(
+                                chunk_ids,
+                                **kwargs,
+                            )
+                            return int(result or 0)
+                        except TypeError as exc:
+                            message = str(exc)
+                            if (
+                                "start_block_id" not in message
+                                and "cursor_callback" not in message
+                                and "progress_callback" not in message
+                            ):
+                                raise
+                            if chunk_cursor > 0:
+                                raise RuntimeError(
+                                    "FTS adapter does not support cursor resume"
+                                ) from exc
+                            try:
+                                result = self.db.sync_content_fts_for_files(
+                                    chunk_ids,
+                                    progress_callback=report_chunk_progress,
+                                )
+                                return int(result or 0)
+                            except TypeError as fallback_exc:
+                                if "progress_callback" not in str(fallback_exc):
+                                    raise
+                                return int(
+                                    self.db.sync_content_fts_for_files(chunk_ids)
+                                    or 0
+                                )
+
+                    synced_blocks += int(
+                        self._run_finalization_operation(
+                            sync_fts_chunk,
+                            watchdog=finalization_watchdog,
+                            run_id=run_id,
+                            operation_name=f"fts_sync_chunk_{chunk_index}",
+                            busy_circuit=finalization_busy_circuit,
+                            batch_size=len(chunk_ids),
+                        )
+                        or 0
+                    )
+                sync_elapsed_ms = int((time.perf_counter() - fts_started) * 1000)
+                metrics.fts_build_ms += sync_elapsed_ms
+                writer_summary.write_ms += sync_elapsed_ms
+                fts_published = True
+                log_event(
+                    "index.finalization.fts_completed",
+                    component="index_manager",
+                    run_id=run_id,
+                    database_path=str(self.db.db_path),
+                    root_id=root_id,
+                    files=len(deferred_fts_ids),
+                    blocks=int(synced_blocks),
+                    elapsed_ms=sync_elapsed_ms,
+                )
+            metrics.database_write_ms = writer_summary.write_ms
+            if active_jobs:
+                if finalization_watchdog is None:
+                    finalization_watchdog = IndexFinalizationWatchdog(
+                        self.db,
+                        run_id=run_id,
+                        root_id=root_id,
+                    )
+                    finalization_watchdog.start()
+                finalization_watchdog.progress(
+                    "cache_discovery",
+                    total=len(active_jobs),
+                    detail="查找可复用的解析结果",
+                    force_log=True,
+                )
+                self._emit(
+                    progress_callback,
+                    "finalization",
+                    summary,
+                    current_file="",
+                    pending=0,
+                    total_files=eligible_total,
+                    completed_files=eligible_total,
+                    active_phase="cache_discovery",
+                    active_completed_units=0,
+                    active_total_units=len(active_jobs),
+                    phase_label="正在查找可复用的解析结果",
+                )
+
+                def report_cache_discovery(completed: int, total: int) -> None:
+                    if finalization_watchdog is not None:
+                        finalization_watchdog.progress(
+                            "cache_discovery",
+                            completed=int(completed),
+                            total=int(total),
+                        )
+                        finalization_watchdog.check()
+                    self._emit(
+                        progress_callback,
+                        "finalization",
+                        summary,
+                        current_file="",
+                        pending=0,
+                        total_files=eligible_total,
+                        completed_files=eligible_total,
+                        active_phase="cache_discovery",
+                        active_completed_units=int(completed),
+                        active_total_units=int(total),
+                        phase_label=(
+                            f"正在查找可复用结果 {int(completed):,}/{int(total):,}"
+                        ),
+                    )
+
+                try:
+                    cached_after_write = self._run_finalization_operation(
+                        lambda: self.db.find_cached_documents(
+                            list(active_jobs),
+                            progress_callback=report_cache_discovery,
+                        ),
+                        watchdog=finalization_watchdog,
+                        run_id=run_id,
+                        operation_name="cache_discovery",
+                        busy_circuit=finalization_busy_circuit,
+                        batch_size=len(active_jobs),
+                    )
+                except TypeError as exc:
+                    # Backward-compatible adapters may not expose the optional
+                    # progress callback on find_cached_documents.
+                    if "progress_callback" not in str(exc):
+                        raise
+                    cached_after_write = self._run_finalization_operation(
+                        lambda: self.db.find_cached_documents(list(active_jobs)),
+                        watchdog=finalization_watchdog,
+                        run_id=run_id,
+                        operation_name="cache_discovery",
+                        busy_circuit=finalization_busy_circuit,
+                        batch_size=len(active_jobs),
+                    )
+                cache_links = []
+                for index, (identity, job) in enumerate(active_jobs.items(), 1):
+                    cached = cached_after_write.get(identity)
+                    if cached is None:
+                        continue
+                    document_id, status = cached
+                    cache_links.append(
+                        (
+                            [job.file_id, *job.alias_file_ids],
+                            document_id,
+                            identity[0],
+                            identity[1],
+                            identity[2],
+                            status,
+                        )
+                    )
+                    if finalization_watchdog is not None and (
+                        index == len(active_jobs)
+                        or index % 256 == 0
+                    ):
+                        finalization_watchdog.progress(
+                            "cache_link_prepare",
+                            completed=index,
+                            total=len(active_jobs),
+                        )
+                log_event(
+                    "index.finalization.cache_links.prepared",
+                    component="index_manager",
+                    run_id=run_id,
+                    database_path=str(self.db.db_path),
+                    root_id=root_id,
+                    active_jobs=len(active_jobs),
+                    cache_link_groups=len(cache_links),
+                    cache_link_files=sum(
+                        len(link[0]) for link in cache_links
+                    ),
+                )
+                if cache_links:
+                    finalization_watchdog.progress(
+                        "cache_link",
+                        total=sum(len(link[0]) for link in cache_links),
+                        detail="批量关联缓存文档",
+                        force_log=True,
+                    )
+                    self._emit(
+                        progress_callback,
+                        "finalization",
+                        summary,
+                        current_file="",
+                        pending=0,
+                        total_files=eligible_total,
+                        completed_files=eligible_total,
+                        active_phase="cache_link",
+                        active_completed_units=0,
+                        active_total_units=sum(
+                            len(link[0]) for link in cache_links
+                        ),
+                        phase_label="正在批量关联缓存文档",
+                    )
+
+                    cache_link_completed = 0
+
+                    def report_cache_link(completed: int, total: int) -> None:
+                        nonlocal cache_link_completed
+                        # The callback is invoked only after the transaction
+                        # for that batch has committed.  Preserve this durable
+                        # boundary so a later busy retry resumes at the first
+                        # unfinished batch instead of replaying thousands of
+                        # already-linked files.
+                        cache_link_completed = max(
+                            cache_link_completed,
+                            int(completed),
+                        )
+                        if finalization_watchdog is not None:
+                            finalization_watchdog.progress(
+                                "cache_link",
+                                completed=int(completed),
+                                total=int(total),
+                            )
+                            finalization_watchdog.check()
+                        self._emit(
+                            progress_callback,
+                            "finalization",
+                            summary,
+                            current_file="",
+                            pending=0,
+                            total_files=eligible_total,
+                            completed_files=eligible_total,
+                            active_phase="cache_link",
+                            active_completed_units=int(completed),
+                            active_total_units=int(total),
+                            phase_label=(
+                                f"正在批量关联缓存文档 {int(completed):,}/{int(total):,}"
+                            ),
+                        )
+
+                    batch_link = getattr(
+                        self.db,
+                        "link_cached_documents_batch",
+                        None,
+                    )
+                    if callable(batch_link):
+                        def link_cache_batch() -> int:
+                            try:
+                                result = batch_link(
+                                    cache_links,
+                                    start_offset=cache_link_completed,
+                                    progress_callback=report_cache_link,
+                                )
+                                return int(result or 0)
+                            except TypeError as exc:
+                                message = str(exc)
+                                if (
+                                    "start_offset" not in message
+                                    and "progress_callback" not in message
+                                ):
+                                    raise
+                                if cache_link_completed > 0:
+                                    raise RuntimeError(
+                                        "缓存关联适配器不支持从已提交批次继续"
+                                    ) from exc
+                                try:
+                                    result = batch_link(
+                                        cache_links,
+                                        progress_callback=report_cache_link,
+                                    )
+                                    return int(result or 0)
+                                except TypeError as fallback_exc:
+                                    if "progress_callback" not in str(fallback_exc):
+                                        raise
+                                    return int(batch_link(cache_links) or 0)
+
+                        linked_files = self._run_finalization_operation(
+                            link_cache_batch,
+                            watchdog=finalization_watchdog,
+                            run_id=run_id,
+                            operation_name="cache_link_batch",
+                            busy_circuit=finalization_busy_circuit,
+                            batch_size=sum(len(link[0]) for link in cache_links),
+                        )
+                    else:
+                        # Keep old adapters functional, but apply the same
+                        # circuit and watchdog so the compatibility path cannot
+                        # recreate the historical endless per-file retry loop.
+                        linked_files = 0
+                        for link in cache_links:
+                            linked_files += self._run_finalization_operation(
+                                lambda link=link: self.db.link_cached_document(
+                                    *link
+                                ),
+                                watchdog=finalization_watchdog,
+                                run_id=run_id,
+                                operation_name="cache_link_compat",
+                                busy_circuit=finalization_busy_circuit,
+                                batch_size=len(link[0]),
+                            ) or len(link[0])
+                    log_event(
+                        "index.finalization.cache_links.completed",
+                        component="index_manager",
+                        run_id=run_id,
+                        database_path=str(self.db.db_path),
+                        root_id=root_id,
+                        linked_files=int(linked_files),
+                        requested_files=sum(
+                            len(link[0]) for link in cache_links
+                        ),
+                    )
+            try:
+                self.db.record_file_metrics(run_id, file_timings)
+            except sqlite3.OperationalError as exc:
+                if not _is_database_busy_error(exc):
+                    raise
+                logger.warning(
+                    "File timing telemetry deferred because SQLite is busy: run_id=%s",
+                    run_id,
+                )
 
             if defer_fts and (all_jobs or resumed_full_batch or requires_full_rebuild):
                 self._emit(
@@ -2507,7 +4030,6 @@ class IndexManager:
                     # lease is active. The writer and parser lanes already
                     # stop submitting at their batch boundaries; publication
                     # waits at the same process-local gate.
-                    wait_for_search_idle(None)
                     IndexVersionPublisher(self.db).publish(
                         candidate_version_id,
                         writer_idle=writer.is_idle(),
@@ -2517,11 +4039,19 @@ class IndexManager:
                         ),
                         golden_query_gate=_fast_publish_query_gate,
                     )
+                except IndexPublishBusyError as exc:
+                    # A foreground search may legitimately outlive this
+                    # publication attempt. Keep the candidate and pending
+                    # markers durable; retry on the next idle/index pass.
+                    logger.warning("Candidate FTS publication deferred: %s", exc)
                 except IndexPublishGateError as exc:
                     logger.warning(
                         "Candidate FTS remains unpublished; keeping the last published/partial index; failed gates=%s",
                         ",".join(exc.failed_gates),
                     )
+                    # Keep the candidate unpublished. A failed file makes the
+                    # ordinary search contract incomplete until the next run
+                    # repairs or explicitly excludes that file.
                 except Exception:
                     logger.exception(
                         "Candidate FTS publish failed; parsed results remain durable for retry"
@@ -2533,7 +4063,55 @@ class IndexManager:
                 )
 
             completion = self.db.root_completion(root_id)
-            is_complete = completion["blocking"] == 0 and fts_published
+            if finalization_watchdog is not None:
+                finalization_watchdog.progress(
+                    "readiness_counters",
+                    total=1,
+                    detail="更新索引完成度统计",
+                    force_log=True,
+                )
+
+                def report_counter_progress(
+                    phase: str,
+                    completed: int,
+                    total: int,
+                    detail: str,
+                ) -> None:
+                    finalization_watchdog.progress(
+                        phase,
+                        completed=int(completed),
+                        total=int(total),
+                        detail=detail,
+                    )
+                    self._emit(
+                        progress_callback,
+                        "finalization",
+                        summary,
+                        current_file="",
+                        pending=0,
+                        total_files=eligible_total,
+                        completed_files=eligible_total,
+                        active_phase=phase,
+                        active_completed_units=int(completed),
+                        active_total_units=int(total),
+                        phase_label=detail or "更新索引完成度统计",
+                    )
+
+                self._run_finalization_operation(
+                    lambda: self.db.rebuild_index_counters(
+                        progress_callback=report_counter_progress,
+                    ),
+                    watchdog=finalization_watchdog,
+                    run_id=run_id,
+                    operation_name="rebuild_index_counters",
+                    busy_circuit=finalization_busy_circuit,
+                )
+            else:
+                self.db.rebuild_index_counters()
+            is_complete = (
+                completion["blocking"] == 0
+                and fts_published
+            )
             if not summary.cancelled:
                 if not usn_fast and discovery_completed:
                     try:
@@ -2542,8 +4120,13 @@ class IndexManager:
                         # by the next USN pass instead of being hidden behind
                         # the earlier discovery checkpoint.
                         final_usn_checkpoint = current_checkpoint(root_path)
-                    except UsnJournalUnavailable:
+                    except UsnJournalUnavailable as exc:
                         final_usn_checkpoint = None
+                        logger.info(
+                            "USN post-parse checkpoint unavailable; next run will use a safe fallback: root=%s detail=%s",
+                            root_path,
+                            str(exc),
+                        )
                 checkpoint = (
                     usn_target_checkpoint
                     or final_usn_checkpoint
@@ -2778,7 +4361,47 @@ class IndexManager:
                 pending=sum(len(lane.futures) for lane in lanes.values()),
                 phase_label="索引已停止",
             )
-        except Exception:
+        except BaseException as exc:
+            if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                for lane in lanes.values():
+                    lane.pending.clear()
+                    for future in lane.futures:
+                        future.cancel()
+                for executor in process_executors:
+                    terminate_process_pool_workers(executor)
+                if writer is not None:
+                    try:
+                        writer.abort()
+                        metrics.database_write_ms = writer.summary.write_ms
+                    except Exception:
+                        logger.debug(
+                            "Writer stopped after parser process interruption",
+                            exc_info=True,
+                        )
+                try:
+                    self.db.update_root_scan_time(
+                        root_id, "failed", timeout_seconds=0.25
+                    )
+                except Exception:
+                    logger.warning(
+                        "Unable to persist interrupted root status: root=%s",
+                        root_path,
+                        exc_info=True,
+                    )
+                run_status = "failed"
+                self._emit(
+                    progress_callback,
+                    "failed",
+                    summary,
+                    current_file="",
+                    pending=0,
+                    phase_label="解析进程被中断，索引已停止",
+                    diagnostic_reason=(
+                        "KeyboardInterrupt" if isinstance(exc, KeyboardInterrupt)
+                        else "SystemExit"
+                    ),
+                )
+                raise
             if token.cancelled:
                 summary.cancelled = True
                 for lane in lanes.values():
@@ -2811,7 +4434,12 @@ class IndexManager:
             else:
                 if writer is not None:
                     try:
-                        writer.finish()
+                        # The normal finish path already attempted deferred
+                        # FTS replay.  Never call finish() again while
+                        # handling an exception: the same writer may be the
+                        # source of the failure and a second join can mask
+                        # the original error.
+                        writer.abort(timeout=0.5)
                     except Exception:
                         logger.exception("Index writer shutdown failed")
                 try:
@@ -2822,6 +4450,18 @@ class IndexManager:
                     logger.warning("Unable to persist failed root status: root=%s", root_path, exc_info=True)
                 raise
         finally:
+            if finalization_watchdog is not None:
+                try:
+                    finalization_watchdog.stop(outcome=run_status)
+                except Exception:
+                    logger.debug(
+                        "Unable to stop index finalization watchdog: run_id=%s",
+                        run_id,
+                        exc_info=True,
+                    )
+            heartbeat_stop.set()
+            if heartbeat_thread is not None:
+                heartbeat_thread.join(timeout=0.5)
             keep_shared_ocr = bool(
                 self._shared_ocr_session_active
                 and self._shared_ocr_executor is not None
@@ -2910,23 +4550,53 @@ class IndexManager:
                 # even when optional index-run telemetry could not acquire a
                 # short SQLite writer slot.
                 self.db.converge_index_run_tasks(run_id, run_status)
-            except Exception:
+            except Exception as exc:
+                log_event(
+                    "index.run.task_convergence_failed",
+                    level=logging.ERROR,
+                    component="index_manager",
+                    run_id=run_id,
+                    run_status=run_status,
+                    error_type=type(exc).__name__,
+                    error_message=str(exc)[:1000],
+                )
                 logger.exception("Unable to converge parse tasks: run_id=%s", run_id)
-            if run_recorded:
-                try:
-                    self.db.finish_index_run(
-                        metrics,
-                        run_status,
-                        asdict(summary),
-                        timeout_seconds=0.25,
-                    )
-                except Exception as exc:
-                    if not _is_database_busy_error(exc):
-                        raise
-                    logger.warning(
-                        "Index-run completion telemetry deferred because SQLite is busy: run_id=%s",
-                        run_id,
-                    )
+            try:
+                if run_recorded:
+                    try:
+                        self.db.finish_index_run(
+                            metrics,
+                            run_status,
+                            asdict(summary),
+                            timeout_seconds=0.25,
+                        )
+                    except Exception as exc:
+                        if not _is_database_busy_error(exc):
+                            raise
+                        logger.warning(
+                            "Index-run completion telemetry deferred because SQLite is busy: run_id=%s",
+                            run_id,
+                        )
+            finally:
+                self._coordinator.unregister_index_manager(self)
+            try:
+                pending_fts_files = len(self.db.pending_content_fts_file_ids())
+            except Exception:
+                pending_fts_files = None
+            log_event(
+                "index.run.completed",
+                component="index_manager",
+                run_id=run_id,
+                scan_id=self.run_context.get("scan_id"),
+                root_id=root_id,
+                root_path=str(root_path),
+                mode=metrics.mode,
+                state=run_status,
+                elapsed_ms=metrics.total_ms,
+                indexed=summary.indexed,
+                failed=summary.failed,
+                fts_pending_files=pending_fts_files,
+            )
         return summary
 
     def _discover_files(
@@ -2955,8 +4625,36 @@ class IndexManager:
     ) -> tuple[bool, set[Path], set[str], UsnCheckpoint | None]:
         """Build a precise changed/deleted set from a continuous USN cursor."""
 
-        def unavailable(reason: str) -> tuple[bool, set[Path], set[str], UsnCheckpoint | None]:
-            logger.info("USN incremental unavailable: root=%s reason=%s", root_path, reason)
+        def unavailable(
+            reason: str,
+            detail: str = "",
+        ) -> tuple[bool, set[Path], set[str], UsnCheckpoint | None]:
+            checkpoint_summary = {
+                key: checkpoint_data.get(key)
+                for key in ("journal_id", "next_usn", "volume_serial")
+                if checkpoint_data and key in checkpoint_data
+            }
+            log_event(
+                "index.usn.fallback_directory_scan",
+                component="index_manager",
+                run_id=str(self.run_context.get("run_id") or "") or None,
+                scan_id=str(self.run_context.get("scan_id") or "") or None,
+                root_id=int(root_id),
+                root_path=str(root_path),
+                reason=str(reason),
+                detail=str(detail or ""),
+                fallback="directory_scan",
+                checkpoint=checkpoint_summary,
+                checkpoint_retained_until_publish=True,
+                checkpoint_will_advance_only_after_discovery_and_publish=True,
+            )
+            logger.info(
+                "USN incremental unavailable: root=%s reason=%s detail=%s; "
+                "fallback=directory_scan checkpoint_retained_until_publish=true",
+                root_path,
+                reason,
+                detail or "-",
+            )
             return False, set(), set(), None
 
         checkpoint_data = self.db.load_usn_checkpoint(root_id)
@@ -2971,20 +4669,148 @@ class IndexManager:
                 volume_serial=int(checkpoint_data["volume_serial"]),
             )
             change_set = changes_since(root_path, checkpoint)
-        except (KeyError, ValueError, TypeError, UsnJournalUnavailable):
-            return unavailable("journal_unavailable_or_checkpoint_invalid")
+        except UsnChangeSetLimitExceeded as exc:
+            logger.info(
+                "USN incremental change set exceeded the fast-path limit; "
+                "falling back to directory comparison: root=%s limit=%d records_seen=%s",
+                root_path,
+                int(exc.limit),
+                exc.records_seen if exc.records_seen is not None else "unknown",
+            )
+            return unavailable("change_set_limit", str(exc))
+        except (KeyError, ValueError, TypeError, UsnJournalUnavailable) as exc:
+            logger.info(
+                "USN incremental change read unavailable: root=%s reason=%s detail=%s",
+                root_path,
+                "journal_unavailable_or_checkpoint_invalid",
+                str(exc),
+            )
+            return unavailable(
+                "journal_unavailable_or_checkpoint_invalid",
+                str(exc),
+            )
         directories = self.db.usn_directories_for_root(root_id)
         if not directories:
             return unavailable("directory_map_missing")
-        changed_paths: set[Path] = set()
-        deleted_paths: set[str] = set()
         relevant_mask = 0x000000FF | 0x00000F00 | 0x80000000
         latest_by_reference: dict[int, object] = {}
-        for record in change_set.records:
-            if not (record.reason & relevant_mask):
-                continue
-            latest_by_reference[int(record.file_reference)] = record
+        observed_directories = dict(directories)
+        directory_upserts: dict[int, tuple[int | None, str]] = {}
+        directory_removed_paths: set[str] = set()
+        deleted_paths: set[str] = {
+            str(path)
+            for path in active_refs.values()
+            if is_path_excluded_from_index_scope(
+                Path(path),
+                root_path,
+                self.settings,
+            )
+        }
         root_text = os.path.normcase(os.path.abspath(str(root_path)))
+        page_count = 0
+        raw_record_count = 0
+
+        def is_under_root(path: Path) -> bool:
+            try:
+                return os.path.commonpath(
+                    [root_text, os.path.normcase(os.path.abspath(str(path)))]
+                ) == root_text
+            except ValueError:
+                return False
+
+        retry_paths: set[Path] = set()
+        if self.settings.retry_failed_files:
+            retry_reader = getattr(self.db, "retryable_paths_for_root", None)
+            if not callable(retry_reader):
+                return unavailable("retry_path_query_unsupported")
+            try:
+                retry_candidates = retry_reader(root_id)
+            except Exception as exc:
+                logger.info(
+                    "USN retry-file query unavailable; falling back to directory comparison: "
+                    "root=%s detail=%s",
+                    root_path,
+                    str(exc),
+                )
+                return unavailable("retry_path_query_failed")
+            for candidate in retry_candidates:
+                candidate = Path(candidate)
+                if not is_under_root(candidate):
+                    continue
+                if is_path_excluded_from_index_scope(
+                    candidate,
+                    root_path,
+                    self.settings,
+                ):
+                    continue
+                if not include_subfolders and candidate.parent != root_path:
+                    continue
+                if candidate.is_file():
+                    retry_paths.add(candidate)
+
+        def consume_page(records: tuple[object, ...]) -> None:
+            nonlocal page_count, raw_record_count
+            page_count += 1
+            raw_record_count += len(records)
+            for record in records:
+                if not (int(record.reason) & relevant_mask):
+                    continue
+                reference = int(record.file_reference)
+                old_path = active_refs.get(reference)
+                directory = observed_directories.get(int(record.parent_reference))
+                candidate = (
+                    Path(directory) / record.name
+                    if directory and record.name
+                    else Path(old_path) if old_path else None
+                )
+                old_in_root = bool(old_path and is_under_root(Path(old_path)))
+                if candidate is None:
+                    # Records whose reference and parent are both outside this
+                    # search root are intentionally discarded while paging.
+                    # They must not consume the bounded client-side change map.
+                    continue
+                candidate_in_root = is_under_root(candidate)
+                if not candidate_in_root:
+                    if old_in_root:
+                        # A file moved out of this scope is still relevant: the
+                        # final reduction below removes its old indexed path.
+                        latest_by_reference[reference] = record
+                        if record.is_directory:
+                            directory_removed_paths.add(str(old_path))
+                    continue
+                if is_path_excluded_from_index_scope(
+                    candidate,
+                    root_path,
+                    self.settings,
+                ):
+                    if old_in_root:
+                        deleted_paths.add(str(old_path))
+                    continue
+                if not include_subfolders and candidate.parent != root_path:
+                    if old_in_root and Path(old_path).parent == root_path:
+                        latest_by_reference[reference] = record
+                    continue
+                latest_by_reference[reference] = record
+                if record.is_directory:
+                    if bool(int(record.reason) & 0x00000200):
+                        directory_removed_paths.add(str(candidate))
+                    else:
+                        parent_reference = int(record.parent_reference)
+                        parent = parent_reference or None
+                        directory_upserts[reference] = (parent, str(candidate))
+                        observed_directories[reference] = str(candidate)
+
+        change_set = changes_since(
+            root_path,
+            checkpoint,
+            on_page=consume_page,
+        )
+        # Keep compatibility with test doubles and integrations that return a
+        # UsnChangeSet without implementing the page callback yet.
+        if page_count == 0:
+            consume_page(change_set.records)
+        directories = observed_directories
+        changed_paths: set[Path] = set(retry_paths)
         for reference, record in latest_by_reference.items():
             old_path = active_refs.get(reference)
             is_deleted = bool(int(record.reason) & 0x00000200)
@@ -3001,11 +4827,17 @@ class IndexManager:
             if candidate is None:
                 # An event in a new/unseen directory cannot be resolved safely.
                 return unavailable("unresolved_changed_directory")
-            candidate_text = os.path.normcase(os.path.abspath(str(candidate)))
-            try:
-                if os.path.commonpath([root_text, candidate_text]) != root_text:
-                    continue
-            except ValueError:
+            if not is_under_root(candidate):
+                if old_path and is_under_root(Path(old_path)):
+                    deleted_paths.add(old_path)
+                continue
+            if is_path_excluded_from_index_scope(
+                candidate,
+                root_path,
+                self.settings,
+            ):
+                if old_path and is_under_root(Path(old_path)):
+                    deleted_paths.add(old_path)
                 continue
             if not include_subfolders and Path(candidate).parent != root_path:
                 continue
@@ -3013,6 +4845,43 @@ class IndexManager:
                 self.db.relocate_file_reference(root_id, reference, candidate)
             if Path(candidate).is_file():
                 changed_paths.add(candidate)
+        apply_directory_changes = getattr(
+            self.db,
+            "apply_usn_directory_changes",
+            None,
+        )
+        if directory_upserts or directory_removed_paths:
+            if not callable(apply_directory_changes):
+                return unavailable("directory_map_update_unsupported")
+            try:
+                apply_directory_changes(
+                    root_id,
+                    [
+                        (reference, parent, path)
+                        for reference, (parent, path) in directory_upserts.items()
+                    ],
+                    sorted(directory_removed_paths),
+                )
+            except Exception as exc:
+                logger.info(
+                    "USN directory map update unavailable; falling back to directory comparison: "
+                    "root=%s detail=%s",
+                    root_path,
+                    str(exc),
+                )
+                return unavailable("directory_map_update_failed")
+        logger.info(
+            "USN incremental page collection completed: root=%s pages=%d "
+            "raw_records=%d retained_references=%d directory_upserts=%d "
+            "directory_removals=%d target_usn=%d",
+            root_path,
+            page_count,
+            raw_record_count,
+            len(latest_by_reference),
+            len(directory_upserts),
+            len(directory_removed_paths),
+            int(change_set.checkpoint.next_usn),
+        )
         return True, changed_paths, deleted_paths, change_set.checkpoint
 
     def _iter_explicit_paths(
@@ -3093,65 +4962,110 @@ class IndexManager:
             )
             last_emit = now
 
-        batches = runner.stream(
-            "directory_enumeration",
-            discover_file_batches,
-            root_path,
-            include_subfolders,
-            self.settings.to_dict(),
-            control_dir,
-            max(1, int(self.settings.planning_discovery_batch_size or 128)),
-            cancel_check=token.throw_if_cancelled,
-            progress_callback=report_planning,
-        )
-        for path_batch in batches:
-            token.wait_if_paused()
-            token.throw_if_cancelled()
-            metadata, metadata_errors = self._stat_paths_recoverable(
-                [str(path) for path in path_batch],
-                token,
-                report_planning,
-            )
-            self._planning_metadata.update(
-                {item.path: item for item in metadata}
-            )
-            failed_metadata_paths = {
-                str(failed_path) for failed_path, _exc in metadata_errors
-            }
-            for failed_path, exc in metadata_errors:
-                logger.error("Failed to read metadata for %s: %s", failed_path, exc)
-                summary.failed += 1
-            for path_text in path_batch:
-                file_path = Path(path_text)
-                discovered_count += 1
-                item = self._planning_metadata.get(str(file_path))
-                if item is not None:
-                    discovered_bytes += item.size_bytes
-                summary.scanned += 1
-                now = time.monotonic()
-                if (
-                    discovered_count == 1
-                    or discovered_count % 100 == 0
-                    or now - last_emit >= 0.2
-                ):
-                    self._emit(
-                        progress_callback,
-                        "discovering",
-                        summary,
-                        current_file=str(file_path),
-                        pending=0,
-                        total_files=discovered_count,
-                        total_bytes=discovered_bytes,
-                        planning_worker_pid=(
-                            item.worker_pid if item is not None else 0
-                        ),
-                        planning_phase="file_stat",
-                        phase_label="正在发现文件并读取元数据",
+        processed_paths: set[str] = set()
+        planning_attempt = 0
+        while True:
+            try:
+                batches = runner.stream(
+                    "directory_enumeration",
+                    discover_file_batches,
+                    root_path,
+                    include_subfolders,
+                    self.settings.to_dict(),
+                    control_dir,
+                    max(
+                        1,
+                        min(32, int(self.settings.planning_discovery_batch_size or 128)),
+                    ),
+                    cancel_check=token.throw_if_cancelled,
+                    progress_callback=report_planning,
+                )
+                for raw_path_batch in batches:
+                    token.wait_if_paused()
+                    token.throw_if_cancelled()
+                    path_batch = [
+                        str(path)
+                        for path in raw_path_batch
+                        if str(path) not in processed_paths
+                    ]
+                    if not path_batch:
+                        continue
+                    metadata, metadata_errors = self._stat_paths_recoverable(
+                        path_batch,
+                        token,
+                        report_planning,
                     )
-                    last_emit = now
-                if str(file_path) in failed_metadata_paths:
-                    continue
-                yield file_path
+                    self._planning_metadata.update(
+                        {item.path: item for item in metadata}
+                    )
+                    failed_metadata_paths = {
+                        str(failed_path) for failed_path, _exc in metadata_errors
+                    }
+                    for failed_path, exc in metadata_errors:
+                        logger.error(
+                            "Failed to read metadata for %s: %s",
+                            failed_path,
+                            exc,
+                        )
+                        summary.failed += 1
+                    for path_text in path_batch:
+                        processed_paths.add(path_text)
+                        file_path = Path(path_text)
+                        discovered_count += 1
+                        item = self._planning_metadata.get(str(file_path))
+                        if item is not None:
+                            discovered_bytes += item.size_bytes
+                        summary.scanned += 1
+                        now = time.monotonic()
+                        if (
+                            discovered_count == 1
+                            or discovered_count % 100 == 0
+                            or now - last_emit >= 0.2
+                        ):
+                            self._emit(
+                                progress_callback,
+                                "discovering",
+                                summary,
+                                current_file=str(file_path),
+                                pending=0,
+                                total_files=discovered_count,
+                                total_bytes=discovered_bytes,
+                                planning_worker_pid=(
+                                    item.worker_pid if item is not None else 0
+                                ),
+                                planning_phase="file_stat",
+                                phase_label="正在发现文件并读取元数据",
+                            )
+                            last_emit = now
+                        if path_text in failed_metadata_paths:
+                            continue
+                        yield file_path
+                return
+            except PlanningWorkerError as exc:
+                if token.cancelled:
+                    raise
+                message = str(exc)
+                interrupted = (
+                    "KeyboardInterrupt" in message
+                    or "SystemExit" in message
+                    or "WORKER_INTERRUPTED" in message
+                )
+                if not interrupted or planning_attempt >= 1:
+                    raise
+                planning_attempt += 1
+                log_event(
+                    "index.planning.worker_interrupted",
+                    level=logging.ERROR,
+                    component="index_manager",
+                    run_id=self.run_context.get("run_id"),
+                    scan_id=self.run_context.get("scan_id"),
+                    root_path=str(root_path),
+                    attempt=planning_attempt,
+                    error_type=type(exc).__name__,
+                    error_message=message[:1000],
+                    processed_files=len(processed_paths),
+                )
+                continue
 
     def _stat_paths_recoverable(
         self,
@@ -3176,23 +5090,45 @@ class IndexManager:
                 progress_callback=progress_callback,
             )
         except PlanningWorkerError as exc:
-            if len(paths) == 1:
-                return [], [(Path(paths[0]), exc)]
-            middle = max(1, len(paths) // 2)
-            left_metadata, left_errors = self._stat_paths_recoverable(
-                paths[:middle],
-                token,
-                progress_callback,
+            # A planning process failure is not evidence that every file in
+            # the batch is unreadable. Retry the same batch once, then fall
+            # back to parent-process stat calls so a transient child/IPC
+            # failure cannot turn hundreds of healthy files into blockers.
+            logger.warning(
+                "file_stat planning worker failed; retrying batch in isolation: paths=%s",
+                len(paths),
+                exc_info=True,
             )
-            right_metadata, right_errors = self._stat_paths_recoverable(
-                paths[middle:],
-                token,
-                progress_callback,
-            )
-            return (
-                [*left_metadata, *right_metadata],
-                [*left_errors, *right_errors],
-            )
+            try:
+                result = runner.run(
+                    "file_stat",
+                    stat_file_batch,
+                    paths,
+                    bool(self.settings.compute_full_hash),
+                    False,
+                    self._planning_control_dir,
+                    cancel_check=token.throw_if_cancelled,
+                    progress_callback=progress_callback,
+                    no_progress_timeout_seconds=min(
+                        30.0,
+                        max(
+                            5.0,
+                            float(self.settings.planning_no_progress_timeout_seconds),
+                        ),
+                    ),
+                )
+            except PlanningWorkerError as retry_exc:
+                logger.error(
+                    "file_stat planning worker failed after retry; using parent fallback: paths=%s",
+                    len(paths),
+                    exc_info=True,
+                )
+                return self._stat_paths_in_parent(
+                    paths,
+                    token,
+                    progress_callback,
+                    fallback_error=retry_exc,
+                )
         if not isinstance(result, StatBatchResult):
             error = PlanningWorkerError("file_stat 返回了无效的元数据结果")
             return [], [(Path(path), error) for path in paths]
@@ -3204,6 +5140,72 @@ class IndexManager:
             for item in result.errors
         ]
         return list(result.metadata), errors
+
+    def _stat_paths_in_parent(
+        self,
+        paths: list[str],
+        token: CancelToken,
+        progress_callback: Callable[[PlanningProgress], None] | None,
+        *,
+        fallback_error: Exception,
+    ) -> tuple[list[PreparedFileMetadata], list[tuple[Path, Exception]]]:
+        """Read metadata locally after a planning child exits unexpectedly."""
+
+        metadata: list[PreparedFileMetadata] = []
+        errors: list[tuple[Path, Exception]] = []
+        total = len(paths)
+        for index, path_text in enumerate(paths, start=1):
+            token.wait_if_paused()
+            token.throw_if_cancelled()
+            path = Path(path_text)
+            try:
+                stat = path.stat()
+                content_hash = (
+                    sha256_file(path)
+                    if self.settings.compute_full_hash
+                    else None
+                )
+                file_reference = int(getattr(stat, "st_ino", 0) or 0)
+                if file_reference < -(1 << 63) or file_reference > (1 << 63) - 1:
+                    file_reference = 0
+                metadata.append(
+                    PreparedFileMetadata(
+                        path=str(path),
+                        size_bytes=int(stat.st_size),
+                        modified_time=float(stat.st_mtime),
+                        created_time=float(stat.st_ctime),
+                        modified_time_ns=int(stat.st_mtime_ns),
+                        content_hash=content_hash,
+                        worker_pid=os.getpid(),
+                        file_reference=file_reference,
+                    )
+                )
+            except Exception as exc:
+                errors.append((path, exc))
+            if progress_callback is not None:
+                progress_callback(
+                    PlanningProgress(
+                        phase="file_stat",
+                        completed=index,
+                        total=total,
+                        cursor=f"file:{index}",
+                        detail=str(path),
+                        worker_pid=os.getpid(),
+                    )
+                )
+        if errors:
+            logger.warning(
+                "file_stat parent fallback had per-file errors: failed=%s total=%s child_error=%s",
+                len(errors),
+                total,
+                fallback_error,
+            )
+        else:
+            logger.info(
+                "file_stat parent fallback recovered planning batch: paths=%s",
+                total,
+            )
+        return metadata, errors
 
     def _prepare_jobs(
         self,
@@ -3888,6 +5890,9 @@ class IndexManager:
         jobs: list[ParseJob] = []
         task_specs: list[tuple[int, str, str, int]] = []
         task_jobs: list[ParseJob] = []
+        cached_links: list[
+            tuple[Sequence[int], int, str, str, str, str]
+        ] = []
         for identity, group in groups.items():
             cached = cache.get(identity)
             file_ids = [job.file_id for job in group]
@@ -3895,15 +5900,22 @@ class IndexManager:
                 metrics.dedup_verified_source_count += len(group)
             if cached is not None:
                 document_id, status = cached
-                self.db.link_cached_document(
-                    file_ids,
-                    document_id,
-                    identity[0],
-                    identity[1],
-                    identity[2],
-                    status,
+                # Defer cached associations until this planning batch has
+                # been reduced. One bounded batch write avoids opening a
+                # writer transaction for every cache hit while the parser
+                # lanes are active.
+                cached_links.append(
+                    (
+                        file_ids,
+                        document_id,
+                        identity[0],
+                        identity[1],
+                        identity[2],
+                        status,
+                    )
                 )
                 metrics.cache_hits += len(group)
+                summary.reused += len(group)
                 metrics.dedup_parse_avoided_count += len(group)
                 metrics.dedup_bytes_avoided += sum(job.size_bytes for job in group)
                 if group[0].file_path.suffix.lower() in VIDEO_EXTENSIONS:
@@ -3947,6 +5959,14 @@ class IndexManager:
             priority = max(1, min(1_000_000, int(primary.estimated_cost * 100)))
             task_specs.append((primary.file_id, run_id, primary.lane, priority))
             task_jobs.append(primary)
+
+        if cached_links:
+            batch_link = getattr(self.db, "link_cached_documents_batch", None)
+            if callable(batch_link):
+                batch_link(cached_links)
+            else:
+                for link in cached_links:
+                    self.db.link_cached_document(*link)
 
         task_ids = self.db.create_parse_tasks(task_specs)
         for job, task_id in zip(task_jobs, task_ids, strict=True):
@@ -4298,19 +6318,37 @@ class IndexManager:
             for job in request_jobs
             if job.ocr_request_id is not None
         ]
-        claimed = set(
-            OcrRequestRepository(self.db).claim_specific(
-                request_ids,
-                worker_id=run_id,
-                lease_seconds=max(
-                    60,
-                    int(
-                        self.settings.ocr_no_progress_timeout_seconds
+        repository = OcrRequestRepository(self.db)
+        claimed: set[int] = set()
+        retry_delays = (0.05, 0.1, 0.2)
+        for attempt in range(len(retry_delays) + 1):
+            try:
+                claimed = set(
+                    repository.claim_specific(
+                        request_ids,
+                        worker_id=run_id,
+                        lease_seconds=max(
+                            60,
+                            int(
+                                self.settings.ocr_no_progress_timeout_seconds
+                            )
+                            * 2,
+                        ),
+                        timeout_seconds=0.25,
                     )
-                    * 2,
-                ),
-            )
-        )
+                )
+                break
+            except sqlite3.OperationalError as exc:
+                if not _is_database_busy_error(exc):
+                    raise
+                if attempt < len(retry_delays):
+                    time.sleep(retry_delays[attempt])
+                    continue
+                logger.warning(
+                    "OCR request claim remained busy; continuing without "
+                    "allowing bookkeeping to abort the search scope: requests=%s",
+                    len(request_ids),
+                )
         for job in request_jobs:
             if job.ocr_request_id in claimed:
                 job.ocr_request_owner = run_id
@@ -4318,31 +6356,33 @@ class IndexManager:
     def _mark_submitted_tasks_running(
         self,
         task_ids: Iterable[int],
+        *,
+        run_id: str | None = None,
     ) -> None:
         submitted = [int(task_id) for task_id in task_ids]
         if not submitted:
             return
-        if self.db.try_mark_tasks_running(submitted):
+        if self.db.try_mark_tasks_running(submitted, timeout_seconds=0.25):
             return
         # A writer can hold SQLite's single write slot while a large result
         # batch is committed. Task state is telemetry/recovery metadata; the
-        # parse result remains durable independently. Do not wait 20 seconds
-        # for this bookkeeping update and do not turn it into a root failure.
+        # parse result remains durable independently. Do not block the parser
+        # scheduler for the old multi-second retry window. The active run is
+        # protected from stale recovery, and terminal outcome recording will
+        # converge the row when the result is committed.
+        log_event(
+            "index.task_state_update.deferred",
+            level=logging.WARNING,
+            component="index_manager",
+            run_id=str(run_id or ""),
+            task_count=len(submitted),
+            task_ids=sorted(submitted)[:20],
+            reason="sqlite_busy",
+        )
         logger.warning(
             "Task state update remained busy; continuing parse batch: tasks=%s",
             len(submitted),
         )
-        try:
-            # Keep the durable lifecycle state coherent when the best-effort
-            # fast path loses a short writer race. This call occurs at a
-            # scheduler safe point and is bounded by DatabaseManager's retry.
-            self.db.mark_tasks_running(submitted)
-        except Exception:
-            logger.warning(
-                "Durable task state update also failed; parse result remains source of truth: tasks=%s",
-                len(submitted),
-                exc_info=True,
-            )
 
     def _update_ocr_request_for_outcome(
         self,
@@ -4353,6 +6393,18 @@ class IndexManager:
     ) -> None:
         request_id = job.ocr_request_id
         if request_id is None:
+            return
+        if not job.ocr_request_owner:
+            # The parser result and its checksum remain authoritative. A
+            # prolonged SQLite writer can prevent the optional OCR lease from
+            # being recorded; attempting to confirm an unowned request would
+            # raise and incorrectly fail the entire root after parsing worked.
+            logger.warning(
+                "OCR request was not claimed; keeping parsed result and "
+                "skipping lease confirmation: request_id=%s file=%s",
+                request_id,
+                job.file_path,
+            )
             return
         repository = OcrRequestRepository(self.db)
         retry_delays = (0.05, 0.1, 0.2)
@@ -4499,31 +6551,100 @@ class IndexManager:
             )
             if not job.pdf_confirmation_batch_end:
                 return None
-            self._flush_pdf_page_confirmations(
-                document_task_id,
-                graph,
-            )
-        readiness = graph.merge_readiness(document_task_id)
+            try:
+                self._flush_pdf_page_confirmations(
+                    document_task_id,
+                    graph,
+                )
+            except Exception as exc:
+                log_event(
+                    "pdf.page.outcome_record_failed",
+                    level=logging.ERROR,
+                    component="index_manager",
+                    task_id=int(job.task_id),
+                    parent_task_id=document_task_id,
+                    file_id=int(job.file_id),
+                    page_number=int(job.pdf_page_number or 0),
+                    task_type=str(job.pdf_task_type or ""),
+                    outcome_status=str(outcome.status),
+                    outcome_spool_path=str(outcome.spool_path or ""),
+                    outcome_digest=str(outcome.spool_checksum or ""),
+                    error_type=type(exc).__name__,
+                    error_message=str(exc)[:1000],
+                )
+                raise
+        return self._merge_ready_pdf_document(
+            document_task_id,
+            graph,
+            current_metrics=current_metrics,
+        )
+
+    def _merge_ready_pdf_document(
+        self,
+        document_task_id: int,
+        graph: PdfTaskGraphRepository | None = None,
+        *,
+        current_metrics: IndexRunMetrics | None = None,
+    ) -> tuple[ParseOutcome, ParseJob] | None:
+        """Merge a confirmed PDF graph into the parent parse outcome."""
+        graph = graph or PdfTaskGraphRepository(self.db)
+        parent_job = self._pdf_document_jobs.get(int(document_task_id))
+        if parent_job is None:
+            return None
+        readiness = graph.merge_readiness(int(document_task_id))
         if not readiness.ready:
             return None
-
         merge_started = time.perf_counter()
         page_outcomes: list[tuple[int, str, ParseOutcome, Path]] = []
         for page_number, task_type, spool_path, expected_digest in (
-            graph.confirmed_page_results(document_task_id)
+            graph.confirmed_page_results(int(document_task_id))
         ):
             if not spool_path.is_file():
-                raise FileNotFoundError(
+                exc = FileNotFoundError(
                     f"PDF page result is missing: {spool_path}"
                 )
-            if sha256_path(spool_path) != expected_digest:
-                raise ValueError(
+                log_exception(
+                    "pdf.merge.page_result_missing",
+                    exc,
+                    component="index_manager",
+                    document_task_id=int(document_task_id),
+                    page_number=int(page_number),
+                    task_type=str(task_type),
+                    spool_path=str(spool_path),
+                    expected_digest=str(expected_digest),
+                )
+                raise exc
+            actual_digest = sha256_path(spool_path)
+            if actual_digest != expected_digest:
+                exc = ValueError(
                     f"PDF page result digest mismatch: {spool_path}"
                 )
+                log_exception(
+                    "pdf.merge.page_result_digest_mismatch",
+                    exc,
+                    component="index_manager",
+                    document_task_id=int(document_task_id),
+                    page_number=int(page_number),
+                    task_type=str(task_type),
+                    spool_path=str(spool_path),
+                    expected_digest=str(expected_digest),
+                    actual_digest=str(actual_digest),
+                )
+                raise exc
             with spool_path.open("rb") as stream:
                 page_outcome = pickle.load(stream)
             if not isinstance(page_outcome, ParseOutcome):
-                raise TypeError("Invalid PDF page result")
+                exc = TypeError("Invalid PDF page result")
+                log_exception(
+                    "pdf.merge.page_result_invalid",
+                    exc,
+                    component="index_manager",
+                    document_task_id=int(document_task_id),
+                    page_number=int(page_number),
+                    task_type=str(task_type),
+                    spool_path=str(spool_path),
+                )
+                raise exc
             page_outcomes.append(
                 (page_number, task_type, page_outcome, spool_path)
             )
@@ -4553,7 +6674,7 @@ class IndexManager:
             for block in blocks
         ).encode("utf-8")
         merge_digest = hashlib.sha256(digest_payload).hexdigest()
-        graph.confirm_merge(document_task_id, merge_digest)
+        graph.confirm_merge(int(document_task_id), merge_digest)
         merged_status = (
             "partial_success"
             if any(
@@ -4601,16 +6722,53 @@ class IndexManager:
         self,
         document_task_id: int,
         graph: PdfTaskGraphRepository | None = None,
-    ) -> None:
-        confirmations = self._pdf_confirmation_buffers.pop(
-            int(document_task_id),
-            [],
-        )
+        *,
+        max_wait_seconds: float = 2.0,
+    ) -> bool:
+        """Persist buffered PDF page results without stalling the parse loop.
+
+        Page results are already durable spool files, so a transient SQLite
+        writer conflict must leave the buffer intact and let a later safe
+        point retry it.  Holding the scheduler here for minutes was the
+        reason a lock looked like a hung/terminated root.
+        """
+        key = int(document_task_id)
+        confirmations = self._pdf_confirmation_buffers.get(key, [])
         if not confirmations:
-            return
-        (graph or PdfTaskGraphRepository(self.db)).confirm_page_tasks(
-            confirmations
-        )
+            return True
+        deadline = time.monotonic() + max(0.1, float(max_wait_seconds))
+        delay = 0.1
+        while True:
+            try:
+                (graph or PdfTaskGraphRepository(self.db)).confirm_page_tasks(
+                    confirmations,
+                    timeout_seconds=0.5,
+                )
+                self._pdf_confirmation_buffers.pop(key, None)
+                return True
+            except sqlite3.OperationalError as exc:
+                if not _is_database_busy_error(exc):
+                    raise
+                if time.monotonic() >= deadline:
+                    log_event(
+                        "pdf.page.confirmation.deferred",
+                        level=logging.WARNING,
+                        component="index_manager",
+                        document_task_id=key,
+                        task_ids=[int(item[0]) for item in confirmations],
+                        count=len(confirmations),
+                        error_type=type(exc).__name__,
+                        error_message=str(exc)[:1000],
+                    )
+                    logger.warning(
+                        "PDF page confirmation deferred because SQLite is busy; "
+                        "spool results retained for retry: document_task_id=%s tasks=%s",
+                        key,
+                        len(confirmations),
+                    )
+                    return False
+                time.sleep(delay)
+                delay = min(0.5, delay * 1.5)
 
     def _ensure_planning_runner(self, run_id: str) -> RecoverablePlanningRunner:
         runner = self._planning_runner
@@ -4900,6 +7058,18 @@ class IndexManager:
         process_executors: list[ProcessPoolExecutor],
         spool_dir: Path,
     ) -> list[tuple[str, ParseJob, ParseResult, int | None]]:
+        with self._executor_lifecycle_lock:
+            return self._recycle_unhealthy_process_lanes_unlocked(
+                lanes, executors, process_executors, spool_dir
+            )
+
+    def _recycle_unhealthy_process_lanes_unlocked(
+        self,
+        lanes: dict[str, ParseLane],
+        executors: list[Executor],
+        process_executors: list[ProcessPoolExecutor],
+        spool_dir: Path,
+    ) -> list[tuple[str, ParseJob, ParseResult, int | None]]:
         now = time.perf_counter()
         groups: dict[ProcessPoolExecutor, list[ParseLane]] = {}
         for lane in lanes.values():
@@ -4914,7 +7084,8 @@ class IndexManager:
                 for future, job in lane.jobs.items()
                 if not future.done()
             )
-            if not broken and not timed_out:
+            shutdown = bool(getattr(executor, "_shutdown", False))
+            if not broken and not timed_out and not shutdown:
                 continue
             impacted: list[tuple[ParseLane, ParseJob]] = []
             for lane in group:
@@ -4984,6 +7155,9 @@ class IndexManager:
                         "cursor": representative_job.progress_cursor,
                         "retry_count": int(representative_job.retry_count),
                         "reason": (
+                            "解析进程池已提前关闭，正在创建替代进程池"
+                            if shutdown
+                            else
                             "无进展 worker 已退出，正在创建并健康检查替代解析进程池"
                             if representative_job.watchdog_timed_out
                             else "解析进程池异常退出，正在创建并健康检查替代进程池"
@@ -5154,6 +7328,26 @@ class IndexManager:
         return completed
 
     def _resize_idle_ocr_process_lane(
+        self,
+        lanes: dict[str, ParseLane],
+        executors: list[Executor],
+        process_executors: list[ProcessPoolExecutor],
+        spool_dir: Path,
+        *,
+        target_workers: int,
+        reason: str,
+    ) -> tuple[bool, str]:
+        with self._executor_lifecycle_lock:
+            return self._resize_idle_ocr_process_lane_unlocked(
+                lanes,
+                executors,
+                process_executors,
+                spool_dir,
+                target_workers=target_workers,
+                reason=reason,
+            )
+
+    def _resize_idle_ocr_process_lane_unlocked(
         self,
         lanes: dict[str, ParseLane],
         executors: list[Executor],
@@ -5466,6 +7660,9 @@ class IndexManager:
                 diagnostic_phase=str(event.get("phase") or ""),
                 diagnostic_cursor=str(event.get("cursor") or ""),
                 diagnostic_sequence=int(event.get("sequence") or 0),
+                diagnostic_heartbeat_age_seconds=int(
+                    event.get("heartbeat_age_seconds") or 0
+                ),
             )
 
     def _take_scheduler_diagnostics(self) -> list[dict[str, object]]:
@@ -5483,6 +7680,11 @@ class IndexManager:
         total_files: int,
         **extra: object,
     ) -> None:
+        phase_label_override = extra.pop("phase_label", None)
+        index_phase_override = extra.pop("index_phase", None)
+        reused_files_value = int(
+            extra.pop("reused_files", getattr(summary, "reused", 0)) or 0
+        )
         snapshot = lane_progress_snapshot(lanes.values())
         estimate = estimator.estimate(
             snapshot["remaining_cost_by_lane"],
@@ -5574,6 +7776,37 @@ class IndexManager:
                         int(eta_metrics.get("eta_jump_count") or 0) + 1
                     )
                 eta_metrics["_last_eta_seconds"] = int(estimate.seconds)
+        new_completed_files = (
+            summary.indexed
+            + summary.failed
+            + summary.unsupported
+            + summary.metadata_only
+            + summary.partial_success
+        )
+        pending_files = sum(len(lane.pending) for lane in lanes.values())
+        processing_files = sum(
+            len(_submission_jobs(job))
+            for lane in lanes.values()
+            for future, job in lane.jobs.items()
+            if not future.done()
+        )
+        discovered_files = max(
+            0,
+            int(
+                current_metrics.discovered_files
+                if current_metrics is not None
+                else total_files
+            ),
+        )
+        accounted_files = (
+            int(summary.skipped)
+            + int(new_completed_files)
+            + int(summary.excluded_video)
+            + int(pending_files)
+            + int(processing_files)
+        )
+        discovered_files = max(discovered_files, int(accounted_files))
+        accounting_delta = int(discovered_files - accounted_files)
         self._emit(
             progress_callback,
             "indexing",
@@ -5598,21 +7831,33 @@ class IndexManager:
             ],
             total_files=total_files,
             completed_files=(
-                summary.indexed
-                + summary.skipped
-                + summary.failed
-                + summary.unsupported
-                + summary.metadata_only
-                + summary.partial_success
+                int(summary.skipped) + int(new_completed_files)
             ),
+            discovered_files=discovered_files,
+            new_completed_files=int(new_completed_files),
+            failed_files=int(summary.failed),
+            excluded_files=int(summary.excluded_video),
+            pending_files=int(pending_files),
+            processing_files=int(processing_files),
+            progress_accounted_files=int(accounted_files),
+            progress_accounting_delta=accounting_delta,
             eta_lower_seconds=(estimate.lower_seconds if estimate else 0),
             eta_upper_seconds=(estimate.upper_seconds if estimate else 0),
             eta_seconds=(estimate.seconds if estimate else 0),
             eta_ready=(estimate.ready if estimate else False),
             eta_confidence=(estimate.confidence if estimate else 0.0),
             eta_sample_count=(estimate.sample_count if estimate else 0),
-            phase_label="正在解析并写入索引",
-            index_phase="parsing",
+            phase_label=(
+                str(phase_label_override)
+                if phase_label_override is not None
+                else "正在解析并写入索引"
+            ),
+            index_phase=(
+                str(index_phase_override)
+                if index_phase_override is not None
+                else "parsing"
+            ),
+            reused_files=reused_files_value,
             **extra,
         )
 
@@ -5627,9 +7872,12 @@ class IndexManager:
             return
         payload: dict[str, object] = {
             "stage": stage,
+            "scan_id": self.run_context.get("scan_id"),
+            "run_id": self.run_context.get("run_id"),
             "scanned": summary.scanned,
             "indexed": summary.indexed,
             "skipped": summary.skipped,
+            "reused_files": summary.reused,
             "failed": summary.failed,
             "unsupported": summary.unsupported,
             "metadata_only": summary.metadata_only,
@@ -6177,6 +8425,8 @@ def initialize_process_worker(
     registry_dir: Path | None = None,
 ) -> None:
     global _process_registry
+    global _process_ocr_executor
+    global _process_ocr_executor_workers
     for name in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
         os.environ[name] = "1"
     try:
@@ -6193,6 +8443,32 @@ def initialize_process_worker(
     if registry_dir is not None:
         os.environ["LFTS_PROCESS_REGISTRY_DIR"] = str(registry_dir)
     _process_registry = ParserRegistry(settings)
+    # The parent process is responsible for the process-pool limit.  The
+    # nested OCR pool is created lazily by the OCR batch entry point and is
+    # fixed for the lifetime of this worker process.
+    with _process_ocr_executor_lock:
+        _process_ocr_executor = None
+        _process_ocr_executor_workers = 0
+
+
+def _get_process_ocr_executor(max_workers: int) -> ThreadPoolExecutor:
+    global _process_ocr_executor
+    global _process_ocr_executor_workers
+    target = max(1, int(max_workers or 1))
+    with _process_ocr_executor_lock:
+        if (
+            _process_ocr_executor is None
+            or _process_ocr_executor_workers != target
+            or bool(getattr(_process_ocr_executor, "_shutdown", False))
+        ):
+            if _process_ocr_executor is not None:
+                _process_ocr_executor.shutdown(wait=True, cancel_futures=True)
+            _process_ocr_executor = ThreadPoolExecutor(
+                max_workers=target,
+                thread_name_prefix="ocr-parent",
+            )
+            _process_ocr_executor_workers = target
+        return _process_ocr_executor
 
 
 def should_lower_process_priority(settings: AppSettings) -> bool:
@@ -6400,6 +8676,7 @@ def schedule_parse_lanes(
     spool_dir: Path,
     *,
     metrics: IndexRunMetrics | None = None,
+    executor_lifecycle_lock: threading.RLock | None = None,
 ) -> list[int | None]:
     submitted_task_ids: list[int | None] = []
     lane_list = list(lanes)
@@ -6496,6 +8773,8 @@ def schedule_parse_lanes(
             started_at = time.perf_counter()
             for submitted_job in _submission_jobs(job):
                 submitted_job.started_monotonic = started_at
+                submitted_job.worker_start_requested_monotonic = started_at
+                submitted_job.worker_start_confirmed = False
                 submitted_job.pdf_confirmation_batch_end = True
                 submitted_job.watchdog_timed_out = False
                 submitted_job.last_progress_monotonic = started_at
@@ -6503,25 +8782,76 @@ def schedule_parse_lanes(
                     settings,
                     submitted_job,
                 )
+            lock_context = (
+                executor_lifecycle_lock
+                if executor_lifecycle_lock is not None
+                else nullcontext()
+            )
             try:
-                if lane.process_based:
-                    worker = (
-                        parse_ocr_batch_process_worker
-                        if lane.name == "ocr" and job.batch_jobs
-                        else (
-                            parse_pdf_batch_process_worker
-                            if lane.name == "pdf" and job.batch_jobs
-                            else parse_file_process_worker
+                with lock_context:
+                    if bool(getattr(lane.executor, "_shutdown", False)):
+                        lane.pending.appendleft(job)
+                        raise ExecutorLifecycleError(
+                            f"解析进程池已关闭，lane={lane.name}，停止继续提交"
                         )
+                    if bool(getattr(lane.executor, "_broken", False)):
+                        lane.pending.appendleft(job)
+                        raise ExecutorLifecycleError(
+                            f"解析进程池已损坏，lane={lane.name}，等待进程池重建"
+                        )
+                    if lane.process_based:
+                        worker = (
+                            parse_ocr_batch_process_worker
+                            if lane.name == "ocr" and job.batch_jobs
+                            else (
+                                parse_pdf_batch_process_worker
+                                if lane.name == "pdf" and job.batch_jobs
+                                else parse_file_process_worker
+                            )
+                        )
+                        future = lane.executor.submit(
+                            worker,
+                            job,
+                            settings,
+                            spool_dir,
+                        )
+                    else:
+                        future = lane.executor.submit(parse_file_worker, job, settings, token)
+            except ExecutorLifecycleError:
+                log_event(
+                    "index.executor.submit_rejected",
+                    level=logging.ERROR,
+                    component="index_manager",
+                    lane=lane.name,
+                    executor_shutdown=bool(getattr(lane.executor, "_shutdown", False)),
+                    executor_broken=bool(getattr(lane.executor, "_broken", False)),
+                    file_path=str(job.file_path),
+                    task_id=job.task_id,
+                    error_message="解析进程池不可提交任务",
+                )
+                raise
+            except RuntimeError as exc:
+                if "cannot schedule new futures after shutdown" in str(exc).lower():
+                    if job not in lane.pending:
+                        lane.pending.appendleft(job)
+                    log_event(
+                        "index.executor.submit_rejected",
+                        level=logging.ERROR,
+                        component="index_manager",
+                        lane=lane.name,
+                        executor_shutdown=True,
+                        executor_broken=bool(getattr(lane.executor, "_broken", False)),
+                        file_path=str(job.file_path),
+                        task_id=job.task_id,
+                        error_type=type(exc).__name__,
+                        error_message=str(exc)[:1000],
                     )
-                    future = lane.executor.submit(
-                        worker,
-                        job,
-                        settings,
-                        spool_dir,
-                    )
-                else:
-                    future = lane.executor.submit(parse_file_worker, job, settings, token)
+                    raise ExecutorLifecycleError(
+                        f"解析进程池在提交期间关闭，lane={lane.name}"
+                    ) from exc
+                if token.cancelled:
+                    raise CancelledError("任务已取消")
+                raise
             except Exception:
                 if token.cancelled:
                     raise CancelledError("任务已取消")
@@ -6628,6 +8958,7 @@ def drain_completed_lanes(
                             descriptor.task_id,
                         ): descriptor
                         for descriptor in result
+                        if isinstance(descriptor, (SpoolParseResult, ParseOutcome))
                     }
                     missing = [
                         int(submitted.task_id or submitted.file_id)
@@ -6649,11 +8980,10 @@ def drain_completed_lanes(
                                 submitted.task_id,
                             )
                         ]
-                        item_descriptor_bytes = len(
-                            pickle.dumps(
-                                descriptor,
-                                protocol=pickle.HIGHEST_PROTOCOL,
-                            )
+                        item_descriptor_bytes = (
+                            len(pickle.dumps(descriptor, protocol=pickle.HIGHEST_PROTOCOL))
+                            if isinstance(descriptor, SpoolParseResult)
+                            else None
                         )
                         completed.append(
                             (
@@ -6679,7 +9009,7 @@ def drain_completed_lanes(
                     descriptor_bytes = len(pickle.dumps(result, protocol=pickle.HIGHEST_PROTOCOL))
             except CancelledError:
                 raise
-            except Exception as exc:
+            except BaseException as exc:
                 if token.cancelled:
                     raise CancelledError("任务已取消") from exc
                 logger.error(
@@ -6701,6 +9031,19 @@ def drain_completed_lanes(
                             ),
                             submitted.started_monotonic
                             or time.perf_counter(),
+                        )
+                    elif isinstance(exc, (KeyboardInterrupt, SystemExit, GeneratorExit)):
+                        failed_result = worker_interrupted_outcome(submitted, exc)
+                        log_event(
+                            "index.worker.interrupted",
+                            level=logging.ERROR,
+                            component="index_manager",
+                            lane=lane.name,
+                            task_id=submitted.task_id,
+                            file_id=submitted.file_id,
+                            file_path=str(submitted.file_path),
+                            error_type=type(exc).__name__,
+                            error_message=str(exc) or type(exc).__name__,
                         )
                     else:
                         failed_result = failed_parse_outcome(
@@ -6738,14 +9081,67 @@ def parse_ocr_batch_process_worker(
     job: ParseJob,
     settings: AppSettings,
     spool_dir: Path,
-) -> list[SpoolParseResult]:
-    """Parse several OCR parents concurrently around one shared live model."""
+) -> list[SpoolParseResult | ParseOutcome]:
+    """Parse OCR parents with one fixed-size executor per worker process.
+
+    The process pool controls OCR process count.  This inner executor is
+    created once in the process and reused across batch calls; it never grows
+    with the number of batches.  Per-file liveness is represented by one
+    process status record, not one heartbeat thread per file.
+    """
 
     jobs = _submission_jobs(job)
     process_registry = _process_registry or ParserRegistry(settings)
     shared_ocr = process_registry.shared_ocr
 
+    executor = _get_process_ocr_executor(
+        min(
+            max(1, int(settings.ocr_microbatch_parent_jobs)),
+            max(1, int(settings.ocr_workers or 1)),
+            max(1, len(jobs)),
+        )
+    )
+    status_path = process_status_path(spool_dir)
+    status_stop = threading.Event()
+    status_lock = threading.Lock()
+    status: dict[str, object] = {
+        "worker_pid": os.getpid(),
+        "stage": "process_starting",
+        "current_task_id": None,
+        "current_file_id": None,
+        "updated_at": time.time(),
+    }
+
+    def set_status(**updates: object) -> None:
+        with status_lock:
+            status.update(updates)
+            status["worker_pid"] = os.getpid()
+            status["updated_at"] = time.time()
+            snapshot = dict(status)
+        write_process_status(status_path, snapshot)
+
+    def status_loop() -> None:
+        while not status_stop.wait(1.0):
+            with status_lock:
+                snapshot = dict(status)
+            snapshot["heartbeat_at"] = time.time()
+            write_process_status(status_path, snapshot)
+
+    status_thread = threading.Thread(
+        target=status_loop,
+        name="ocr-process-status",
+        daemon=True,
+    )
+    set_status(stage="thread_start_requested", requested_at=time.time())
+    status_thread.start()
+
     def run_one(item: ParseJob) -> SpoolParseResult:
+        set_status(
+            stage="task_started",
+            current_task_id=item.task_id,
+            current_file_id=item.file_id,
+            current_file=str(item.file_path),
+        )
         isolated_registry = ParserRegistry(
             settings,
             shared_ocr=shared_ocr,
@@ -6755,17 +9151,163 @@ def parse_ocr_batch_process_worker(
             settings,
             spool_dir,
             isolated_registry,
+            heartbeat_enabled=False,
+            process_status_callback=set_status,
         )
 
-    with ThreadPoolExecutor(
-        max_workers=min(
-            len(jobs),
-            max(1, int(settings.ocr_microbatch_parent_jobs)),
-        ),
-        thread_name_prefix="ocr-parent",
-    ) as executor:
-        futures = [executor.submit(run_one, item) for item in jobs]
-        return [future.result() for future in futures]
+    total_jobs = len(jobs)
+    progress_path = process_progress_path(job, spool_dir)
+    progress_sequence = 0
+
+    def report_batch_progress(
+        completed: int,
+        phase: str,
+        detail: str,
+    ) -> None:
+        nonlocal progress_sequence
+        progress_sequence += 1
+        write_process_progress(
+            progress_path,
+            {
+                "file_id": int(job.file_id),
+                "progress_sequence": progress_sequence,
+                "phase": str(phase),
+                "completed": max(0, int(completed)),
+                "total": max(0, int(total_jobs)),
+                "cursor": f"ocr_batch:{int(completed)}",
+                "bytes_read": 0,
+                "output_blocks": 0,
+                # The transport sequence must not reset the no-progress
+                # watchdog. Only a completed OCR parent is semantic progress.
+                "checkpoint_version": max(0, int(completed)),
+                "detail": str(detail),
+                "worker_pid": os.getpid(),
+            },
+        )
+        set_status(
+            stage=str(phase),
+            batch_completed=int(completed),
+            batch_total=int(total_jobs),
+            detail=str(detail),
+        )
+
+    report_batch_progress(0, "ocr_batch_starting", "正在启动 OCR 批处理线程")
+    set_status(stage="thread_ready", ready_at=time.time())
+    results: list[SpoolParseResult | ParseOutcome] = []
+    results_by_task_key: dict[
+        tuple[str, int],
+        SpoolParseResult | ParseOutcome,
+    ] = {}
+    job_iterator = iter(jobs)
+    pending: dict[Future[SpoolParseResult], ParseJob] = {}
+
+    def submit_next(executor: ThreadPoolExecutor) -> bool:
+        try:
+            item = next(job_iterator)
+        except StopIteration:
+            return False
+        report_batch_progress(
+            len(results),
+            "ocr_batch_submitting",
+            f"正在提交 OCR 文件 {len(results) + len(pending) + 1}/{total_jobs}",
+        )
+        future = executor.submit(run_one, item)
+        pending[future] = item
+        return True
+
+    try:
+        for _ in range(executor._max_workers):
+            if not submit_next(executor):
+                break
+        while pending:
+            done, _ = wait(
+                set(pending),
+                timeout=0.5,
+                return_when=FIRST_COMPLETED,
+            )
+            if not done:
+                report_batch_progress(
+                    len(results),
+                    "ocr_batch_waiting",
+                    "OCR 批处理正在等待文件完成",
+                )
+                continue
+            for future in done:
+                item = pending.pop(future, None)
+                if item is None:
+                    continue
+                try:
+                    result = future.result()
+                except BaseException as exc:
+                    # Keep successful siblings deliverable.  The parent
+                    # scheduler will retry only this task using its ID.
+                    result = worker_interrupted_outcome(item, exc)
+                    log_event(
+                        "index.ocr.task_interrupted",
+                        level=logging.ERROR,
+                        component="index_manager",
+                        task_id=item.task_id,
+                        file_id=item.file_id,
+                        file_path=str(item.file_path),
+                        worker_pid=os.getpid(),
+                        error_type=type(exc).__name__,
+                        error_message=str(exc) or type(exc).__name__,
+                    )
+                results.append(result)
+                results_by_task_key[
+                    _spool_result_key(result.file_id, result.task_id)
+                ] = result
+                set_status(
+                    stage="task_completed",
+                    current_task_id=None,
+                    current_file_id=None,
+                    current_file="",
+                )
+                report_batch_progress(
+                    len(results),
+                    "ocr_batch_progress",
+                    f"OCR 批处理已完成 {len(results)}/{total_jobs}",
+                )
+                submit_next(executor)
+    except KeyboardInterrupt:
+        report_batch_progress(
+            len(results),
+            "ocr_batch_interrupted",
+            "OCR 批处理收到中断信号",
+        )
+        for future in pending:
+            future.cancel()
+        status_stop.set()
+        status_thread.join(timeout=0.2)
+        status_path.unlink(missing_ok=True)
+        raise
+    except BaseException:
+        for future in pending:
+            future.cancel()
+        status_stop.set()
+        status_thread.join(timeout=0.2)
+        status_path.unlink(missing_ok=True)
+        raise
+    report_batch_progress(total_jobs, "ocr_batch_completed", "OCR 批处理完成")
+    set_status(
+        stage="result_persisted",
+        current_task_id=None,
+        current_file_id=None,
+        current_file="",
+        finished_at=time.time(),
+    )
+    status_stop.set()
+    status_thread.join(timeout=0.2)
+    try:
+        status_path.unlink(missing_ok=True)
+    except OSError:
+        logger.debug("Unable to remove OCR process status %s", status_path, exc_info=True)
+    return [
+        results_by_task_key[
+            _spool_result_key(item.file_id, item.task_id)
+        ]
+        for item in jobs
+    ]
 
 
 def parse_pdf_batch_process_worker(
@@ -6792,6 +9334,9 @@ def _parse_file_process_with_registry(
     settings: AppSettings,
     spool_dir: Path,
     registry: ParserRegistry,
+    *,
+    heartbeat_enabled: bool = True,
+    process_status_callback: Callable[..., None] | None = None,
 ) -> SpoolParseResult:
     if job.validation_hang_stage:
         write_process_progress(
@@ -6820,21 +9365,30 @@ def _parse_file_process_with_registry(
         while not heartbeat_stop.wait(1.0):
             write_process_heartbeat(heartbeat_path)
 
-    try:
-        heartbeat_path.unlink(missing_ok=True)
-    except OSError:
-        logger.debug(
-            "Unable to remove stale parser heartbeat for %s",
-            job.file_path,
-            exc_info=True,
+    heartbeat_thread: threading.Thread | None = None
+    if heartbeat_enabled:
+        try:
+            heartbeat_path.unlink(missing_ok=True)
+        except OSError:
+            logger.debug(
+                "Unable to remove stale parser heartbeat for %s",
+                job.file_path,
+                exc_info=True,
+            )
+        write_process_heartbeat(heartbeat_path)
+        heartbeat_thread = threading.Thread(
+            target=heartbeat_loop,
+            name=f"lfts-heartbeat-{job.file_id}",
+            daemon=True,
         )
-    write_process_heartbeat(heartbeat_path)
-    heartbeat_thread = threading.Thread(
-        target=heartbeat_loop,
-        name=f"lfts-heartbeat-{job.file_id}",
-        daemon=True,
-    )
-    heartbeat_thread.start()
+        heartbeat_thread.start()
+    if process_status_callback is not None:
+        process_status_callback(
+            stage="task_thread_running",
+            current_task_id=job.task_id,
+            current_file_id=job.file_id,
+            current_file=str(job.file_path),
+        )
     try:
         outcome = parse_file_with_registry(
             job,
@@ -6845,19 +9399,20 @@ def _parse_file_process_with_registry(
             progress_path=process_progress_path(job, spool_dir),
         )
     finally:
-        heartbeat_stop.set()
-        heartbeat_thread.join(timeout=0.2)
-        try:
-            heartbeat_path.unlink(missing_ok=True)
-        except OSError:
-            # The coordinator may still be reading the marker on Windows.
-            # Heartbeat cleanup is diagnostic and must not fail a completed
-            # parse result.
-            logger.debug(
-                "Unable to remove completed parser heartbeat for %s",
-                job.file_path,
-                exc_info=True,
-            )
+        if heartbeat_thread is not None:
+            heartbeat_stop.set()
+            heartbeat_thread.join(timeout=0.2)
+            try:
+                heartbeat_path.unlink(missing_ok=True)
+            except OSError:
+                # The coordinator may still be reading the marker on Windows.
+                # Heartbeat cleanup is diagnostic and must not fail a completed
+                # parse result.
+                logger.debug(
+                    "Unable to remove completed parser heartbeat for %s",
+                    job.file_path,
+                    exc_info=True,
+                )
     outcome.worker_pid = os.getpid()
     spool_dir.mkdir(parents=True, exist_ok=True)
     spool_path = spool_dir / f"{job.file_id}_{uuid.uuid4().hex}.pickle"
@@ -6881,6 +9436,13 @@ def _parse_file_process_with_registry(
             exc_info=True,
         )
     spool_write_ms = int((time.perf_counter() - started) * 1000)
+    if process_status_callback is not None:
+        process_status_callback(
+            stage="result_persisting",
+            current_task_id=job.task_id,
+            current_file_id=job.file_id,
+            current_file=str(job.file_path),
+        )
     checksum = sha256_path(spool_path)
     return SpoolParseResult(
         job.file_id,
@@ -7045,6 +9607,23 @@ def parse_file_with_registry(
             ),
             progress_callback=report_parser_progress,
         )
+        if job.lane == "ocr":
+            report_parser_progress(
+                {
+                    "phase": "ocr_thread_ready",
+                    "completed": job.resume_cursor,
+                    "cursor": job.resume_cursor,
+                    "detail": "OCR 工作线程已运行",
+                }
+            )
+            report_parser_progress(
+                {
+                    "phase": "ocr_model_loading",
+                    "completed": job.resume_cursor,
+                    "cursor": job.resume_cursor,
+                    "detail": "正在加载 OCR 模型",
+                }
+            )
         report_parser_progress(
             {
                 "phase": "starting",
@@ -7266,7 +9845,28 @@ def hydrate_outcome(outcome: ParseOutcome, job: ParseJob) -> None:
         outcome.queue_wait_ms = max(0, int((job.started_monotonic - job.queued_monotonic) * 1000))
 
 
-def failed_parse_outcome(job: ParseJob, exc: Exception) -> ParseOutcome:
+def worker_interrupted_outcome(job: ParseJob, exc: BaseException) -> ParseOutcome:
+    """Turn a child ``BaseException`` into one retryable task result.
+
+    ``Future.result()`` re-raises ``KeyboardInterrupt`` and ``SystemExit``
+    instead of wrapping them in ``Exception``.  They are worker-boundary
+    failures here, not a request for the whole application to exit.
+    """
+
+    return _diagnostic_outcome(
+        job,
+        "process_worker",
+        "failed_retryable",
+        "WORKER_INTERRUPTED",
+        (
+            "解析子进程意外中断（"
+            f"{type(exc).__name__}），仅重排当前任务并有限重试"
+        ),
+        job.started_monotonic or time.perf_counter(),
+    )
+
+
+def failed_parse_outcome(job: ParseJob, exc: BaseException) -> ParseOutcome:
     if isinstance(exc, BrokenProcessPool):
         return _diagnostic_outcome(
             job,
@@ -7448,6 +10048,7 @@ def merge_summary(target: IndexSummary, source: IndexSummary) -> None:
     target.scanned += source.scanned
     target.indexed += source.indexed
     target.skipped += source.skipped
+    target.reused += source.reused
     target.failed += source.failed
     target.unsupported += source.unsupported
     target.metadata_only += source.metadata_only
@@ -7492,6 +10093,8 @@ def record_index_status(summary: IndexSummary, status: str) -> None:
 
 
 def _is_database_busy_error(exc: BaseException) -> bool:
+    if isinstance(exc, SQLiteBusyCircuitOpen):
+        return True
     if not isinstance(exc, sqlite3.OperationalError):
         return False
     message = str(exc).lower()
@@ -7590,6 +10193,12 @@ def process_heartbeat_path(job: ParseJob, spool_dir: Path) -> Path:
     return spool_dir / f"{job.file_id}.heartbeat"
 
 
+def process_status_path(spool_dir: Path) -> Path:
+    """Return one liveness/status file per parser process."""
+
+    return Path(spool_dir) / f"process-{os.getpid()}.status.json"
+
+
 def _replace_transiently_locked_file(
     source: Path,
     target: Path,
@@ -7633,8 +10242,27 @@ def write_process_heartbeat(path: Path) -> None:
         logger.debug("Unable to write parser heartbeat %s", path, exc_info=True)
 
 
+def write_process_status(path: Path, payload: dict[str, object]) -> None:
+    """Publish process-level OCR state atomically for the parent watchdog."""
+
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(f".tmp.{os.getpid()}.{uuid.uuid4().hex}")
+        temporary.write_text(
+            json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+            encoding="utf-8",
+        )
+        temporary.replace(path)
+    except Exception:
+        logger.debug("Unable to write parser process status %s", path, exc_info=True)
+
+
 def refresh_job_progress(job: ParseJob, spool_dir: Path, observed_at: float) -> bool:
-    heartbeat = process_heartbeat_path(job, spool_dir)
+    heartbeat = (
+        process_status_path(spool_dir)
+        if job.lane == "ocr"
+        else process_heartbeat_path(job, spool_dir)
+    )
     try:
         heartbeat_at = heartbeat.stat().st_mtime
         # A heartbeat is deliberately independent from semantic progress. It
@@ -7678,6 +10306,17 @@ def refresh_job_progress(job: ParseJob, spool_dir: Path, observed_at: float) -> 
         worker_pid = payload.get("worker_pid")
         if isinstance(worker_pid, int):
             job.progress_worker_pid = worker_pid
+        if job.worker_start_requested_monotonic and not job.worker_start_confirmed:
+            job.worker_start_confirmed = True
+            log_event(
+                "index.worker.start_confirmed",
+                component="index_manager",
+                lane=job.lane,
+                task_id=job.task_id,
+                file_id=job.file_id,
+                worker_pid=job.progress_worker_pid,
+                phase=current.phase,
+            )
         advanced = is_semantic_progress(previous, current)
         if advanced:
             job.last_progress_monotonic = observed_at
@@ -7704,12 +10343,27 @@ def no_progress_timeout(settings: AppSettings, job: ParseJob) -> int:
     # no validation_hang_stage and retain their dynamic size-based budgets.
     if job.validation_hang_stage:
         return max(1, int(base))
-    if "ocr" in job.progress_phase.lower():
-        base = max(base, settings.ocr_no_progress_timeout_seconds)
+    phase = job.progress_phase.lower()
+    if job.lane == "ocr" and not job.worker_start_confirmed:
+        # Startup confirmation is a separate budget.  A heartbeat from a
+        # process that never acknowledged its worker thread must not consume
+        # the much larger OCR inference budget.
+        return max(1, int(settings.ocr_thread_startup_timeout_seconds))
+    if phase in {"starting", "ocr_batch_starting", "ocr_batch_submitting"}:
+        base = min(base, max(1, int(settings.ocr_model_load_timeout_seconds)))
+    elif "model" in phase and "ocr" in phase:
+        base = max(base, int(settings.ocr_model_load_timeout_seconds))
+    elif "detect" in phase and "ocr" in phase:
+        base = max(base, int(settings.ocr_detect_timeout_seconds))
+    elif "recogn" in phase and "ocr" in phase:
+        base = max(base, int(settings.ocr_recognize_timeout_seconds))
+    elif "ocr" in phase:
+        # PDF OCR uses the PDF process lane but still needs the OCR budget.
+        base = max(base, int(settings.ocr_no_progress_timeout_seconds))
     size_mb = max(0.0, float(job.size_bytes or 0) / (1024.0 * 1024.0))
-    if job.lane == "pdf":
+    if job.lane == "pdf" and size_mb > 0:
         base = max(base, min(1_800, int(60 + size_mb * 3)))
-    elif job.lane == "ocr":
+    elif job.lane == "ocr" and size_mb > 0:
         base = max(
             base,
             min(1_800, int(90 + max(1.0, job.estimated_cost) * 30)),
@@ -7719,7 +10373,7 @@ def no_progress_timeout(settings: AppSettings, job: ParseJob) -> int:
         "legacy_word",
         "legacy_excel",
         "legacy_powerpoint",
-    }:
+    } and size_mb > 0:
         base = max(base, min(1_200, int(60 + size_mb * 2)))
     return max(1, int(base))
 

@@ -1,12 +1,19 @@
 ﻿param(
-    [string]$Version = "1.6.12",
+    [string]$Version = "1.6.15",
+    [string]$BuildTimestamp = "",
     [switch]$CompileOnly
 )
 
 $ErrorActionPreference = "Stop"
+$effectiveBuildTimestamp = if ([string]::IsNullOrWhiteSpace($BuildTimestamp)) {
+    (Get-Date).ToString("yyyyMMddHHmmss")
+} else {
+    $BuildTimestamp
+}
 $repo = Split-Path -Parent $PSScriptRoot
 $packageName = "本地多格式全文搜索工具"
-$source = Join-Path (Join-Path $repo "dist") ("$packageName-$Version")
+$releaseId = "$Version-$effectiveBuildTimestamp"
+$source = Join-Path (Join-Path $repo "dist") ("$packageName-$releaseId")
 $iss = Join-Path $repo "installer\LocalFullTextSearch.iss"
 $isccCandidates = @(
     (Join-Path $env:LOCALAPPDATA "Programs\Inno Setup 6\ISCC.exe"),
@@ -23,11 +30,11 @@ if (-not (Test-Path -LiteralPath (Join-Path $source "$packageName.exe"))) {
 
 if (-not $CompileOnly) {
     Write-Host "[setup] 编译安装程序..."
-    & $iscc "/DMyAppVersion=$Version" "/DSourceDir=$source" $iss
+    & $iscc "/DMyAppVersion=$Version" "/DMyAppBuildTimestamp=$effectiveBuildTimestamp" "/DSourceDir=$source" $iss
     if ($LASTEXITCODE -ne 0) { throw "ISCC 编译失败：$LASTEXITCODE" }
 }
 
-$setup = Join-Path (Join-Path $repo "dist") ("$packageName-安装程序-$Version.exe")
+$setup = Join-Path (Join-Path $repo "dist") ("$packageName-安装程序-$releaseId.exe")
 if (-not (Test-Path -LiteralPath $setup)) { throw "安装程序未生成：$setup" }
 $hash = (Get-FileHash -LiteralPath $setup -Algorithm SHA256).Hash
 $size = (Get-Item -LiteralPath $setup).Length

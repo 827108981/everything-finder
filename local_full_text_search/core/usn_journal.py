@@ -11,12 +11,39 @@ import os
 import json
 import struct
 import time
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
 
 class UsnJournalUnavailable(RuntimeError):
     """The volume cannot safely provide a continuous USN change set."""
+
+
+class UsnChangeSetLimitExceeded(UsnJournalUnavailable):
+    """The journal gap is too large for the bounded USN fast path."""
+
+    error_code = "USN_CHANGE_SET_LIMIT"
+
+    def __init__(
+        self,
+        limit: int = 20_000,
+        records_seen: int | None = None,
+        *,
+        message: str | None = None,
+    ) -> None:
+        self.limit = max(1, int(limit))
+        self.records_seen = (
+            None if records_seen is None else max(0, int(records_seen))
+        )
+        if message:
+            detail = str(message)
+        else:
+            detail = f"USN change set exceeds safe fast-path limit (limit={self.limit}"
+            if self.records_seen is not None:
+                detail += f", records_seen={self.records_seen}"
+            detail += ")"
+        super().__init__(detail)
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,6 +73,15 @@ class UsnChangeSet:
     records: tuple[UsnRecord, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class UsnChangePage:
+    """One bounded page of records and the stable target cursor for the read."""
+
+    checkpoint: UsnCheckpoint
+    target_checkpoint: UsnCheckpoint
+    records: tuple[UsnRecord, ...]
+
+
 _FSCTL_QUERY_USN_JOURNAL = 0x000900F4
 _FSCTL_READ_USN_JOURNAL = 0x000900BB
 _GENERIC_READ = 0x80000000
@@ -54,6 +90,26 @@ _FILE_SHARE_WRITE = 0x00000002
 _OPEN_EXISTING = 3
 _SERVICE_PIPE = r"\\.\pipe\LocalFullTextSearch.Usn.v1"
 _SERVICE_MAX_RESPONSE_BYTES = 32 * 1024 * 1024
+_DEFAULT_MAX_RECORDS = 20_000
+_DEFAULT_USN_PAGE_BYTES = 1024 * 1024
+_MIN_USN_PAGE_BYTES = 64 * 1024
+_MAX_USN_PAGE_BYTES = 2 * 1024 * 1024
+
+
+def _combine_fallback_errors(
+    direct_error: UsnJournalUnavailable,
+    service_error: UsnJournalUnavailable,
+) -> UsnJournalUnavailable:
+    """Keep both errors when direct access and the helper fail differently."""
+
+    if isinstance(service_error, UsnChangeSetLimitExceeded):
+        return service_error
+    if isinstance(direct_error, UsnChangeSetLimitExceeded):
+        return direct_error
+    return UsnJournalUnavailable(
+        f"USN direct access failed: {direct_error}; "
+        f"USN helper failed: {service_error}"
+    )
 
 
 def current_checkpoint(root_path: Path) -> UsnCheckpoint:
@@ -71,8 +127,11 @@ def current_checkpoint(root_path: Path) -> UsnCheckpoint:
                 next_usn=int(response["next_usn"]),
                 volume_serial=int(response["volume_serial"]),
             )
-        except (KeyError, TypeError, ValueError, OSError, UsnJournalUnavailable):
-            raise direct_error
+        except (KeyError, TypeError, ValueError, OSError, UsnJournalUnavailable) as service_error:
+            combined_error = _combine_fallback_errors(direct_error, service_error)
+            if combined_error is service_error:
+                raise
+            raise combined_error from service_error
 
 
 def _current_checkpoint_direct(root_path: Path) -> UsnCheckpoint:
@@ -90,101 +149,324 @@ def _current_checkpoint_direct(root_path: Path) -> UsnCheckpoint:
         kernel32.CloseHandle(volume)
 
 
+def _checkpoint_payload(checkpoint: UsnCheckpoint) -> dict[str, int]:
+    return {
+        "journal_id": int(checkpoint.journal_id),
+        "next_usn": int(checkpoint.next_usn),
+        "volume_serial": int(checkpoint.volume_serial),
+    }
+
+
+def _checkpoint_from_payload(value: object, *, label: str) -> UsnCheckpoint:
+    if not isinstance(value, dict):
+        raise UsnJournalUnavailable(f"USN helper returned no {label} checkpoint")
+    try:
+        return UsnCheckpoint(
+            journal_id=int(value["journal_id"]),
+            next_usn=int(value["next_usn"]),
+            volume_serial=int(value["volume_serial"]),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise UsnJournalUnavailable(
+            f"USN helper returned an invalid {label} checkpoint"
+        ) from exc
+
+
+def _bounded_page_bytes(value: object) -> int:
+    try:
+        requested = int(value)
+    except (TypeError, ValueError):
+        requested = _DEFAULT_USN_PAGE_BYTES
+    return max(_MIN_USN_PAGE_BYTES, min(requested, _MAX_USN_PAGE_BYTES))
+
+
+def _resolve_target_checkpoint(
+    checkpoint: UsnCheckpoint,
+    journal_data: tuple[int, int, int],
+    volume_serial: int,
+    requested_target: UsnCheckpoint | None,
+) -> UsnCheckpoint:
+    journal_id, first_usn, current_target_usn = (
+        int(journal_data[0]),
+        int(journal_data[1]),
+        int(journal_data[2]),
+    )
+    if int(checkpoint.journal_id) != journal_id:
+        raise UsnJournalUnavailable("USN journal identifier changed")
+    if int(checkpoint.volume_serial) != int(volume_serial):
+        raise UsnJournalUnavailable("volume serial changed")
+    target_usn = current_target_usn
+    if requested_target is not None:
+        if int(requested_target.journal_id) != journal_id:
+            raise UsnJournalUnavailable("USN target journal identifier changed")
+        if int(requested_target.volume_serial) != int(volume_serial):
+            raise UsnJournalUnavailable("USN target volume serial changed")
+        target_usn = int(requested_target.next_usn)
+        if target_usn > current_target_usn:
+            raise UsnJournalUnavailable("USN target checkpoint is ahead of the journal")
+    if not (first_usn <= int(checkpoint.next_usn) <= target_usn):
+        raise UsnJournalUnavailable("USN checkpoint is outside the retained journal")
+    return UsnCheckpoint(journal_id, target_usn, int(volume_serial))
+
+
+def _read_changes_page_from_volume(
+    kernel32,
+    volume,
+    checkpoint: UsnCheckpoint,
+    target_checkpoint: UsnCheckpoint,
+    *,
+    page_bytes: int,
+) -> UsnChangePage:
+    start_usn = int(checkpoint.next_usn)
+    target_usn = int(target_checkpoint.next_usn)
+    if start_usn >= target_usn:
+        return UsnChangePage(
+            checkpoint=target_checkpoint,
+            target_checkpoint=target_checkpoint,
+            records=(),
+        )
+    output = _read_journal(
+        kernel32,
+        volume,
+        start_usn,
+        int(target_checkpoint.journal_id),
+        output_bytes=page_bytes,
+    )
+    if len(output) < 8:
+        raise UsnJournalUnavailable("USN read returned an incomplete cursor")
+    next_usn = int(struct.unpack_from("<q", output, 0)[0])
+    if next_usn <= start_usn:
+        raise UsnJournalUnavailable("USN journal made no cursor progress")
+    next_usn = min(next_usn, target_usn)
+    records = tuple(
+        record
+        for record in _parse_records(output[8:])
+        if int(record.usn) < target_usn
+    )
+    return UsnChangePage(
+        checkpoint=UsnCheckpoint(
+            int(target_checkpoint.journal_id),
+            next_usn,
+            int(target_checkpoint.volume_serial),
+        ),
+        target_checkpoint=target_checkpoint,
+        records=records,
+    )
+
+
+def _changes_since_page_direct(
+    root_path: Path,
+    checkpoint: UsnCheckpoint,
+    *,
+    target_checkpoint: UsnCheckpoint | None = None,
+    page_bytes: int = _DEFAULT_USN_PAGE_BYTES,
+) -> UsnChangePage:
+    """Read one bounded page in-process or inside the privileged service."""
+
+    kernel32, volume = _open_volume(root_path)
+    try:
+        journal_data = _query_journal(kernel32, volume)
+        serial = _volume_serial(kernel32, root_path)
+        target = _resolve_target_checkpoint(
+            checkpoint,
+            journal_data,
+            serial,
+            target_checkpoint,
+        )
+        return _read_changes_page_from_volume(
+            kernel32,
+            volume,
+            checkpoint,
+            target,
+            page_bytes=_bounded_page_bytes(page_bytes),
+        )
+    finally:
+        kernel32.CloseHandle(volume)
+
+
+def _iter_changes_since_direct(
+    root_path: Path,
+    checkpoint: UsnCheckpoint,
+    *,
+    page_bytes: int = _DEFAULT_USN_PAGE_BYTES,
+) -> Iterator[UsnChangePage]:
+    """Read a stable journal window as bounded pages while holding one volume handle."""
+
+    kernel32, volume = _open_volume(root_path)
+    try:
+        journal_data = _query_journal(kernel32, volume)
+        serial = _volume_serial(kernel32, root_path)
+        target = _resolve_target_checkpoint(checkpoint, journal_data, serial, None)
+        current = checkpoint
+        while True:
+            page = _read_changes_page_from_volume(
+                kernel32,
+                volume,
+                current,
+                target,
+                page_bytes=_bounded_page_bytes(page_bytes),
+            )
+            yield page
+            if int(page.checkpoint.next_usn) >= int(target.next_usn):
+                return
+            current = page.checkpoint
+    finally:
+        kernel32.CloseHandle(volume)
+
+
+def _iter_changes_since_service(
+    root_path: Path,
+    checkpoint: UsnCheckpoint,
+    *,
+    page_bytes: int = _DEFAULT_USN_PAGE_BYTES,
+) -> Iterator[UsnChangePage]:
+    current = checkpoint
+    target: UsnCheckpoint | None = None
+    while True:
+        payload: dict[str, object] = {
+            "operation": "changes_since_page",
+            "root_path": str(root_path),
+            "checkpoint": _checkpoint_payload(current),
+            "page_bytes": _bounded_page_bytes(page_bytes),
+        }
+        if target is not None:
+            payload["target_checkpoint"] = _checkpoint_payload(target)
+        response = _service_request(payload)
+        page_checkpoint = _checkpoint_from_payload(
+            response.get("checkpoint"),
+            label="page",
+        )
+        target_checkpoint = _checkpoint_from_payload(
+            response.get("target_checkpoint"),
+            label="target",
+        )
+        if int(page_checkpoint.next_usn) < int(current.next_usn):
+            raise UsnJournalUnavailable("USN helper page cursor moved backwards")
+        if int(page_checkpoint.next_usn) > int(target_checkpoint.next_usn):
+            raise UsnJournalUnavailable("USN helper page cursor passed its target")
+        records = tuple(
+            UsnRecord(
+                file_reference=int(item["file_reference"]),
+                parent_reference=int(item["parent_reference"]),
+                usn=int(item["usn"]),
+                reason=int(item["reason"]),
+                attributes=int(item["attributes"]),
+                name=str(item["name"]),
+            )
+            for item in response.get("records", ())
+            if isinstance(item, dict)
+        )
+        page = UsnChangePage(
+            checkpoint=page_checkpoint,
+            target_checkpoint=target_checkpoint,
+            records=records,
+        )
+        yield page
+        if int(page_checkpoint.next_usn) >= int(target_checkpoint.next_usn):
+            return
+        if int(page_checkpoint.next_usn) == int(current.next_usn):
+            raise UsnJournalUnavailable("USN helper page made no cursor progress")
+        current = page_checkpoint
+        target = target_checkpoint
+
+
+def iter_changes_since(
+    root_path: Path,
+    checkpoint: UsnCheckpoint,
+    *,
+    page_bytes: int = _DEFAULT_USN_PAGE_BYTES,
+) -> Iterator[UsnChangePage]:
+    """Yield bounded USN pages, preferring direct access and then the service."""
+
+    try:
+        yield from _iter_changes_since_direct(
+            root_path,
+            checkpoint,
+            page_bytes=page_bytes,
+        )
+        return
+    except UsnJournalUnavailable as direct_error:
+        try:
+            yield from _iter_changes_since_service(
+                root_path,
+                checkpoint,
+                page_bytes=page_bytes,
+            )
+            return
+        except (
+            KeyError,
+            TypeError,
+            ValueError,
+            OSError,
+            UsnJournalUnavailable,
+        ) as service_error:
+            combined_error = _combine_fallback_errors(direct_error, service_error)
+            if combined_error is service_error:
+                raise
+            raise combined_error from service_error
+
+
 def changes_since(
     root_path: Path,
     checkpoint: UsnCheckpoint,
     *,
-    max_records: int = 20_000,
+    max_records: int | None = None,
+    on_page: Callable[[tuple[UsnRecord, ...]], None] | None = None,
+    page_bytes: int = _DEFAULT_USN_PAGE_BYTES,
 ) -> UsnChangeSet:
-    """Return journal records after ``checkpoint`` up to a stable cursor.
+    """Read a stable USN window in pages and optionally consume each page."""
 
-    The returned checkpoint is captured before the read loop. Changes arriving
-    during the loop are intentionally left for the next run rather than being
-    lost behind a moving cursor.
-    """
-
-    try:
-        return _changes_since_direct(root_path, checkpoint, max_records=max_records)
-    except UsnJournalUnavailable as direct_error:
-        try:
-            response = _service_request(
-                {
-                    "operation": "changes_since",
-                    "root_path": str(root_path),
-                    "checkpoint": {
-                        "journal_id": int(checkpoint.journal_id),
-                        "next_usn": int(checkpoint.next_usn),
-                        "volume_serial": int(checkpoint.volume_serial),
-                    },
-                    "max_records": max(1, min(int(max_records), 20_000)),
-                }
-            )
-            next_checkpoint = response["checkpoint"]
-            records = tuple(
-                UsnRecord(
-                    file_reference=int(item["file_reference"]),
-                    parent_reference=int(item["parent_reference"]),
-                    usn=int(item["usn"]),
-                    reason=int(item["reason"]),
-                    attributes=int(item["attributes"]),
-                    name=str(item["name"]),
-                )
-                for item in response.get("records", ())
-            )
-            return UsnChangeSet(
-                checkpoint=UsnCheckpoint(
-                    journal_id=int(next_checkpoint["journal_id"]),
-                    next_usn=int(next_checkpoint["next_usn"]),
-                    volume_serial=int(next_checkpoint["volume_serial"]),
-                ),
-                records=records,
-            )
-        except (KeyError, TypeError, ValueError, OSError, UsnJournalUnavailable):
-            raise direct_error
+    latest_by_reference: dict[int, UsnRecord] = {}
+    records_seen = 0
+    final_checkpoint = checkpoint
+    for page in iter_changes_since(
+        root_path,
+        checkpoint,
+        page_bytes=page_bytes,
+    ):
+        final_checkpoint = page.target_checkpoint
+        if on_page is not None:
+            on_page(page.records)
+        else:
+            for record in page.records:
+                records_seen += 1
+                if max_records is not None and records_seen > max(1, int(max_records)):
+                    raise UsnChangeSetLimitExceeded(
+                        limit=max_records,
+                        records_seen=records_seen,
+                    )
+                latest_by_reference[int(record.file_reference)] = record
+    return UsnChangeSet(
+        checkpoint=final_checkpoint,
+        records=tuple(latest_by_reference.values()),
+    )
 
 
 def _changes_since_direct(
     root_path: Path,
     checkpoint: UsnCheckpoint,
     *,
-    max_records: int = 20_000,
+    max_records: int | None = None,
 ) -> UsnChangeSet:
-    """Read journal records in-process when the caller is elevated."""
+    """Read the complete journal window, retaining only the latest record per reference."""
 
-    kernel32, volume = _open_volume(root_path)
-    try:
-        data = _query_journal(kernel32, volume)
-        journal_id, first_usn, target_usn = (int(data[0]), int(data[1]), int(data[2]))
-        serial = _volume_serial(kernel32, root_path)
-        if int(checkpoint.journal_id) != journal_id:
-            raise UsnJournalUnavailable("USN journal identifier changed")
-        if int(checkpoint.volume_serial) != serial:
-            raise UsnJournalUnavailable("volume serial changed")
-        if not (first_usn <= int(checkpoint.next_usn) <= target_usn):
-            raise UsnJournalUnavailable("USN checkpoint is outside the retained journal")
-
-        records: list[UsnRecord] = []
-        start_usn = int(checkpoint.next_usn)
-        while start_usn < target_usn:
-            output = _read_journal(kernel32, volume, start_usn, journal_id)
-            if len(output) < 8:
-                raise UsnJournalUnavailable("USN read returned an incomplete cursor")
-            next_usn = int(struct.unpack_from("<q", output, 0)[0])
-            if next_usn <= start_usn:
-                raise UsnJournalUnavailable("USN journal made no cursor progress")
-            for record in _parse_records(output[8:]):
-                if record.usn >= target_usn:
-                    continue
-                records.append(record)
-                if len(records) > max(1, int(max_records)):
-                    raise UsnJournalUnavailable("USN change set exceeds safe fast-path limit")
-            start_usn = next_usn
-        return UsnChangeSet(
-            checkpoint=UsnCheckpoint(journal_id, target_usn, serial),
-            records=tuple(records),
-        )
-    finally:
-        kernel32.CloseHandle(volume)
+    latest_by_reference: dict[int, UsnRecord] = {}
+    records_seen = 0
+    final_checkpoint = checkpoint
+    for page in _iter_changes_since_direct(root_path, checkpoint):
+        final_checkpoint = page.target_checkpoint
+        for record in page.records:
+            records_seen += 1
+            if max_records is not None and records_seen > max(1, int(max_records)):
+                raise UsnChangeSetLimitExceeded(
+                    limit=max_records,
+                    records_seen=records_seen,
+                )
+            latest_by_reference[int(record.file_reference)] = record
+    return UsnChangeSet(
+        checkpoint=final_checkpoint,
+        records=tuple(latest_by_reference.values()),
+    )
 
 
 def _service_request(payload: dict[str, object], *, timeout_ms: int = 750) -> dict[str, object]:
@@ -231,13 +513,52 @@ def _service_request(payload: dict[str, object], *, timeout_ms: int = 750) -> di
         if not isinstance(response, dict):
             raise UsnJournalUnavailable("USN helper returned an invalid response")
         if not response.get("ok"):
-            raise UsnJournalUnavailable(str(response.get("error") or "USN helper failed"))
+            error_text = str(response.get("error") or "USN helper failed")
+            error_code = str(response.get("error_code") or "")
+            if (
+                error_code == UsnChangeSetLimitExceeded.error_code
+                or error_text.startswith("UsnChangeSetLimitExceeded:")
+                or "USN change set exceeds safe fast-path limit" in error_text
+            ):
+                details = response.get("details")
+                if not isinstance(details, dict):
+                    details = {}
+                try:
+                    limit = int(details.get("limit", _DEFAULT_MAX_RECORDS))
+                except (TypeError, ValueError):
+                    limit = _DEFAULT_MAX_RECORDS
+                try:
+                    records_seen = (
+                        None
+                        if details.get("records_seen") is None
+                        else int(details["records_seen"])
+                    )
+                except (TypeError, ValueError):
+                    records_seen = None
+                raise UsnChangeSetLimitExceeded(
+                    limit=limit,
+                    records_seen=records_seen,
+                    message=error_text,
+                )
+            raise UsnJournalUnavailable(error_text)
         result = response.get("result")
         if not isinstance(result, dict):
             raise UsnJournalUnavailable("USN helper returned no result")
         return result
+    except UsnJournalUnavailable:
+        raise
+    except (pywintypes.error, OSError, ValueError, TypeError, struct.error) as exc:
+        error_code = getattr(exc, "winerror", None)
+        suffix = f" ({error_code})" if error_code is not None else ""
+        raise UsnJournalUnavailable(
+            f"USN helper request failed{suffix}: {exc}"
+        ) from exc
     finally:
-        win32file.CloseHandle(handle)
+        if handle is not None:
+            try:
+                win32file.CloseHandle(handle)
+            except Exception:
+                pass
 
 
 def _read_exact(handle, size: int) -> bytes:
@@ -313,12 +634,26 @@ def _query_journal(kernel32, volume):
     return struct.unpack_from("<Qqq", output.raw, 0)
 
 
-def _read_journal(kernel32, volume, start_usn: int, journal_id: int) -> bytes:
+def _read_journal(
+    kernel32,
+    volume,
+    start_usn: int,
+    journal_id: int,
+    *,
+    output_bytes: int = _DEFAULT_USN_PAGE_BYTES,
+) -> bytes:
     import ctypes
     from ctypes import wintypes
 
     request = struct.pack(
-        "<qIIIIQHH",
+        # Windows 8+ uses READ_USN_JOURNAL_DATA_V1:
+        # StartUsn, ReasonMask, ReturnOnlyOnClose, Timeout (DWORDLONG),
+        # BytesToWaitFor (DWORDLONG), UsnJournalID (DWORDLONG),
+        # MinMajorVersion, MaxMajorVersion.
+        # The two 64-bit wait fields are required on Windows 10; using a
+        # 32-bit field here shifts the journal id and makes DeviceIoControl
+        # return ERROR_INVALID_USER_BUFFER/ERROR_INVALID_PARAMETER.
+        "<qIIQQQHH",
         int(start_usn),
         0xFFFFFFFF,
         0,
@@ -329,7 +664,7 @@ def _read_journal(kernel32, volume, start_usn: int, journal_id: int) -> bytes:
         2,
     )
     input_buffer = ctypes.create_string_buffer(request)
-    output = ctypes.create_string_buffer(1024 * 1024)
+    output = ctypes.create_string_buffer(_bounded_page_bytes(output_bytes))
     returned = wintypes.DWORD()
     ok = kernel32.DeviceIoControl(
         volume,

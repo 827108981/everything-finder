@@ -21,6 +21,10 @@ def test_startup_diagnostics_records_completed_startup(tmp_path: Path) -> None:
     diagnostics.stage_completed()
     diagnostics.mark_window_visible()
 
+    running_state = json.loads(diagnostics.state_path.read_text(encoding="utf-8"))
+    assert running_state["status"] == "running"
+    diagnostics.mark_clean_exit("test_completed", exit_code=0)
+
     records = [
         json.loads(line)
         for line in diagnostics.log_path.read_text(encoding="utf-8").splitlines()
@@ -30,6 +34,7 @@ def test_startup_diagnostics_records_completed_startup(tmp_path: Path) -> None:
     assert "START" in events
     assert "STAGE_COMPLETED" in events
     assert "WINDOW_VISIBLE" in events
+    assert "APP_CLEAN_EXIT" in events
     assert state["status"] == "complete"
     for record in records:
         assert record["app_version"]
@@ -52,6 +57,23 @@ def test_startup_diagnostics_exposes_previous_failed_stage(tmp_path: Path) -> No
 
     assert second.previous_failure is not None
     assert second.previous_failure["stage"] == "初始化索引数据库"
+
+
+def test_startup_diagnostics_distinguishes_interrupt_from_clean_exit(
+    tmp_path: Path,
+) -> None:
+    diagnostics = StartupDiagnostics(base_dir=tmp_path, timeout_seconds=60)
+    diagnostics.begin()
+    diagnostics.stage_started("加载图形界面")
+    diagnostics.mark_interrupted("IDE_OR_CONSOLE_INTERRUPT", exit_code=130)
+
+    records = [
+        json.loads(line)
+        for line in diagnostics.log_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert records[-1]["event"] == "APP_INTERRUPTED"
+    assert records[-1]["source"] == "IDE_OR_CONSOLE_INTERRUPT"
+    assert json.loads(diagnostics.state_path.read_text(encoding="utf-8"))["status"] == "interrupted"
 
 
 def test_faulthandler_is_enabled_before_start_record(tmp_path: Path) -> None:
@@ -125,6 +147,60 @@ def test_current_schema_fast_start_does_not_rebuild_fts(tmp_path: Path) -> None:
     database.initialize()
     database.initialize(startup_fast=True)
     assert database._startup_fast_path_ready()
+
+
+def test_fast_start_defers_additive_schema_repair_without_copying_large_database(
+    tmp_path: Path,
+) -> None:
+    from local_full_text_search.core.database import DatabaseManager
+
+    path = tmp_path / "search.db"
+    database = DatabaseManager(path)
+    database.initialize()
+    with database.connect() as con:
+        con.execute("DROP INDEX idx_content_blocks_index_version")
+        con.execute(
+            """
+            CREATE TABLE short_tokens (
+                token TEXT NOT NULL,
+                block_id INTEGER NOT NULL,
+                position_count INTEGER DEFAULT 1,
+                PRIMARY KEY(token, block_id)
+            )
+            """
+        )
+
+    reopened = DatabaseManager(path)
+    reopened.initialize(startup_fast=True)
+
+    assert reopened.startup_migration_deferred is True
+    assert not list(tmp_path.glob("search.schema-v9*.backup.db"))
+    assert reopened.list_roots() == []
+
+    progress: list[dict[str, object]] = []
+    reopened.initialize(progress_callback=progress.append)
+    assert reopened._startup_fast_path_ready()
+    assert any(
+        item.get("stage") == "database_migration_schema" for item in progress
+    )
+
+
+def test_fast_start_does_not_open_existing_database_on_the_gui_thread(
+    tmp_path: Path,
+) -> None:
+    from local_full_text_search.core.database import DatabaseManager
+
+    path = tmp_path / "search.db"
+    database = DatabaseManager(path)
+    database.initialize()
+    reopened = DatabaseManager(path)
+    reopened._startup_fast_path_ready = lambda: (_ for _ in ()).throw(
+        AssertionError("GUI fast startup must not open SQLite")
+    )
+
+    reopened.initialize(startup_fast=True)
+
+    assert reopened.startup_migration_deferred is True
 
 
 def test_frozen_runtime_check_reports_missing_boot_artifacts(

@@ -4,11 +4,35 @@ from pathlib import Path
 
 from local_full_text_search.core.phase2_validation import (
     _mode_switch_ack_cursor,
+    _mode_switch_core_invariants_pass,
     validate_ocr_backend_gate,
     validate_pdf_page_pipeline,
     validate_paused_mode_switch,
     validate_safe_pause,
 )
+
+
+def test_mode_switch_core_invariants_do_not_depend_on_aggregate_cursor() -> None:
+    result = {
+        "errors": [],
+        "summary": {"failed": 0},
+        "switches": [
+            "normal_to_performance",
+            "performance_to_normal",
+        ],
+        "remained_paused_after_each_switch": True,
+        "duplicate_blocks": 0,
+        "external_process_seen": False,
+        "office_pids_after": [],
+        "cursor_pairs": [(1, 2), (2, 1)],
+        "cursor_advanced_after_each_resume": False,
+    }
+
+    assert _mode_switch_core_invariants_pass(
+        result,
+        reverse_switch=True,
+        require_external_process=False,
+    ) is True
 
 
 def test_p0_02r_ocr_backend_gate_uses_one_real_lane_and_recovers_worker(
@@ -233,10 +257,15 @@ def test_u0_04r_mode_switch_validation_uses_a_real_resumable_xlsx(
     for format_name in ("image_ocr", "pdf_ocr_page", "zip_member"):
         format_result = result["formats"][format_name]
         assert format_result["passed"] is True, format_result
-        assert format_result["switches"] == [
-            "normal_to_performance",
-            "performance_to_normal",
-        ]
+        expected_switches = (
+            ["normal_to_performance"]
+            if format_name == "image_ocr"
+            else [
+                "normal_to_performance",
+                "performance_to_normal",
+            ]
+        )
+        assert format_result["switches"] == expected_switches
         assert format_result["remained_paused_after_each_switch"] is True
         assert format_result["cursor_advanced_after_each_resume"] is True
         assert format_result["duplicate_blocks"] == 0

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import os
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 
@@ -10,6 +11,7 @@ from pathlib import Path
 VALIDATIONS = (
     "--self-test",
     "--validate-partial-search",
+    "--validate-search-index-coordination",
     "--validate-core",
     "--validate-process-pool",
     "--validate-schema-v6",
@@ -47,6 +49,14 @@ def run_validations(executable: Path) -> int:
     environment["QT_QPA_PLATFORM"] = "offscreen"
     validation_dir = executable.parent / "发行资料" / "验证结果"
     validation_dir.mkdir(parents=True, exist_ok=True)
+    # Never let frozen smoke tests open or mutate the user's real database,
+    # logs, single-instance mutex and startup diagnostics. Keep the directory
+    # after validation so a failed command leaves evidence for investigation.
+    isolated_data_dir = Path(
+        tempfile.mkdtemp(prefix="运行数据-", dir=str(validation_dir))
+    )
+    environment["LFTS_APP_DATA_DIR"] = str(isolated_data_dir)
+    print(f"[frozen-validation] isolated_data_dir={isolated_data_dir}", flush=True)
     for argument in VALIDATIONS:
         attempts = 3 if argument == "--validate-hang-recovery" else 1
         result = None

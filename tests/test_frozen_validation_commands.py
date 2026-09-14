@@ -29,6 +29,10 @@ def test_partial_search_has_a_frozen_validation_command() -> None:
     assert "--validate-partial-search" in VALIDATIONS
 
 
+def test_search_index_coordination_has_a_frozen_validation_command() -> None:
+    assert "--validate-search-index-coordination" in VALIDATIONS
+
+
 def test_database_migration_has_a_frozen_validation_command() -> None:
     assert "--validate-database-migration" in VALIDATIONS
 

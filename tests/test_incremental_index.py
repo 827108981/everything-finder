@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 import tempfile
 import time
 import unittest
@@ -65,6 +66,31 @@ class IncrementalIndexTests(unittest.TestCase):
             self.assertEqual(restored.indexed, 1)
             self.assertEqual(page.total_confirmed, 1)
 
+    def test_reused_files_emit_immediate_progress_after_cache_planning(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = base / "files"
+            root.mkdir()
+            target = root / "unchanged.txt"
+            target.write_text("UNCHANGED_CACHE_HIT", encoding="utf-8")
+            db = DatabaseManager(base / "index.db")
+            db.initialize()
+            root_id = db.add_root(root)
+            manager = IndexManager(db, AppSettings(enable_ocr=False))
+            manager.index_root(root_id)
+
+            progress: list[dict[str, object]] = []
+            reused = manager.index_root(root_id, progress_callback=progress.append)
+
+            self.assertEqual(reused.indexed, 0)
+            self.assertEqual(reused.skipped, 1)
+            self.assertTrue(
+                any(
+                    int(payload.get("reused_files") or 0) >= 1
+                    for payload in progress
+                )
+            )
+
     def test_incomplete_file_is_retried_on_each_full_index_attempt(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -84,7 +110,7 @@ class IncrementalIndexTests(unittest.TestCase):
             self.assertEqual(second.skipped, 0)
             self.assertFalse(db.index_readiness()["ready"])
 
-    def test_partial_projection_survives_failed_file_and_default_update_skips_retry(self) -> None:
+    def test_incomplete_projection_blocks_search_until_failed_file_is_resolved(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             root = base / "files"
@@ -108,27 +134,27 @@ class IncrementalIndexTests(unittest.TestCase):
 
             first = manager.index_root(root_id)
             readiness = db.index_readiness()
-            page = SearchEngine(db).search(
-                SearchQuery(
-                    text="PIPELINE_PARTIAL_HIT",
-                    mode="exact",
-                    search_filename=False,
-                    search_path=False,
-                    search_content=True,
+            with self.assertRaises(Exception):
+                SearchEngine(db).search(
+                    SearchQuery(
+                        text="PIPELINE_PARTIAL_HIT",
+                        mode="exact",
+                        search_filename=False,
+                        search_path=False,
+                        search_content=True,
+                    )
                 )
-            )
             second = manager.index_root(root_id)
 
             self.assertEqual(first.indexed, 1)
             self.assertEqual(first.failed, 1)
             self.assertFalse(readiness["ready"])
-            self.assertTrue(readiness["search_available"])
-            self.assertEqual(page.total_confirmed, 1)
+            self.assertFalse(readiness["search_available"])
             self.assertEqual(second.failed, 0)
             self.assertEqual(second.indexed, 0)
             self.assertEqual(second.skipped, 2)
 
-    def test_incremental_update_keeps_existing_search_available(self) -> None:
+    def test_incremental_update_blocks_existing_search_until_scope_is_complete(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             root = base / "files"
@@ -155,8 +181,8 @@ class IncrementalIndexTests(unittest.TestCase):
             readiness = db.index_readiness()
             self.assertEqual(second.failed, 1)
             self.assertFalse(readiness["ready"])
-            self.assertTrue(readiness["search_available"])
-            self.assertEqual(
+            self.assertFalse(readiness["search_available"])
+            with self.assertRaises(Exception):
                 SearchEngine(db).search(
                     SearchQuery(
                         text="INCREMENTAL_SEARCH_HIT",
@@ -165,9 +191,7 @@ class IncrementalIndexTests(unittest.TestCase):
                         search_path=False,
                         search_content=True,
                     )
-                ).total_confirmed,
-                1,
-            )
+                )
 
     def test_one_root_failure_does_not_prevent_later_roots(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -195,6 +219,31 @@ class IncrementalIndexTests(unittest.TestCase):
             self.assertIn(second_id, calls)
             self.assertEqual(summary.indexed, 1)
             self.assertGreaterEqual(summary.failed, 1)
+
+    def test_database_lock_stops_root_loop_instead_of_repeating_every_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            first_root = base / "first"
+            second_root = base / "second"
+            first_root.mkdir()
+            second_root.mkdir()
+            db = DatabaseManager(base / "index.db")
+            db.initialize()
+            first_id = db.add_root(first_root)
+            second_id = db.add_root(second_root)
+            manager = IndexManager(db, AppSettings())
+            calls: list[int] = []
+
+            def fake_index_root(root_id, _token=None, _progress_callback=None):
+                calls.append(int(root_id))
+                raise sqlite3.OperationalError("database is locked")
+
+            manager.index_root = fake_index_root  # type: ignore[method-assign]
+            with self.assertRaisesRegex(RuntimeError, "数据库被其他进程"):
+                manager.index_enabled_roots()
+
+            self.assertEqual(calls, [first_id])
+            self.assertNotIn(second_id, calls)
 
 
 if __name__ == "__main__":

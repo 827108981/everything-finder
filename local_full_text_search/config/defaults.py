@@ -72,6 +72,11 @@ class AppSettings:
     process_no_progress_timeout_seconds: int = 300
     planning_no_progress_timeout_seconds: int = 300
     planning_startup_timeout_seconds: int = 30
+    ocr_thread_startup_timeout_seconds: int = 30
+    ocr_model_load_timeout_seconds: int = 120
+    ocr_detect_timeout_seconds: int = 300
+    ocr_recognize_timeout_seconds: int = 900
+    finalization_no_progress_timeout_seconds: int = 30
     planning_discovery_batch_size: int = 128
     no_progress_max_retries: int = 3
     compute_full_hash: bool = False

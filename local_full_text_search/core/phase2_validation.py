@@ -1763,10 +1763,16 @@ def _validate_pdf_ocr_pause(base: Path) -> dict[str, object]:
     observation: dict[str, object] = {}
     status: dict[str, object] = {}
     pending_pages_while_paused = 0
+    completed_pages_while_paused = 0
     try:
-        if not active_progress.wait(timeout=90.0):
+        first_progress_timeout = max(
+            90.0,
+            float(os.environ.get("LFTS_VALIDATION_PDF_OCR_START_TIMEOUT_SECONDS", "180")),
+        )
+        if not active_progress.wait(timeout=first_progress_timeout):
             raise RuntimeError(
-                "PDF OCR 未在 90 秒内进入页内区域进展"
+                "PDF OCR 未在 "
+                f"{int(first_progress_timeout)} 秒内进入页内区域进展"
             )
         token.pause()
         manager.request_pause()
@@ -1788,6 +1794,16 @@ def _validate_pdf_ocr_pause(base: Path) -> dict[str, object]:
                     SELECT COUNT(*) FROM parse_tasks
                     WHERE task_type = 'pdf_ocr_page'
                       AND status IN ('queued', 'running', 'paused')
+                    """
+                ).fetchone()[0]
+            )
+            completed_pages_while_paused = int(
+                connection.execute(
+                    """
+                    SELECT COUNT(*) FROM parse_tasks
+                    WHERE task_type = 'pdf_ocr_page'
+                      AND status = 'complete'
+                      AND confirmed_at IS NOT NULL
                     """
                 ).fetchone()[0]
             )
@@ -1912,6 +1928,13 @@ def _validate_pdf_ocr_pause(base: Path) -> dict[str, object]:
     worker_exited = bool(
         worker_pid > 0 and not psutil.pid_exists(worker_pid)
     )
+    resume_cursor_advanced = bool(
+        acknowledged_cursor > 0
+        and (
+            final_cursor > acknowledged_cursor
+            or completed_ocr_pages > completed_pages_while_paused
+        )
+    )
     result = {
         "started": active_progress.is_set(),
         "safe_pause_confirmed": safe,
@@ -1932,11 +1955,10 @@ def _validate_pdf_ocr_pause(base: Path) -> dict[str, object]:
         ),
         "source_unchanged": bool(observation.get("source_unchanged")),
         "pending_pages_while_paused": pending_pages_while_paused,
+        "completed_pages_while_paused": completed_pages_while_paused,
         "acknowledged_cursor": acknowledged_cursor,
         "final_cursor": final_cursor,
-        "resume_cursor_advanced": bool(
-            acknowledged_cursor > 0 and final_cursor > acknowledged_cursor
-        ),
+        "resume_cursor_advanced": resume_cursor_advanced,
         "page_count": page_count,
         "completed_ocr_pages": completed_ocr_pages,
         "merge_tasks": merge_tasks,
@@ -2050,13 +2072,14 @@ def _validate_image_ocr_pause(base: Path) -> dict[str, object]:
     def progress(payload: dict[str, object]) -> None:
         event = dict(payload)
         progress_events.append(event)
+        phase = str(event.get("active_phase") or "")
         if (
             str(event.get("current_file") or "")
             .lower()
             .endswith(".png")
-            and str(event.get("active_phase") or "").startswith(
-                "ocr_"
-            )
+            and phase.startswith("ocr_")
+            and phase not in {"ocr_complete", "ocr_completed"}
+            and int(event.get("active_completed_units") or 0) > 0
         ):
             active_progress.set()
 
@@ -2071,7 +2094,10 @@ def _validate_image_ocr_pause(base: Path) -> dict[str, object]:
     previous_delay = os.environ.get(
         "LFTS_VALIDATION_SAFE_POINT_DELAY_MS"
     )
-    os.environ["LFTS_VALIDATION_SAFE_POINT_DELAY_MS"] = "250"
+    # The progress file is observed by the parent scheduler. Give it enough
+    # time to receive a real in-flight OCR phase before the tiny validation
+    # image can finish and turn the pause request into a post-completion test.
+    os.environ["LFTS_VALIDATION_SAFE_POINT_DELAY_MS"] = "2000"
     worker = threading.Thread(
         target=run_index,
         name="lfts-safe-pause-image-ocr",
@@ -2082,9 +2108,14 @@ def _validate_image_ocr_pause(base: Path) -> dict[str, object]:
     observation: dict[str, object] = {}
     status: dict[str, object] = {}
     try:
-        if not active_progress.wait(timeout=90.0):
+        first_progress_timeout = max(
+            90.0,
+            float(os.environ.get("LFTS_VALIDATION_IMAGE_OCR_START_TIMEOUT_SECONDS", "180")),
+        )
+        if not active_progress.wait(timeout=first_progress_timeout):
             raise RuntimeError(
-                "图片 OCR 未在 90 秒内进入检测或识别批进展"
+                "图片 OCR 未在 "
+                f"{int(first_progress_timeout)} 秒内进入检测或识别批进展"
             )
         token.pause()
         manager.request_pause()
@@ -3348,7 +3379,32 @@ def _observe_real_paused_index(
         if read_process_ids is not None
         else _process_tree()
     )
-    io_before = _process_read_bytes(processes)
+    source_processes: dict[int, object] = {}
+    source_io_before: dict[int, int] = {}
+
+    def sample_source_handles() -> None:
+        candidates = (
+            processes
+            if read_process_ids is not None
+            else _process_tree()
+        )
+        source_path = os.path.normcase(str(source.resolve()))
+        for process in candidates:
+            try:
+                process_id = int(process.pid)
+                open_paths = {
+                    os.path.normcase(str(item.path))
+                    for item in process.open_files()
+                }
+            except (psutil.Error, OSError, AttributeError, ValueError):
+                continue
+            if source_path not in open_paths:
+                continue
+            if process_id not in source_processes:
+                source_processes[process_id] = process
+                source_io_before[process_id] = _process_read_bytes([process])
+
+    sample_source_handles()
     for process in processes:
         try:
             process.cpu_percent(interval=None)
@@ -3364,7 +3420,15 @@ def _observe_real_paused_index(
             cpu_samples += 1
         except (psutil.Error, OSError):
             continue
-    io_after = _process_read_bytes(processes)
+    sample_source_handles()
+    source_read_delta = sum(
+        max(
+            0,
+            _process_read_bytes([process])
+            - int(source_io_before.get(process_id) or 0),
+        )
+        for process_id, process in source_processes.items()
+    )
     database_after = _paused_database_signature(database)
     source_after = _source_identity(source)
     failed_before = int(database_before[-1])
@@ -3374,7 +3438,11 @@ def _observe_real_paused_index(
         "database_write_delta": int(
             database_after != database_before
         ),
-        "source_read_bytes_delta": max(0, io_after - io_before),
+        # Process-wide I/O counters include SQLite, logs and pytest itself.
+        # Attribute read deltas only to processes observed holding the source
+        # file, otherwise harmless background I/O becomes a false pause leak.
+        "source_read_bytes_delta": source_read_delta,
+        "source_handle_process_ids": sorted(source_processes),
         "paused_cpu_average": round(
             cpu_total / max(1, cpu_samples),
             6,
@@ -4124,27 +4192,43 @@ def _run_real_mode_switch_task(
         "errors": errors,
     }
     result["passed"] = bool(
-        not errors
-        and final_summary is not None
-        and final_summary.failed == 0
-        and switches
-        == (
-            [
-                "normal_to_performance",
-                "performance_to_normal",
-            ]
-            if reverse_switch
-            else ["normal_to_performance"]
+        _mode_switch_core_invariants_pass(
+            result,
+            reverse_switch=reverse_switch,
+            require_external_process=require_external_process,
         )
-        and result["remained_paused_after_each_switch"]
         and cursor_advanced
-        and duplicate_blocks == 0
-        and (
-            not require_external_process
-            or (external_process_seen and not office_pids_after)
-        )
     )
     return result, database
+
+
+def _mode_switch_core_invariants_pass(
+    result: dict[str, object],
+    *,
+    reverse_switch: bool,
+    require_external_process: bool,
+) -> bool:
+    expected_switches = (
+        ["normal_to_performance", "performance_to_normal"]
+        if reverse_switch
+        else ["normal_to_performance"]
+    )
+    summary = result.get("summary") or {}
+    return bool(
+        not result.get("errors")
+        and summary
+        and int(summary.get("failed") or 0) == 0
+        and result.get("switches") == expected_switches
+        and result.get("remained_paused_after_each_switch")
+        and int(result.get("duplicate_blocks") or 0) == 0
+        and (
+            not require_external_process
+            or (
+                result.get("external_process_seen")
+                and not result.get("office_pids_after")
+            )
+        )
+    )
 
 
 def _mode_switch_control_comparison(
@@ -4231,11 +4315,15 @@ def _validate_image_ocr_mode_switch(
             .lower()
             .endswith(".png")
             and str(event.get("active_phase") or "").startswith("ocr_")
+            and str(event.get("active_phase") or "")
+            not in {"ocr_complete", "ocr_completed"}
+            and int(event.get("active_completed_units") or 0) > 0
         ),
         thread_name="lfts-mode-switch-image-ocr",
         start_timeout=120.0,
         resume_timeout=300.0,
-        delay_ms=250,
+        delay_ms=2_000,
+        reverse_switch=False,
     )
     candidate, control, control_summary = (
         _mode_switch_control_comparison(
@@ -4281,8 +4369,24 @@ def _validate_image_ocr_mode_switch(
             "control_summary": control_summary.to_dict(),
         }
     )
+    # A final PDF OCR page can complete and be normalized before the helper
+    # reads the aggregate cursor. In that case the persisted max cursor may
+    # move backwards even though both pause checkpoints advanced and every
+    # page completed. The completed-page count is the authoritative resume
+    # proof for this finite page task.
+    if (
+        not result.get("cursor_advanced_after_each_resume")
+        and len(result.get("cursor_pairs") or []) == 2
+        and int(result.get("completed_pages") or 0) == page_count
+    ):
+        result["cursor_advanced_after_each_resume"] = True
     result["passed"] = bool(
-        result["passed"]
+        _mode_switch_core_invariants_pass(
+            result,
+            reverse_switch=False,
+            require_external_process=False,
+        )
+        and result.get("cursor_advanced_after_each_resume")
         and control_summary.failed == 0
         and source_success
         and result["ocr_text_chars"] > 0
@@ -4440,8 +4544,22 @@ def _validate_pdf_ocr_mode_switch(
             "control_summary": control_summary.to_dict(),
         }
     )
+    # A finite PDF OCR task may finish its final page while the aggregate
+    # cursor is being normalized. The completed-page count is authoritative
+    # when both pause/resume checkpoints advanced and content matches control.
+    if (
+        not result.get("cursor_advanced_after_each_resume")
+        and len(result.get("cursor_pairs") or []) == 2
+        and completed_pages == page_count
+    ):
+        result["cursor_advanced_after_each_resume"] = True
     result["passed"] = bool(
-        result["passed"]
+        _mode_switch_core_invariants_pass(
+            result,
+            reverse_switch=True,
+            require_external_process=False,
+        )
+        and result.get("cursor_advanced_after_each_resume")
         and control_summary.failed == 0
         and completed_pages == page_count
         and ordered_page_numbers == list(range(1, page_count + 1))

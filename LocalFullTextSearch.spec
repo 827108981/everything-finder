@@ -94,6 +94,18 @@ a = Analysis(
     excludes=[],
     noarchive=False,
 )
+
+# Codex's bundled Poppler runtime may be present on PATH while packaging.
+# PyInstaller can then resolve Qt6Core's Windows ICU dependency to Poppler's
+# incompatible private ICU build and place it at the application root. Qt
+# subsequently fails to import QtWidgets. Windows supplies the forwarding ICU
+# DLL expected by PySide6, so exclude only these accidentally collected files.
+_external_icu_names = {"icuuc.dll", "icudt78.dll"}
+a.binaries = [
+    entry
+    for entry in a.binaries
+    if Path(entry[0]).name.lower() not in _external_icu_names
+]
 pyz = PYZ(a.pure)
 
 exe = EXE(

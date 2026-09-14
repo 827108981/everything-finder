@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import pickle
+import sqlite3
+import time
 from pathlib import Path
+from unittest.mock import patch
+
 
 from local_full_text_search.core.database import DatabaseManager
 from local_full_text_search.config.defaults import AppSettings
@@ -159,6 +163,67 @@ def test_p0_01r_merge_is_blocked_by_failed_or_unconfirmed_page_and_idempotent(
     assert graph.confirm_merge(document_task_id, "merged-digest") is False
 
 
+def test_pdf_readiness_queries_never_acquire_the_database_writer_connection(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    database = DatabaseManager(tmp_path / "index.db")
+    database.initialize()
+    root_id = database.add_root(root)
+    file_id = _add_pdf(database, root_id, root / "readonly.pdf")
+    graph = PdfTaskGraphRepository(database)
+    document_task_id = graph.plan_document(
+        file_id=file_id,
+        run_id="run-readonly",
+        source_digest="sha256:readonly",
+        parser_version="pdf-v1",
+        pages=[PdfPagePlan(1, "one", 595.0, 842.0, False)],
+        ocr_config_fingerprint="ocr-v1",
+    )
+
+    # A PDF completion callback must still be able to observe state while a
+    # large unrelated FTS write owns the process-wide writer connection.
+    with patch.object(
+        database,
+        "connect",
+        side_effect=AssertionError("writer connection used"),
+    ):
+        readiness = graph.merge_readiness(document_task_id)
+
+    assert readiness.total_pages == 1
+    assert readiness.pending_pages == 1
+
+
+def test_pdf_confirmation_busy_retry_returns_quickly_and_keeps_spool(
+    tmp_path: Path,
+) -> None:
+    database = DatabaseManager(tmp_path / "index.db")
+    database.initialize()
+    manager = IndexManager(database, AppSettings())
+    spool = tmp_path / "page.pickle"
+    spool.write_bytes(b"durable-page-result")
+    confirmation = (1, spool, "digest")
+    manager._pdf_confirmation_buffers = {42: [confirmation]}
+
+    class BusyGraph:
+        def confirm_page_tasks(self, _confirmations, *, timeout_seconds):
+            assert timeout_seconds == 0.5
+            raise sqlite3.OperationalError("database is locked")
+
+    started = time.monotonic()
+    persisted = manager._flush_pdf_page_confirmations(
+        42,
+        BusyGraph(),
+        max_wait_seconds=0.1,
+    )
+
+    assert persisted is False
+    assert time.monotonic() - started < 1.0
+    assert manager._pdf_confirmation_buffers[42] == [confirmation]
+    assert spool.is_file()
+
+
 def test_p0_01r_page_confirmation_closes_the_active_attempt(
     tmp_path: Path,
 ) -> None:
@@ -202,6 +267,46 @@ def test_p0_01r_page_confirmation_closes_the_active_attempt(
         ).fetchone()
     assert attempt["status"] == "complete"
     assert attempt["finished_at"]
+
+
+def test_pdf_page_confirmation_rejection_logs_actual_task_snapshot(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    database = DatabaseManager(tmp_path / "index.db")
+    database.initialize()
+    root_id = database.add_root(root)
+    file_id = _add_pdf(database, root_id, root / "rejected.pdf")
+    graph = PdfTaskGraphRepository(database)
+    document_task_id = graph.plan_document(
+        file_id=file_id,
+        run_id="run-rejected-confirm",
+        source_digest="sha256:rejected",
+        parser_version="pdf-v1",
+        pages=[PdfPagePlan(1, "one", 595.0, 842.0, False)],
+        ocr_config_fingerprint="ocr-v1",
+    )
+    page_task_id = graph.scheduled_page_tasks(document_task_id)[0].task_id
+    with database.connect() as connection:
+        connection.execute(
+            "UPDATE parse_tasks SET status = 'cancelled', error_code = 'USER_CANCELLED' WHERE id = ?",
+            (page_task_id,),
+        )
+    events: list[dict[str, object]] = []
+    with patch(
+        "local_full_text_search.core.pdf_task_graph.log_event",
+        side_effect=lambda event, **fields: events.append({"event": event, **fields}),
+    ):
+        graph.confirm_page_task(
+            page_task_id,
+            result_spool_path=tmp_path / "late.pickle",
+            result_digest="late-digest",
+        )
+    rejection = next(item for item in events if item["event"] == "pdf.page.confirmation.late_discarded")
+    assert rejection["actual_status"] == "cancelled"
+    assert rejection["actual_error_code"] == "USER_CANCELLED"
+    assert rejection["task_id"] == page_task_id
 
 
 def test_pdf_page_batch_confirmation_closes_all_tasks_in_one_operation(
@@ -259,6 +364,198 @@ def test_pdf_page_batch_confirmation_closes_all_tasks_in_one_operation(
     assert all(row["status"] == "complete" and row["confirmed_at"] for row in task_rows)
     assert len(attempt_rows) == 4
     assert all(row["status"] == "complete" for row in attempt_rows)
+
+
+def test_pdf_page_confirmation_recovers_skipped_running_state_and_is_idempotent(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    database = DatabaseManager(tmp_path / "index.db")
+    database.initialize()
+    root_id = database.add_root(root)
+    file_id = _add_pdf(database, root_id, root / "queued-confirm.pdf")
+    graph = PdfTaskGraphRepository(database)
+    document_task_id = graph.plan_document(
+        file_id=file_id,
+        run_id="run-queued-confirm",
+        source_digest="sha256:queued-confirm",
+        parser_version="pdf-v1",
+        pages=[PdfPagePlan(1, "one", 595.0, 842.0, False)],
+        ocr_config_fingerprint="ocr-v1",
+    )
+    page_task_id = graph.claim_page_tasks(
+        "slow-page-worker",
+        limit=1,
+        lease_seconds=30,
+    )[0].task_id
+    spool = tmp_path / "queued-page.pickle"
+    spool.write_bytes(b"queued-page-result")
+    digest = hashlib.sha256(spool.read_bytes()).hexdigest()
+
+    # The worker result can arrive while the best-effort running-state write
+    # was skipped by a busy database. Confirmation must still be authoritative.
+    graph.confirm_page_task(
+        page_task_id,
+        result_spool_path=spool,
+        result_digest=digest,
+    )
+    graph.confirm_page_task(
+        page_task_id,
+        result_spool_path=spool,
+        result_digest=digest,
+    )
+
+    with database.connect_read_only() as connection:
+        row = connection.execute(
+            "SELECT status, result_digest FROM parse_tasks WHERE id = ?",
+            (page_task_id,),
+        ).fetchone()
+    assert row["status"] == "complete"
+    assert row["result_digest"] == digest
+
+
+def test_pdf_page_confirmation_recovers_stale_task_with_late_worker_result(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    database = DatabaseManager(tmp_path / "index.db")
+    database.initialize()
+    root_id = database.add_root(root)
+    file_id = _add_pdf(database, root_id, root / "late-worker.pdf")
+    graph = PdfTaskGraphRepository(database)
+    document_task_id = graph.plan_document(
+        file_id=file_id,
+        run_id="run-late-worker",
+        source_digest="sha256:late-worker",
+        parser_version="pdf-v1",
+        pages=[PdfPagePlan(1, "one", 595.0, 842.0, False)],
+        ocr_config_fingerprint="ocr-v1",
+    )
+    page_task_id = graph.scheduled_page_tasks(document_task_id)[0].task_id
+    with database.connect() as connection:
+        connection.execute(
+            """
+            UPDATE parse_tasks
+            SET status = 'failed_retryable',
+                error_code = 'STALE_PARSE_TASK_RECOVERED',
+                error_message = 'worker heartbeat was misclassified'
+            WHERE id = ?
+            """,
+            (page_task_id,),
+        )
+    spool = tmp_path / "late-worker-result.pickle"
+    spool.write_bytes(b"late-worker-result")
+    digest = hashlib.sha256(spool.read_bytes()).hexdigest()
+
+    graph.confirm_page_task(
+        page_task_id,
+        result_spool_path=spool,
+        result_digest=digest,
+    )
+
+    with database.connect_read_only() as connection:
+        row = connection.execute(
+            "SELECT status, result_digest, error_code FROM parse_tasks WHERE id = ?",
+            (page_task_id,),
+        ).fetchone()
+    assert row["status"] == "complete"
+    assert row["result_digest"] == digest
+    assert row["error_code"] is None
+
+
+def test_pdf_page_stale_reconciliation_keeps_recent_no_worker_page_alive(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    database = DatabaseManager(tmp_path / "index.db")
+    database.initialize()
+    root_id = database.add_root(root)
+    file_id = _add_pdf(database, root_id, root / "slow-page.pdf")
+    graph = PdfTaskGraphRepository(database)
+    document_task_id = graph.plan_document(
+        file_id=file_id,
+        run_id="run-slow-page",
+        source_digest="sha256:slow-page",
+        parser_version="pdf-v1",
+        pages=[PdfPagePlan(1, "one", 595.0, 842.0, True)],
+        ocr_config_fingerprint="ocr-v1",
+    )
+    page_task_id = graph.claim_page_tasks(
+        "slow-page-worker",
+        limit=1,
+        lease_seconds=30,
+    )[0].task_id
+    with database.connect() as connection:
+        connection.execute(
+            """
+            UPDATE parse_tasks
+            SET started_at = '2026-09-03T09:05:00+00:00',
+                worker_pid = NULL
+            WHERE id = ?
+            """,
+            (page_task_id,),
+        )
+
+    recovered = database.reconcile_stale_parse_tasks(
+        stale_after_seconds=1,
+        no_worker_after_seconds=1,
+    )
+
+    assert recovered == 0
+    with database.connect_read_only() as connection:
+        assert connection.execute(
+            "SELECT status FROM parse_tasks WHERE id = ?",
+            (page_task_id,),
+        ).fetchone()["status"] == "running"
+
+
+def test_pdf_page_confirmation_recovers_converged_retryable_task(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    database = DatabaseManager(tmp_path / "index.db")
+    database.initialize()
+    root_id = database.add_root(root)
+    file_id = _add_pdf(database, root_id, root / "converged-confirm.pdf")
+    graph = PdfTaskGraphRepository(database)
+    document_task_id = graph.plan_document(
+        file_id=file_id,
+        run_id="run-converged-confirm",
+        source_digest="sha256:converged-confirm",
+        parser_version="pdf-v1",
+        pages=[PdfPagePlan(1, "one", 595.0, 842.0, False)],
+        ocr_config_fingerprint="ocr-v1",
+    )
+    page_task_id = graph.scheduled_page_tasks(document_task_id)[0].task_id
+    with database.connect() as connection:
+        connection.execute(
+            """
+            UPDATE parse_tasks
+            SET status = 'failed_retryable',
+                error_code = 'INDEX_RUN_ENDED_WITHOUT_TERMINAL_RESULT'
+            WHERE id = ?
+            """,
+            (page_task_id,),
+        )
+    spool = tmp_path / "converged-page.pickle"
+    spool.write_bytes(b"converged-page-result")
+
+    graph.confirm_page_task(
+        page_task_id,
+        result_spool_path=spool,
+        result_digest=hashlib.sha256(spool.read_bytes()).hexdigest(),
+    )
+
+    with database.connect_read_only() as connection:
+        status = connection.execute(
+            "SELECT status FROM parse_tasks WHERE id = ?",
+            (page_task_id,),
+        ).fetchone()["status"]
+    assert status == "complete"
 
 
 def test_p0_01r_changed_pdf_invalidates_even_completed_old_graph(

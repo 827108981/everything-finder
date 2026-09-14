@@ -6,7 +6,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 
 _condition = threading.Condition()
@@ -23,12 +23,17 @@ class SearchLease:
     query_id: str
     acquired_at: float
     _released: bool = False
+    _release_callback: Callable[[], None] | None = None
 
     def release(self) -> None:
         if self._released:
             return
         self._released = True
         _release_lease(self.lease_id)
+        callback = self._release_callback
+        self._release_callback = None
+        if callback is not None:
+            callback()
 
     @property
     def released(self) -> bool:
@@ -126,20 +131,29 @@ def begin_index_write(
         if max_wait_seconds is None
         else time.monotonic() + max(0.0, float(max_wait_seconds))
     )
+    from local_full_text_search.core.search_index_coordinator import (
+        get_search_index_coordinator,
+    )
+
+    coordinator = get_search_index_coordinator()
+    if not coordinator.try_begin_index_write():
+        return False
     global _active_index_writes
     with _condition:
         while _active_searches:
             if cancel_event is not None and cancel_event.is_set():
+                coordinator.end_index_write()
                 return False
             if deadline is None:
                 _condition.wait(timeout=0.1)
                 continue
             remaining = deadline - time.monotonic()
             if remaining <= 0:
+                coordinator.end_index_write()
                 return False
             _condition.wait(timeout=min(0.1, remaining))
         _active_index_writes += 1
-        return True
+    return True
 
 
 def end_index_write() -> None:
@@ -147,6 +161,15 @@ def end_index_write() -> None:
     with _condition:
         _active_index_writes = max(0, _active_index_writes - 1)
         _condition.notify_all()
+    try:
+        from local_full_text_search.core.search_index_coordinator import (
+            get_search_index_coordinator,
+        )
+
+        get_search_index_coordinator().end_index_write()
+    except Exception:
+        # Coordination bookkeeping must never mask the SQLite transaction.
+        pass
 
 
 def index_write_active() -> bool:

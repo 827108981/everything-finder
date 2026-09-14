@@ -2,11 +2,16 @@ from __future__ import annotations
 
 import json
 import hashlib
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from local_full_text_search.core.database import DatabaseManager, utc_now
+from local_full_text_search.services.logging_service import log_event
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -317,7 +322,9 @@ class PdfTaskGraphRepository:
         self,
         document_task_id: int,
     ) -> list[PdfPageTaskClaim]:
-        with self.database.connect() as con:
+        # This is a snapshot query.  Do not take the process-wide writer
+        # lease while an unrelated FTS transaction is in progress.
+        with self.database.connect_read_only(timeout_seconds=5.0) as con:
             rows = con.execute(
                 """
                 SELECT * FROM parse_tasks
@@ -356,7 +363,7 @@ class PdfTaskGraphRepository:
         self,
         document_task_id: int,
     ) -> list[tuple[int, str, Path, str]]:
-        with self.database.connect() as con:
+        with self.database.connect_read_only(timeout_seconds=5.0) as con:
             rows = con.execute(
                 """
                 SELECT task_type, unit_key, spool_path, result_digest
@@ -389,32 +396,51 @@ class PdfTaskGraphRepository:
         *,
         result_spool_path: Path,
         result_digest: str,
+        timeout_seconds: float = 30.0,
     ) -> None:
         self.confirm_page_tasks(
-            [(task_id, result_spool_path, result_digest)]
+            [(task_id, result_spool_path, result_digest)],
+            timeout_seconds=timeout_seconds,
         )
 
     def confirm_page_tasks(
         self,
         confirmations: list[tuple[int, Path, str]],
+        *,
+        timeout_seconds: float = 30.0,
     ) -> None:
         """Confirm one worker batch with a single durable transaction."""
 
         if not confirmations:
             return
         now = utc_now()
-        with self.database.connect() as con:
+        with self.database.connect(timeout_seconds=timeout_seconds) as con:
             for task_id, result_spool_path, result_digest in confirmations:
+                log_event(
+                    "pdf.page.confirmation.requested",
+                    level=logging.DEBUG,
+                    component="pdf_task_graph",
+                    task_id=int(task_id),
+                    result_digest=str(result_digest),
+                    result_spool_path=str(result_spool_path),
+                )
                 updated = con.execute(
                     """
                     UPDATE parse_tasks
                     SET status = 'complete', confirmed_at = ?, finished_at = ?,
                         spool_path = ?, result_digest = ?, lease_owner = NULL,
                         lease_expires_at = NULL, progress_completed = 1,
-                        progress_total = 1, checkpoint_version = 1
+                        progress_total = 1, checkpoint_version = 1,
+                        error_code = NULL, error_message = NULL
                     WHERE id = ? AND task_type IN (
                         'pdf_native_page', 'pdf_ocr_page'
-                    ) AND status IN ('running', 'spooled')
+                    ) AND (
+                        status IN ('queued', 'running', 'spooled')
+                        OR (
+                            status = 'failed_retryable'
+                            AND error_code = 'INDEX_RUN_ENDED_WITHOUT_TERMINAL_RESULT'
+                        )
+                    )
                     """,
                     (
                         now,
@@ -425,9 +451,174 @@ class PdfTaskGraphRepository:
                     ),
                 )
                 if updated.rowcount != 1:
-                    raise RuntimeError(
-                        f"PDF page task cannot be confirmed: {task_id}"
+                    existing = con.execute(
+                        """
+                        SELECT status, result_digest, error_code FROM parse_tasks
+                        WHERE id = ? AND task_type IN (
+                            'pdf_native_page', 'pdf_ocr_page'
+                        )
+                        """,
+                        (int(task_id),),
+                    ).fetchone()
+                    if (
+                        existing is not None
+                        and str(existing["status"] or "") == "complete"
+                        and str(existing["result_digest"] or "") == result_digest
+                    ):
+                        log_event(
+                            "pdf.page.confirmation.idempotent",
+                            level=logging.INFO,
+                            component="pdf_task_graph",
+                            task_id=int(task_id),
+                            actual_status=str(existing["status"] or ""),
+                            stored_digest=str(existing["result_digest"] or ""),
+                            incoming_digest=str(result_digest),
+                        )
+                        continue
+                    if (
+                        existing is not None
+                        and str(existing["status"] or "") == "failed_retryable"
+                        and str(existing["error_code"] or "") in {
+                            "STALE_PARSE_TASK_RECOVERED",
+                            "INDEX_RUN_ENDED_WITHOUT_TERMINAL_RESULT",
+                        }
+                    ):
+                        recovered = con.execute(
+                            """
+                            UPDATE parse_tasks
+                            SET status = 'complete', confirmed_at = ?, finished_at = ?,
+                                spool_path = ?, result_digest = ?, lease_owner = NULL,
+                                lease_expires_at = NULL, progress_completed = 1,
+                                progress_total = 1, checkpoint_version = 1,
+                                error_code = NULL, error_message = NULL
+                            WHERE id = ? AND status = 'failed_retryable'
+                              AND error_code IN (
+                                  'STALE_PARSE_TASK_RECOVERED',
+                                  'INDEX_RUN_ENDED_WITHOUT_TERMINAL_RESULT'
+                              )
+                            """,
+                            (
+                                now,
+                                now,
+                                str(result_spool_path),
+                                str(result_digest),
+                                int(task_id),
+                            ),
+                        )
+                        if recovered.rowcount == 1:
+                            con.execute(
+                                """
+                                UPDATE parse_task_attempts
+                                SET status = 'complete', finished_at = ?,
+                                    error_code = NULL, error_message = NULL
+                                WHERE id = (
+                                    SELECT id FROM parse_task_attempts
+                                    WHERE task_id = ?
+                                    ORDER BY attempt_no DESC
+                                    LIMIT 1
+                                ) AND status IN ('running', 'spooled', 'interrupted')
+                                """,
+                                (now, int(task_id)),
+                            )
+                            log_event(
+                                "pdf.page.confirmation.recovered",
+                                level=logging.WARNING,
+                                component="pdf_task_graph",
+                                task_id=int(task_id),
+                                previous_status=str(existing["status"] or ""),
+                                previous_error_code=str(existing["error_code"] or ""),
+                                incoming_digest=str(result_digest),
+                                recovery_reason="late_worker_result",
+                            )
+                            continue
+                        existing = con.execute(
+                            "SELECT status, result_digest, error_code FROM parse_tasks WHERE id = ?",
+                            (int(task_id),),
+                        ).fetchone()
+                    if (
+                        existing is not None
+                        and str(existing["status"] or "") == "complete"
+                    ):
+                        # A second attempt can finish after the first result
+                        # was committed. Keep the first committed result and
+                        # discard the late duplicate instead of aborting the
+                        # complete root.
+                        log_event(
+                            "pdf.page.confirmation.duplicate_discarded",
+                            level=logging.WARNING,
+                            component="pdf_task_graph",
+                            task_id=int(task_id),
+                            stored_digest=str(existing["result_digest"] or ""),
+                            incoming_digest=str(result_digest),
+                            actual_status=str(existing["status"] or ""),
+                        )
+                        Path(result_spool_path).unlink(missing_ok=True)
+                        continue
+                    if (
+                        existing is not None
+                        and str(existing["status"] or "") in {
+                            "cancelled",
+                            "invalidated",
+                            "failed",
+                        }
+                    ):
+                        log_event(
+                            "pdf.page.confirmation.late_discarded",
+                            level=logging.WARNING,
+                            component="pdf_task_graph",
+                            task_id=int(task_id),
+                            actual_status=str(existing["status"] or ""),
+                            actual_error_code=str(existing["error_code"] or ""),
+                            incoming_digest=str(result_digest),
+                        )
+                        Path(result_spool_path).unlink(missing_ok=True)
+                        continue
+                    snapshot = con.execute(
+                        """
+                        SELECT id, file_id, parent_task_id, run_id, task_type,
+                               unit_key, status, error_code, error_message,
+                               lease_owner, lease_expires_at, confirmed_at,
+                               spool_path, result_digest, started_at, finished_at
+                        FROM parse_tasks WHERE id = ?
+                        """,
+                        (int(task_id),),
+                    ).fetchone()
+                    fields = {
+                        "task_id": int(task_id),
+                        "result_digest": str(result_digest),
+                        "result_spool_path": str(result_spool_path),
+                        "actual_status": str(snapshot["status"] or "") if snapshot else "missing",
+                        "task_type": str(snapshot["task_type"] or "") if snapshot else "",
+                        "file_id": int(snapshot["file_id"]) if snapshot else None,
+                        "parent_task_id": int(snapshot["parent_task_id"]) if snapshot and snapshot["parent_task_id"] is not None else None,
+                        "run_id": str(snapshot["run_id"] or "") if snapshot else "",
+                        "stored_digest": str(snapshot["result_digest"] or "") if snapshot else "",
+                        "error_code": str(snapshot["error_code"] or "") if snapshot else "",
+                        "lease_owner": str(snapshot["lease_owner"] or "") if snapshot else "",
+                        "lease_expires_at": str(snapshot["lease_expires_at"] or "") if snapshot else "",
+                        "confirmed_at": str(snapshot["confirmed_at"] or "") if snapshot else "",
+                        "started_at": str(snapshot["started_at"] or "") if snapshot else "",
+                        "finished_at": str(snapshot["finished_at"] or "") if snapshot else "",
+                    }
+                    log_event(
+                        "pdf.page.confirmation.rejected",
+                        level=logging.ERROR,
+                        component="pdf_task_graph",
+                        **fields,
                     )
+                    raise RuntimeError(
+                        "PDF page task cannot be confirmed: "
+                        f"{task_id}; actual_status={fields['actual_status']}; "
+                        f"stored_digest={fields['stored_digest']}; "
+                        f"incoming_digest={fields['result_digest']}"
+                    )
+                log_event(
+                    "pdf.page.confirmation.completed",
+                    level=logging.DEBUG,
+                    component="pdf_task_graph",
+                    task_id=int(task_id),
+                    result_digest=str(result_digest),
+                )
                 con.execute(
                     """
                     UPDATE parse_task_attempts
@@ -438,12 +629,20 @@ class PdfTaskGraphRepository:
                         WHERE task_id = ?
                         ORDER BY attempt_no DESC
                         LIMIT 1
-                    ) AND status IN ('running', 'spooled')
+                    ) AND status IN ('running', 'spooled', 'interrupted')
                     """,
                     (now, int(task_id)),
                 )
 
     def fail_page_task(self, task_id: int, error_code: str, message: str) -> None:
+        log_event(
+            "pdf.page.failed",
+            level=logging.ERROR,
+            component="pdf_task_graph",
+            task_id=int(task_id),
+            error_code=str(error_code),
+            error_message=str(message)[:1000],
+        )
         with self.database.connect() as con:
             con.execute(
                 """
@@ -484,6 +683,12 @@ class PdfTaskGraphRepository:
             )
 
     def requeue_page_task(self, task_id: int) -> None:
+        log_event(
+            "pdf.page.requeued",
+            level=logging.WARNING,
+            component="pdf_task_graph",
+            task_id=int(task_id),
+        )
         with self.database.connect() as con:
             con.execute(
                 """
@@ -629,7 +834,7 @@ class PdfTaskGraphRepository:
         }
 
     def ready_document_task_ids(self) -> list[int]:
-        with self.database.connect() as con:
+        with self.database.connect_read_only(timeout_seconds=5.0) as con:
             rows = con.execute(
                 """
                 SELECT parent.id
@@ -652,7 +857,7 @@ class PdfTaskGraphRepository:
         return [int(row["id"]) for row in rows]
 
     def merge_task_id(self, document_task_id: int) -> int | None:
-        with self.database.connect() as con:
+        with self.database.connect_read_only(timeout_seconds=5.0) as con:
             row = con.execute(
                 """
                 SELECT id FROM parse_tasks
@@ -665,7 +870,10 @@ class PdfTaskGraphRepository:
 
     def merge_readiness(self, document_task_id: int) -> PdfMergeReadiness:
         placeholders = ",".join("?" for _ in self.PAGE_TASK_TYPES)
-        with self.database.connect() as con:
+        # This query only observes page state.  Using connect() here made a
+        # PDF completion callback wait on the global writer lock and turn a
+        # long FTS write into a root-level "database is locked" failure.
+        with self.database.connect_read_only(timeout_seconds=5.0) as con:
             row = con.execute(
                 f"""
                 SELECT COUNT(*) AS total,

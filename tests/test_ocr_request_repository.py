@@ -340,6 +340,68 @@ def test_ocr_confirmation_lock_does_not_restart_search_scope(
     )
 
 
+def test_ocr_claim_lock_does_not_abort_search_scope(tmp_path: Path) -> None:
+    manager = IndexManager(
+        DatabaseManager(tmp_path / "index.db"),
+        AppSettings(),
+    )
+    job = ParseJob(
+        file_id=1,
+        file_path=tmp_path / "locked.jpg",
+        task_id=7,
+        lane="ocr",
+        ocr_request_id=42,
+    )
+
+    with (
+        patch.object(
+            OcrRequestRepository,
+            "claim_specific",
+            side_effect=sqlite3.OperationalError("database is locked"),
+        ) as claim,
+        patch("local_full_text_search.core.index_manager.time.sleep") as sleep,
+    ):
+        manager._claim_submitted_ocr_requests([job], [7], "run")
+
+    assert claim.call_count == 4
+    assert job.ocr_request_owner == ""
+    assert [call.args[0] for call in sleep.call_args_list] == [0.05, 0.1, 0.2]
+    assert all(
+        call.kwargs["timeout_seconds"] == 0.25
+        for call in claim.call_args_list
+    )
+
+
+def test_unclaimed_ocr_result_does_not_raise_on_confirmation(
+    tmp_path: Path,
+) -> None:
+    manager = IndexManager(
+        DatabaseManager(tmp_path / "index.db"),
+        AppSettings(),
+    )
+    source = tmp_path / "unclaimed.jpg"
+    job = ParseJob(
+        file_id=1,
+        file_path=source,
+        task_id=7,
+        lane="ocr",
+        ocr_request_id=42,
+        ocr_request_owner="",
+    )
+    outcome = ParseOutcome(
+        file_id=1,
+        file_path=source,
+        blocks=[],
+        parser_name="image_ocr",
+        status="success",
+    )
+
+    with patch.object(OcrRequestRepository, "confirm") as confirm:
+        manager._update_ocr_request_for_outcome(job, outcome)
+
+    confirm.assert_not_called()
+
+
 def test_ocr_confirmation_non_lock_database_error_still_propagates(
     tmp_path: Path,
 ) -> None:

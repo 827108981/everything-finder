@@ -10,6 +10,7 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 
 from local_full_text_search.config.defaults import AppSettings
 from local_full_text_search.core.database import DatabaseManager
+from local_full_text_search.core.index_generation_store import IndexGenerationStore
 from local_full_text_search.core.search_engine import SearchEngine
 from local_full_text_search.models.content_block import ContentBlock
 from local_full_text_search.models.search_query import SearchQuery
@@ -18,10 +19,27 @@ from local_full_text_search.ui.main_window import FailedPage, MainWindow, PAGE_I
 from local_full_text_search.workers.scope_exclusion_worker import (
     ScopeExclusionWorker,
 )
+from local_full_text_search.workers.scan_worker import ScanWorker
 
 
 def _app() -> QApplication:
     return QApplication.instance() or QApplication([])
+
+
+def test_scan_worker_emits_failure_for_keyboard_interrupt(monkeypatch, tmp_path: Path) -> None:
+    worker = ScanWorker(tmp_path / "search_index.db", AppSettings(enable_ocr=False))
+    monkeypatch.setattr(
+        worker.generation_store,
+        "begin_candidate",
+        lambda: (_ for _ in ()).throw(KeyboardInterrupt()),
+    )
+    failures: list[str] = []
+    worker.failed.connect(failures.append)
+
+    worker.run()
+
+    assert failures
+    assert "KeyboardInterrupt" in failures[0]
 
 
 def _scope_database(
@@ -235,6 +253,60 @@ def test_force_complete_worker_repairs_zero_blocker_residual_state(
     ).total_confirmed == 1
 
 
+def test_scope_worker_handles_report_only_blocker_without_control_row(
+    tmp_path: Path,
+) -> None:
+    _app()
+    database = DatabaseManager(tmp_path / "index_control.db")
+    database.initialize()
+    generation_base = tmp_path / "search_index.db"
+    store = IndexGenerationStore(generation_base)
+    store.write_failure_report(
+        {
+            "candidate_generation": 3,
+            "published_partial": True,
+            "readiness": {
+                "blocking_files": 1,
+                "blocking_status_counts": {"skipped": 1},
+            },
+            "blocking_files": [
+                {
+                    "id": 2320,
+                    "path": r"E:\blocked.zip",
+                    "parse_status": "skipped",
+                    "parse_error_code": "ZIP_FILE_COUNT_LIMIT",
+                }
+            ],
+        }
+    )
+    worker = ScopeExclusionWorker(
+        database.db_path,
+        [2320],
+        reason="manual report-only exclusion",
+        operation_source="test",
+        force_complete=True,
+        generation_base_path=generation_base,
+        report_only_file_ids=[2320],
+    )
+    results: list[dict[str, object]] = []
+    failures: list[str] = []
+    worker.finished.connect(results.append)
+    worker.failed.connect(failures.append)
+
+    worker.run()
+
+    assert failures == []
+    assert len(results) == 1
+    assert results[0]["report_only_excluded_files"] == 1
+    assert results[0]["excluded_files"] == 1
+    payload = store.read_failure_report()
+    assert payload is not None
+    assert payload["blocking_files"] == []
+    assert payload["excluded_files"][0]["id"] == 2320
+    with database.connect_read_only() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM files").fetchone()[0] == 0
+
+
 def test_failed_page_shows_busy_progress_and_disables_conflicting_actions() -> None:
     _app()
     page = FailedPage()
@@ -310,7 +382,10 @@ def test_main_window_background_exclusion_cleans_thread_state(
     assert window.exclusion_worker is None
     assert window.failed_page.exclusion_running is False
     assert window.stack.currentIndex() == PAGE_INDEX["search"]
-    assert window.search_page.index_ready() is True
+    # The split-generation contract does not expose an operational/control
+    # database as a searchable snapshot.  Search becomes available only after
+    # a published generation exists.
+    assert window.search_page.index_ready() is False
     window.close()
 
 

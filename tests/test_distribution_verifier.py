@@ -36,7 +36,7 @@ def test_release_documents_do_not_clutter_the_package_root(tmp_path) -> None:
     (package / "本地多格式全文搜索工具.exe").write_bytes(b"exe")
     docs = tmp_path / "docs"
     docs.mkdir()
-    for name in ("启动与分发说明.md", "首次全量索引性能优化验证报告-20260730.md"):
+    for name in ("启动与分发说明.md", "当前实现进度与注意事项.md"):
         (docs / name).write_text(name, encoding="utf-8")
     pdf_dir = tmp_path / "output" / "pdf"
     pdf_dir.mkdir(parents=True)

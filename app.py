@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import multiprocessing
 import json
+import logging
 import os
 import shutil
 import sqlite3
@@ -14,7 +15,10 @@ from dataclasses import asdict
 from importlib import resources
 from pathlib import Path
 
-from local_full_text_search.services.startup_diagnostics import StartupDiagnostics
+from local_full_text_search.services.startup_diagnostics import (
+    StartupDiagnostics,
+    run_process_monitor,
+)
 
 
 INDEX_STATUS_LAYOUT_CASES = (
@@ -22,8 +26,7 @@ INDEX_STATUS_LAYOUT_CASES = (
     (1280, 800, 1.25, "ocr_running"),
     (1280, 800, 1.50, "ocr_running"),
     (1366, 768, 1.00, "pausing"),
-    (1920, 1080, 1.50, "paused_switched"),
-)
+    (1920, 1080, 1.50, "paused_switched"),)
 
 
 def load_application_dependencies() -> None:
@@ -76,7 +79,7 @@ def run_self_test() -> int:
 
 
 def run_partial_search_validation() -> int:
-    """Verify that a durable partial projection remains searchable."""
+    """Verify that an incomplete projection is withheld from ordinary search."""
 
     result_path = Path("partial_search_validation_result.json")
     try:
@@ -100,22 +103,27 @@ def run_partial_search_validation() -> int:
             manager = IndexManager(database, settings)
             first = manager.index_root(root_id)
             readiness = database.index_readiness()
-            page = SearchEngine(database).search(
-                SearchQuery(
-                    text="PARTIAL_SEARCH_VALIDATION_HIT",
-                    mode="exact",
-                    search_filename=False,
-                    search_path=False,
-                    search_content=True,
+            try:
+                SearchEngine(database).search(
+                    SearchQuery(
+                        text="PARTIAL_SEARCH_VALIDATION_HIT",
+                        mode="exact",
+                        search_filename=False,
+                        search_path=False,
+                        search_content=True,
+                    )
                 )
-            )
+            except Exception:
+                page = None
+            else:
+                page = True
             second = manager.index_root(root_id)
             passed = bool(
                 first.indexed == 1
                 and first.failed == 1
                 and not readiness["ready"]
-                and readiness["search_available"]
-                and page.total_confirmed == 1
+                and not readiness["search_available"]
+                and page is None
                 and second.indexed == 0
                 and second.failed == 0
             )
@@ -124,7 +132,7 @@ def run_partial_search_validation() -> int:
                 "first": first.to_dict(),
                 "second": second.to_dict(),
                 "readiness": readiness,
-                "search_hits": page.total_confirmed,
+                "search_blocked": page is None,
             }
         result_path.write_text(
             json.dumps(payload, ensure_ascii=False, indent=2),
@@ -138,6 +146,156 @@ def run_partial_search_validation() -> int:
             encoding="utf-8",
         )
         print(f"PARTIAL_SEARCH_VALIDATION_FAILED: {exc}")
+        return 1
+
+
+def run_search_index_coordination_validation() -> int:
+    """Exercise strict search gating while an index run is still active."""
+
+    result_path = Path("search_index_coordination_validation_result.json")
+    try:
+        from local_full_text_search.core.search_index_coordinator import (
+            get_search_index_coordinator,
+        )
+
+        with tempfile.TemporaryDirectory(prefix="lfts_coordination_") as tmp:
+            base = Path(tmp)
+            root = base / "files"
+            root.mkdir()
+            for index in range(40):
+                (root / f"document-{index:03}.txt").write_text(
+                    f"真空泵 校准流程 吸光检测 coordination three word hit {index}",
+                    encoding="utf-8",
+                )
+            db = DatabaseManager(base / "index.db")
+            db.initialize()
+            root_id = db.add_root(root)
+            settings = AppSettings(enable_ocr=False, parser_workers=1)
+            manager = IndexManager(db, settings)
+            index_started = threading.Event()
+            index_finished = threading.Event()
+            original_progress = lambda payload: None
+
+            def progress(payload: object) -> None:
+                if isinstance(payload, dict) and str(payload.get("stage")) in {
+                    "planning", "parsing", "indexing", "writing"
+                }:
+                    index_started.set()
+                original_progress(payload)
+
+            index_error: list[str] = []
+
+            def run_index() -> None:
+                try:
+                    manager.index_root(root_id, progress_callback=progress)
+                except Exception as exc:
+                    index_error.append(f"{type(exc).__name__}: {exc}")
+                finally:
+                    index_finished.set()
+
+            index_thread = threading.Thread(target=run_index, name="validation-index")
+            index_thread.start()
+            index_started.wait(timeout=5)
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                if int(db.quick_index_readiness().get("active_runs") or 0) > 0:
+                    break
+                time.sleep(0.02)
+            running_readiness = db.quick_index_readiness()
+            search_done = {
+                "two_char": threading.Event(),
+                "two_words": threading.Event(),
+                "three_words": threading.Event(),
+            }
+            search_results: dict[str, object] = {}
+            search_errors: dict[str, str] = {}
+            search_elapsed: dict[str, int] = {}
+
+            def run_search(label: str, text: str, mode: str = "exact") -> None:
+                started = time.perf_counter()
+                try:
+                    search_results[label] = SearchEngine(db).search(
+                        SearchQuery(text=text, mode=mode)
+                    )
+                except Exception as exc:
+                    search_errors[label] = f"{type(exc).__name__}: {exc}"
+                finally:
+                    search_elapsed[label] = int((time.perf_counter() - started) * 1000)
+                    search_done[label].set()
+
+            search_threads = [
+                threading.Thread(
+                    target=run_search,
+                    args=("two_char", "真空"),
+                    name="validation-search-two-char",
+                ),
+                threading.Thread(
+                    target=run_search,
+                    args=("two_words", "真空 校准", "all"),
+                    name="validation-search-two-words",
+                ),
+                threading.Thread(
+                    target=run_search,
+                    args=("three_words", "真空 校准 吸光", "all"),
+                    name="validation-search-three-words",
+                ),
+            ]
+            for thread in search_threads:
+                thread.start()
+            time.sleep(0.25)
+            searches_completed_while_indexing = any(
+                event.is_set() for event in search_done.values()
+            ) and not index_finished.is_set()
+            index_thread.join(timeout=60)
+            if index_thread.is_alive():
+                raise TimeoutError("index validation did not finish")
+            for thread in search_threads:
+                thread.join(timeout=30)
+            final = db.search_projection_readiness()
+            two_char = search_results.get("two_char")
+            two_words = search_results.get("two_words")
+            three_words = search_results.get("three_words")
+            if two_char is None or two_words is None or three_words is None:
+                raise RuntimeError(f"concurrent search errors: {search_errors}")
+            query_time_limit_ms = 2_000
+            coordinator = get_search_index_coordinator().snapshot()
+            passed = bool(
+                not index_error
+                and not searches_completed_while_indexing
+                and running_readiness.get("search_available") is False
+                and final.get("ready") is True
+                and two_char.total_confirmed == 40
+                and two_words.total_confirmed == 40
+                and three_words.total_confirmed == 40
+                and two_char.elapsed_ms < query_time_limit_ms
+                and two_words.elapsed_ms < query_time_limit_ms
+                and three_words.elapsed_ms < query_time_limit_ms
+                and coordinator.deferred_write_count == 0
+            )
+            payload = {
+                "passed": passed,
+                "index_started": index_started.is_set(),
+                "index_finished": index_finished.is_set(),
+                "index_error": index_error,
+                "running_readiness": running_readiness,
+                "final_readiness": final,
+                "searches_completed_while_indexing": searches_completed_while_indexing,
+                "search_errors": search_errors,
+                "query_time_limit_ms": query_time_limit_ms,
+                "two_char": {"confirmed": two_char.total_confirmed, "elapsed_ms": search_elapsed.get("two_char", 0), "query_elapsed_ms": two_char.elapsed_ms},
+                "two_words": {"confirmed": two_words.total_confirmed, "elapsed_ms": search_elapsed.get("two_words", 0), "query_elapsed_ms": two_words.elapsed_ms},
+                "three_words": {"confirmed": three_words.total_confirmed, "elapsed_ms": search_elapsed.get("three_words", 0), "query_elapsed_ms": three_words.elapsed_ms},
+                "coordinator": coordinator.to_dict(),
+            }
+        result_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"SEARCH_INDEX_COORDINATION_VALIDATION_{'OK' if passed else 'FAILED'}")
+        return 0 if passed else 1
+    except Exception as exc:
+        result_path.write_text(
+            json.dumps({"passed": False, "error": f"{type(exc).__name__}: {exc}"}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        print(f"SEARCH_INDEX_COORDINATION_VALIDATION_FAILED: {exc}")
         return 1
 
 
@@ -157,7 +315,15 @@ def run_ui_validation() -> int:
         from local_full_text_search.ui.preview_panel import PreviewPanel
         from local_full_text_search.ui.result_view import ResultCard
 
-        with tempfile.TemporaryDirectory(prefix="lfts_ui_validation_") as tmp:
+        # Qt can release the last SQLite-backed widget during interpreter
+        # teardown on Windows. Do not turn a successful render/layout check
+        # into a failure solely because that transient handle delays removal
+        # of the isolated validation directory; the OS releases it when this
+        # short-lived validation process exits.
+        with tempfile.TemporaryDirectory(
+            prefix="lfts_ui_validation_",
+            ignore_cleanup_errors=True,
+        ) as tmp:
             base = Path(tmp)
             settings_service = SettingsService(base / "settings.json")
             settings = AppSettings(enable_ocr=False, monitor_file_changes=False)
@@ -301,7 +467,18 @@ def run_ui_validation() -> int:
             paused_pixmap = window.grab()
             if not paused_pixmap.save(str(paused_index_image_path), "PNG"):
                 raise RuntimeError("Unable to save paused index UI screenshot")
-            window.switch_page("failed")
+            # Show the failed-file page without starting its asynchronous
+            # database snapshot. This validation supplies synthetic rows and
+            # must not race a real snapshot that can overwrite them or keep
+            # the isolated SQLite file open during temporary-dir cleanup.
+            window.stack.setCurrentIndex(2)
+            # The synthetic progress event above intentionally exercises the
+            # running-state banner. Clear that state before validating the
+            # failed-file actions so their enabled/disabled assertions model
+            # an idle management page rather than an active scan.
+            window.failed_page.set_index_running(False)
+            window.failed_page.set_database_migration_running(False)
+            window.failed_page.set_exclusion_running(False)
             window.failed_page.set_rows(
                 [
                     {
@@ -418,7 +595,7 @@ def run_ui_validation() -> int:
             app.processEvents()
             if window.settings_page.database_migrate_button.text() != "迁移数据库":
                 raise RuntimeError("Settings UI did not expose database migration")
-            if str(db.db_path.resolve()) not in window.settings_page.database_path_value.text():
+            if str(db.db_path.parent.resolve()) not in window.settings_page.database_path_value.text():
                 raise RuntimeError("Settings UI did not display the active database path")
             if "schema v" not in window.settings_page.database_schema_value.text():
                 raise RuntimeError("Settings UI did not display the database schema")
@@ -744,7 +921,16 @@ def run_schema_v4_validation() -> int:
             legacy_token_count = 250_000
             with db.connect() as con:
                 block_id = int(con.execute("SELECT id FROM content_blocks LIMIT 1").fetchone()[0])
-                con.execute("DROP INDEX idx_short_tokens_block")
+                con.execute(
+                    """
+                    CREATE TABLE short_tokens (
+                        token TEXT NOT NULL,
+                        block_id INTEGER NOT NULL,
+                        position_count INTEGER DEFAULT 1,
+                        PRIMARY KEY(token, block_id)
+                    )
+                    """
+                )
                 con.executemany(
                     "INSERT INTO short_tokens(token, block_id) VALUES (?, ?)",
                     ((f"legacy-{index}", block_id) for index in range(legacy_token_count)),
@@ -756,22 +942,16 @@ def run_schema_v4_validation() -> int:
             migrated.initialize()
             migration_ms = int((time.perf_counter() - migration_started) * 1000)
             with migrated.connect() as con:
-                token_rows = int(con.execute("SELECT COUNT(*) FROM short_tokens").fetchone()[0])
                 version = int(con.execute("PRAGMA user_version").fetchone()[0])
-                indexes = {
-                    str(row["name"]) for row in con.execute("PRAGMA index_list(short_tokens)")
-                }
-                plan = " ".join(
-                    str(row["detail"])
-                    for row in con.execute(
-                        "EXPLAIN QUERY PLAN DELETE FROM short_tokens WHERE block_id = ?",
-                        (block_id,),
-                    )
+                legacy_table = int(
+                    con.execute(
+                        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'short_tokens'"
+                    ).fetchone()[0]
                 )
-            if token_rows != 0 or version != 4:
-                raise RuntimeError(f"Unexpected migration state: tokens={token_rows}; version={version}")
-            if "idx_short_tokens_block" not in indexes or "idx_short_tokens_block" not in plan:
-                raise RuntimeError(f"Missing block lookup index: indexes={indexes}; plan={plan}")
+            if legacy_table != 0 or version != SCHEMA_VERSION:
+                raise RuntimeError(f"Unexpected migration state: legacy_table={legacy_table}; version={version}")
+            if list(base.glob("*.short2.db")):
+                raise RuntimeError("Schema-v4 validation unexpectedly created a short2 sidecar")
             if migrated.requires_full_rebuild():
                 raise RuntimeError("Schema-v4 migration incorrectly forced a content reparse")
 
@@ -1820,7 +2000,6 @@ def run_field_reindex_validation(db_path: Path, settings_path: Path) -> int:
         report = db.integrity_report()
         with db.connect() as con:
             version = int(con.execute("PRAGMA user_version").fetchone()[0])
-            short_tokens = int(con.execute("SELECT COUNT(*) FROM short_tokens").fetchone()[0])
             blocks = int(con.execute("SELECT COUNT(*) FROM content_blocks").fetchone()[0])
             fts_rows = int(con.execute("SELECT COUNT(*) FROM content_fts").fetchone()[0])
             latest_run = con.execute(
@@ -1844,8 +2023,8 @@ def run_field_reindex_validation(db_path: Path, settings_path: Path) -> int:
             } if latest_run is not None else {}
         if summary.cancelled or summary.failed:
             raise RuntimeError(f"Real update reported failures: {summary}")
-        if version != 4 or short_tokens != 0:
-            raise RuntimeError(f"Migration incomplete: version={version}; short_tokens={short_tokens}")
+        if version != SCHEMA_VERSION:
+            raise RuntimeError(f"Migration incomplete: version={version}")
         if latest_run is None or str(latest_run["status"]) != "complete":
             raise RuntimeError(f"Latest run did not complete: {dict(latest_run or {})}")
         if fts_rows != blocks:
@@ -2356,7 +2535,56 @@ def apply_light_theme(app: object) -> None:
         pass
 
 
+_QT_MESSAGE_HANDLER = None
+
+
+def install_qt_message_logging(diagnostics: StartupDiagnostics) -> None:
+    """Keep Qt/plugin messages alongside Python startup diagnostics."""
+
+    global _QT_MESSAGE_HANDLER
+    from PySide6.QtCore import QtMsgType, qInstallMessageHandler
+
+    levels = {
+        QtMsgType.QtDebugMsg: logging.DEBUG,
+        QtMsgType.QtInfoMsg: logging.INFO,
+        QtMsgType.QtWarningMsg: logging.WARNING,
+        QtMsgType.QtCriticalMsg: logging.ERROR,
+        QtMsgType.QtFatalMsg: logging.CRITICAL,
+    }
+
+    def handler(mode: object, context: object, message: str) -> None:
+        try:
+            level = levels.get(mode, logging.WARNING)
+            file_name = str(getattr(context, "file", "") or "")
+            line = getattr(context, "line", 0) or 0
+            function = str(getattr(context, "function", "") or "")
+            logging.getLogger("qt").log(
+                level,
+                "Qt message: %s file=%s line=%s function=%s",
+                str(message),
+                file_name,
+                line,
+                function,
+            )
+        except Exception:
+            # A diagnostic hook must never become the reason the GUI exits.
+            pass
+
+    _QT_MESSAGE_HANDLER = handler
+    qInstallMessageHandler(handler)
+    diagnostics.runtime_event("QT_MESSAGE_HANDLER_INSTALLED")
+
+
 def main() -> int:
+    if "--monitor-parent" in sys.argv:
+        index = sys.argv.index("--monitor-parent")
+        if index + 3 >= len(sys.argv):
+            return 2
+        return run_process_monitor(
+            int(sys.argv[index + 1]),
+            Path(sys.argv[index + 2]),
+            Path(sys.argv[index + 3]),
+        )
     if "--run-usn-service" in sys.argv:
         from local_full_text_search.services.usn_service import run_service_dispatcher
 
@@ -2371,6 +2599,8 @@ def main() -> int:
         return remove_service()
     diagnostics = StartupDiagnostics()
     diagnostics.begin()
+    diagnostics.verify_crash_dump_configuration()
+    diagnostics.start_external_monitor()
 
     def finish_command(result: int) -> int:
         diagnostics.mark_completed()
@@ -2387,6 +2617,8 @@ def main() -> int:
             return finish_command(run_self_test())
         if "--validate-partial-search" in sys.argv:
             return finish_command(run_partial_search_validation())
+        if "--validate-search-index-coordination" in sys.argv:
+            return finish_command(run_search_index_coordination_validation())
         if "--validate-core" in sys.argv:
             return finish_command(run_core_validation())
         if "--validate-process-pool" in sys.argv:
@@ -2547,17 +2779,28 @@ def main() -> int:
         )
         from local_full_text_search.ui.main_window import MainWindow
         diagnostics.stage_completed()
+    except KeyboardInterrupt:
+        diagnostics.mark_interrupted(
+            "IDE_OR_CONSOLE_INTERRUPT",
+            stage=diagnostics.current_stage,
+        )
+        return 130
     except Exception as exc:
         diagnostics.stage_failed(diagnostics.current_stage, exc)
         diagnostics.show_native_error("本地全文搜索启动失败", diagnostics.format_error_message(exc))
         return 2
+    window = None
+    instance_guard = None
     try:
         diagnostics.stage_started("检查重复启动")
         app = QApplication(sys.argv)
         app.setApplicationName(APP_DISPLAY_NAME)
+        install_qt_message_logging(diagnostics)
+        diagnostics.runtime_event("QAPPLICATION_CREATED")
         apply_light_theme(app)
         instance_guard = SingleInstanceGuard()
         if not instance_guard.acquire():
+            diagnostics.runtime_event("SECOND_INSTANCE_ACTIVATED")
             diagnostics.stage_completed()
             return finish_command(0)
         diagnostics.stage_completed()
@@ -2568,10 +2811,12 @@ def main() -> int:
         diagnostics.stage_started("解析数据库位置")
         database_location_service = DatabaseLocationService()
         database_location = database_location_service.resolve()
-        diagnostics.database_path = database_location.path
+        diagnostics.database_path = database_location.store_root
         diagnostics.stage_completed()
         diagnostics.stage_started("初始化索引数据库")
-        db = DatabaseManager(database_location.path)
+        generation_base_path = database_location.store_root / "search_index.db"
+        control_path = database_location.store_root / "index_control.db"
+        db = DatabaseManager(control_path)
         demo_mode = "--failure-fallback-demo" in sys.argv
         demo_root: Path | None = None
         if demo_mode:
@@ -2580,6 +2825,7 @@ def main() -> int:
                 raise RuntimeError("异常保底演示必须使用独立的 LFTS_APP_DATA_DIR")
             demo_root = reset_failure_fallback_demo(app_data, db.db_path)
         db.initialize(startup_fast=True)
+        migration_deferred = db.startup_migration_deferred
         if demo_root is not None:
             seed_failure_fallback_demo(db, demo_root)
         diagnostics.stage_completed()
@@ -2589,6 +2835,7 @@ def main() -> int:
             settings,
             settings_service,
             database_location_service=database_location_service,
+            generation_base_path=generation_base_path,
             defer_initial_refresh=True,
         )
         instance_guard.activation_requested.connect(
@@ -2597,13 +2844,28 @@ def main() -> int:
         if demo_mode:
             window.setWindowTitle(f"{APP_DISPLAY_NAME} - 异常保底演示（隔离数据）")
             window.switch_page("failed")
+        diagnostics.runtime_event("WINDOW_CONSTRUCTED")
+        diagnostics.runtime_event("WINDOW_SHOW_REQUESTED")
         window.show()
         diagnostics.stage_completed()
         diagnostics.mark_window_visible()
+        app.lastWindowClosed.connect(
+            lambda: diagnostics.runtime_event("LAST_WINDOW_CLOSED")
+        )
+        app.aboutToQuit.connect(
+            lambda: diagnostics.runtime_event("QT_ABOUT_TO_QUIT")
+        )
+        if migration_deferred:
+            window.top_bar.set_index_status(
+                "正在后台检查索引数据库，界面已可使用；搜索将在检查完成后恢复",
+                is_running=True,
+            )
         # Start the automatic incremental refresh only after Qt has painted the
         # main window; this keeps startup responsive while preserving the
         # user's existing committed search projection.
+        diagnostics.runtime_event("STARTUP_SCAN_SCHEDULE_REQUESTED")
         window.schedule_startup_incremental_scan()
+        diagnostics.runtime_event("STARTUP_SCAN_SCHEDULE_RETURNED")
         # Recoverable location/startup diagnostics are kept in the log and
         # surfaced in the non-modal status bar.  Do not block a usable window
         # with a warning dialog merely because a previous launch was slow.
@@ -2612,9 +2874,34 @@ def main() -> int:
         elif diagnostics.previous_failure:
             window.top_bar.set_index_status("已恢复上次未完成的启动状态", is_pending=True)
         try:
-            return app.exec()
+            diagnostics.runtime_event("EVENT_LOOP_ENTERED")
+            exit_code = app.exec()
+            diagnostics.runtime_event(
+                "EVENT_LOOP_RETURNED",
+                exit_code=int(exit_code),
+            )
+            diagnostics.mark_clean_exit("event_loop_returned", exit_code=exit_code)
+            return exit_code
         finally:
             instance_guard.close()
+    except KeyboardInterrupt:
+        # Ctrl+C is a normal operator action, but it bypasses Qt closeEvent and
+        # would otherwise leave search leases, workers, or SQLite connections
+        # alive while the interpreter is unwinding.
+        if window is not None:
+            try:
+                window.shutdown_for_interrupt()
+            except Exception:
+                diagnostics._write("INTERRUPT_CLEANUP_FAILED", {})
+        if instance_guard is not None:
+            instance_guard.close()
+        diagnostics.runtime_event("PYTHON_KEYBOARD_INTERRUPT", source="app_main")
+        diagnostics.mark_interrupted(
+            "IDE_OR_CONSOLE_INTERRUPT",
+            stage=diagnostics.current_stage,
+            exit_code=130,
+        )
+        return 130
     except Exception as exc:
         diagnostics.stage_failed(diagnostics.current_stage, exc)
         diagnostics.show_native_error("本地全文搜索启动失败", diagnostics.format_error_message(exc))

@@ -250,6 +250,7 @@ class OcrRequestRepository:
         *,
         worker_id: str,
         lease_seconds: int,
+        timeout_seconds: float = 30.0,
     ) -> list[int]:
         if not request_ids:
             return []
@@ -259,7 +260,7 @@ class OcrRequestRepository:
             now_dt + timedelta(seconds=max(1, int(lease_seconds)))
         ).isoformat()
         claimed: list[int] = []
-        with self.database.connect() as con:
+        with self.database.connect(timeout_seconds=timeout_seconds) as con:
             for request_id in request_ids:
                 updated = con.execute(
                     """

@@ -2,11 +2,21 @@ from __future__ import annotations
 
 import unittest
 
-from local_full_text_search.core.normalizer import make_context, normalize_text, parse_terms
+from local_full_text_search.core.normalizer import (
+    is_cjk_bigram,
+    make_context,
+    normalize_text,
+    parse_terms,
+)
 from local_full_text_search.ui.result_view import highlight_context
 
 
 class NormalizerTests(unittest.TestCase):
+    def test_cjk_bigram_rejects_ascii_and_mixed_pairs(self) -> None:
+        self.assertTrue(is_cjk_bigram("真空"))
+        self.assertFalse(is_cjk_bigram("ab"))
+        self.assertFalse(is_cjk_bigram("真a"))
+
     def test_nfkc_case_and_spaces(self) -> None:
         self.assertEqual(normalize_text(" ＢＳ-２８００Ｍ２ \n Test "), "bs-2800m2 test")
 
@@ -32,6 +42,12 @@ class NormalizerTests(unittest.TestCase):
         )
 
         self.assertIn("每套单机或M2机型", context)
+
+    def test_large_context_does_not_materialize_the_entire_block(self) -> None:
+        raw = ("prefix " * 2_000_000) + "NEEDLE near the end" + (" suffix" * 2_000_000)
+        context = make_context(raw, ["NEEDLE"], context_before=20, context_after=20)
+        self.assertIn("NEEDLE", context)
+        self.assertLessEqual(len(context), 64)
 
 
 if __name__ == "__main__":

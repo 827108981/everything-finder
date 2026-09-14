@@ -112,6 +112,7 @@ CACHE_DIR = APP_DATA_DIR / "cache"
 TEMP_DIR = APP_DATA_DIR / "temp"
 OCR_CACHE_DIR = CACHE_DIR / "ocr_cache"
 DB_PATH = DATA_DIR / "search_index.db"
+CONTROL_DB_PATH = DATA_DIR / "index_control.db"
 SETTINGS_PATH = CONFIG_DIR / "settings.json"
 
 

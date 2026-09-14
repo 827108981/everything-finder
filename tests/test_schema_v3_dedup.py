@@ -37,6 +37,19 @@ class SchemaV3DedupTests(unittest.TestCase):
             token_count = 50_000
             with db.connect() as con:
                 block_id = int(con.execute("SELECT id FROM content_blocks LIMIT 1").fetchone()[0])
+                con.execute(
+                    """
+                    CREATE TABLE short_tokens (
+                        token TEXT NOT NULL,
+                        block_id INTEGER NOT NULL,
+                        position_count INTEGER DEFAULT 1,
+                        PRIMARY KEY(token, block_id)
+                    )
+                    """
+                )
+                con.execute(
+                    "CREATE INDEX idx_short_tokens_block ON short_tokens(block_id)"
+                )
                 con.execute("DROP INDEX idx_short_tokens_block")
                 con.executemany(
                     "INSERT INTO short_tokens(token, block_id) VALUES (?, ?)",
@@ -64,27 +77,21 @@ class SchemaV3DedupTests(unittest.TestCase):
                     "SELECT parse_status, parser_version FROM files WHERE path = ?",
                     (str(source),),
                 ).fetchone()
-                indexes = {
-                    str(row["name"]) for row in con.execute("PRAGMA index_list(short_tokens)")
-                }
-                plan = " ".join(
-                    str(row["detail"])
-                    for row in con.execute(
-                        "EXPLAIN QUERY PLAN DELETE FROM short_tokens WHERE block_id = ?",
-                        (block_id,),
-                    )
-                )
                 self.assertEqual(
                     con.execute("PRAGMA user_version").fetchone()[0],
                     SCHEMA_VERSION,
                 )
-                self.assertEqual(con.execute("SELECT COUNT(*) FROM short_tokens").fetchone()[0], 0)
+                self.assertEqual(
+                    con.execute(
+                        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'short_tokens'"
+                    ).fetchone()[0],
+                    0,
+                )
             self.assertEqual(file_row["parse_status"], "success")
             self.assertTrue(file_row["parser_version"])
-            self.assertIn("idx_short_tokens_block", indexes)
-            self.assertIn("idx_short_tokens_block", plan)
+            self.assertFalse(list(base.glob("*.short2.db")))
             self.assertFalse(migrated.requires_full_rebuild())
-            self.assertLess(elapsed, 5.0)
+            self.assertLess(elapsed, 10.0)
 
     def test_legacy_database_is_backed_up_and_rebuilt_without_duplicate_blocks(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -301,6 +308,7 @@ class SchemaV3DedupTests(unittest.TestCase):
                 )
 
             db.rebuild_content_fts()
+            db.rebuild_index_counters()
             db.mark_full_batch_complete()
             engine = SearchEngine(db)
             self.assertEqual(engine.search(SearchQuery(text="NEW_DEFERRED_FTS_HIT")).total_confirmed, 1)

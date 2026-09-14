@@ -576,7 +576,13 @@ def _terminate_process_tree(pid: int) -> None:
         parent = psutil.Process(int(pid))
     except (psutil.Error, ValueError):
         return
-    descendants = parent.children(recursive=True)
+    # The process can exit between Process(pid) and children(). Cleanup is
+    # best-effort; a vanished process is already cleaned up and must not mask
+    # the worker result (or turn a normal completion into a root failure).
+    try:
+        descendants = parent.children(recursive=True)
+    except (psutil.Error, OSError, ValueError):
+        return
     processes = [*descendants, parent]
     for process in reversed(processes):
         try:
