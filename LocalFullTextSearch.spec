@@ -1,11 +1,28 @@
 # -*- mode: python ; coding: utf-8 -*-
 
 import os
+import json
+from datetime import datetime
 from pathlib import Path
 from PyInstaller.utils.hooks import collect_all, copy_metadata
 
 project_dir = Path.cwd()
 skip_ocr = os.environ.get("SKIP_OCR") == "1"
+build_timestamp = os.environ.get("LFTS_BUILD_TIMESTAMP") or datetime.now().strftime(
+    "%Y%m%d%H%M%S"
+)
+build_info_path = project_dir / "build" / "build_info.json"
+build_info_path.parent.mkdir(parents=True, exist_ok=True)
+build_info_path.write_text(
+    json.dumps(
+        {
+            "application_version": "1.6.15",
+            "build_timestamp": build_timestamp,
+        },
+        ensure_ascii=False,
+    ),
+    encoding="utf-8",
+)
 
 datas = [
     ("local_full_text_search/ui/resources", "local_full_text_search/ui/resources"),
@@ -15,6 +32,7 @@ datas = [
     ("使用说明.md", "."),
     ("配置说明.md", "."),
     ("数据库结构说明.md", "."),
+    (str(build_info_path), "."),
 ]
 binaries = []
 hiddenimports = [

@@ -7,6 +7,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable
 
 from local_full_text_search.core.errors import OperationCancelled
@@ -39,6 +40,33 @@ class WriteOperation:
     result: Any = None
 
 
+@dataclass(slots=True)
+class _DatabaseWriterState:
+    execution_lock: threading.Lock
+    active_lock: threading.Lock
+    active_operation_id: str | None = None
+    active_started_at: float = 0.0
+
+
+_WRITER_STATES_LOCK = threading.Lock()
+_WRITER_STATES: dict[str, _DatabaseWriterState] = {}
+
+
+def _writer_state_for(database_path: Path | str | None) -> _DatabaseWriterState:
+    if database_path is None:
+        key = f"anonymous:{uuid.uuid4().hex}"
+    else:
+        key = str(Path(database_path).resolve()).casefold()
+    with _WRITER_STATES_LOCK:
+        return _WRITER_STATES.setdefault(
+            key,
+            _DatabaseWriterState(
+                execution_lock=threading.Lock(),
+                active_lock=threading.Lock(),
+            ),
+        )
+
+
 class DatabaseWriteDispatcher:
     """Serialize application writes and preserve deferred work explicitly."""
 
@@ -46,11 +74,19 @@ class DatabaseWriteDispatcher:
         self,
         coordinator: SearchIndexCoordinator | None = None,
         *,
+        database_path: Path | str | None = None,
         retry_seconds: float = 2.0,
     ) -> None:
         self.coordinator = coordinator or get_search_index_coordinator()
         self.retry_seconds = max(0.0, float(retry_seconds))
         self._lock = threading.RLock()
+        # ``submit`` is synchronous for its caller, but it must still be a
+        # real per-dispatcher queue boundary.  Previously two callers could
+        # enter ``_run`` concurrently and both open SQLite write transactions,
+        # defeating the purpose of this class and producing process-local
+        # ``database is locked`` storms.
+        self.database_path = Path(database_path).resolve() if database_path else None
+        self._writer_state = _writer_state_for(database_path)
         self._pending: list[WriteOperation] = []
         self.coordinator.register_dispatcher(self)
 
@@ -61,6 +97,7 @@ class DatabaseWriteDispatcher:
         priority: int = 50,
         label: str = "",
         defer_if_search: bool = True,
+        max_wait_seconds: float | None = None,
     ) -> WriteOperation:
         item = WriteOperation(
             operation_id=f"db-write:{uuid.uuid4().hex}",
@@ -75,7 +112,11 @@ class DatabaseWriteDispatcher:
                 self._pending.append(item)
                 self._sort_pending()
                 return item
-        return self._run(item, allow_defer=defer_if_search)
+        return self._run(
+            item,
+            allow_defer=defer_if_search,
+            max_wait_seconds=max_wait_seconds,
+        )
 
     def drain(self) -> int:
         """Run deferred writes after the search lease has been released."""
@@ -86,7 +127,7 @@ class DatabaseWriteDispatcher:
                 if not self._pending:
                     break
                 item = self._pending.pop(0)
-            result = self._run(item, allow_defer=True)
+            result = self._run(item, allow_defer=True, max_wait_seconds=None)
             if result.status == COMMITTED:
                 completed += 1
             elif result.status in {DEFERRED, FAILED_RETRYABLE}:
@@ -113,7 +154,49 @@ class DatabaseWriteDispatcher:
         with self._lock:
             return tuple(self._pending)
 
+    def active_operation(self) -> dict[str, object] | None:
+        """Return a cheap in-memory snapshot for watchdog diagnostics."""
+
+        with self._writer_state.active_lock:
+            operation_id = self._writer_state.active_operation_id
+            started_at = self._writer_state.active_started_at
+            if not operation_id:
+                return None
+            return {
+                "operation_id": operation_id,
+                "database_path": str(self.database_path) if self.database_path else "",
+                "elapsed_ms": int(max(0.0, time.monotonic() - started_at) * 1000),
+            }
+
     def _run(
+        self,
+        item: WriteOperation,
+        *,
+        allow_defer: bool,
+        max_wait_seconds: float | None,
+    ) -> WriteOperation:
+        if max_wait_seconds is None:
+            acquired = self._writer_state.execution_lock.acquire()
+        else:
+            acquired = self._writer_state.execution_lock.acquire(
+                timeout=max(0.0, float(max_wait_seconds))
+            )
+        if not acquired:
+            item.status = DEFERRED
+            item.error = "dispatcher_busy_timeout"
+            return item
+        with self._writer_state.active_lock:
+            self._writer_state.active_operation_id = item.operation_id
+            self._writer_state.active_started_at = time.monotonic()
+        try:
+            return self._run_serialized(item, allow_defer=allow_defer)
+        finally:
+            with self._writer_state.active_lock:
+                self._writer_state.active_operation_id = None
+                self._writer_state.active_started_at = 0.0
+            self._writer_state.execution_lock.release()
+
+    def _run_serialized(
         self,
         item: WriteOperation,
         *,

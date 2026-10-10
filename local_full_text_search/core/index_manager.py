@@ -1014,7 +1014,7 @@ class IndexManager:
     ) -> None:
         self.db = db
         self.settings = settings
-        self.write_dispatcher = DatabaseWriteDispatcher()
+        self.write_dispatcher = DatabaseWriteDispatcher(database_path=db.db_path)
         self.run_context = dict(run_context or {})
         self._executor_lock = threading.Lock()
         self._executor_lifecycle_lock = threading.RLock()
@@ -1917,10 +1917,15 @@ class IndexManager:
                 merge_summary(summary, root_summary)
                 if root_summary is not None:
                     try:
-                        self.db.update_root_scan_time(
-                            int(root["id"]),
-                            "ready" if self.db.root_completion(int(root["id"]))["blocking"] == 0 else "incomplete",
-                            timeout_seconds=0.25,
+                        self._submit_index_metadata_write(
+                            lambda: self.db.update_root_scan_time(
+                                int(root["id"]),
+                                "ready" if self.db.root_completion(int(root["id"]))["blocking"] == 0 else "incomplete",
+                                timeout_seconds=0.25,
+                            ),
+                            label="root_state_completed",
+                            priority=25,
+                            max_wait_seconds=1.0,
                         )
                     except Exception as exc:
                         if _is_database_busy_error(exc):
@@ -2182,16 +2187,148 @@ class IndexManager:
     def _heartbeat_index_run(self, run_id: str, stop_event: threading.Event) -> None:
         while not stop_event.wait(5.0):
             try:
-                self.db.heartbeat_index_run(run_id)
+                dispatcher = getattr(self, "write_dispatcher", None)
+                active_operation = (
+                    dispatcher.active_operation()
+                    if dispatcher is not None
+                    else None
+                )
+                if active_operation is not None:
+                    # Heartbeat is liveness telemetry, not data progress. Do
+                    # not wait behind a large content/FTS transaction and do
+                    # not create another SQLite writer contender.
+                    log_event(
+                        "index.run.heartbeat.deferred",
+                        component="index_manager",
+                        run_id=run_id,
+                        database_path=str(self.db.db_path),
+                        reason="database_writer_busy",
+                        active_operation=active_operation,
+                    )
+                    continue
+                if dispatcher is not None:
+                    item = dispatcher.submit(
+                        lambda: self.db.heartbeat_index_run(run_id),
+                        priority=90,
+                        label="index_heartbeat",
+                        defer_if_search=False,
+                        max_wait_seconds=0.0,
+                    )
+                    if item.status != "COMMITTED":
+                        log_event(
+                            "index.run.heartbeat.deferred",
+                            component="index_manager",
+                            run_id=run_id,
+                            database_path=str(self.db.db_path),
+                            reason=item.error or item.status,
+                        )
+                        continue
+                else:
+                    # Compatibility fallback for isolated test doubles. The
+                    # production IndexManager always has a dispatcher.
+                    self.db.heartbeat_index_run(run_id)
                 log_event(
                     "index.run.heartbeat",
                     component="index_manager",
                     run_id=run_id,
                     database_path=str(self.db.db_path),
                     active_connections=self.db.active_connection_count(),
+                    data_commit_sequence=self.run_context.get(
+                        "data_commit_sequence", 0
+                    ),
                 )
             except Exception:
                 logger.debug("Unable to persist index heartbeat: run_id=%s", run_id, exc_info=True)
+
+    def _submit_index_metadata_write(
+        self,
+        operation: Callable[[], object],
+        *,
+        label: str,
+        priority: int = 80,
+        max_wait_seconds: float = 0.0,
+    ) -> bool:
+        """Submit non-content index metadata without contending with content writes.
+
+        Index metadata is useful for diagnostics, but it must not acquire a
+        second SQLite writer while a large parser result or FTS batch is being
+        committed.  The dispatcher returns immediately when its writer is
+        occupied; the next heartbeat/snapshot can try again.
+        """
+
+        dispatcher = getattr(self, "write_dispatcher", None)
+        if dispatcher is None:
+            try:
+                operation()
+                return True
+            except Exception:
+                logger.debug("Index metadata write failed: label=%s", label, exc_info=True)
+                return False
+        item = dispatcher.submit(
+            operation,
+            priority=int(priority),
+            label=str(label),
+            defer_if_search=False,
+            max_wait_seconds=max(0.0, float(max_wait_seconds)),
+        )
+        if item.status == "COMMITTED":
+            return True
+        log_event(
+            "index.metadata_write.deferred",
+            component="index_manager",
+            run_id=self.run_context.get("run_id"),
+            database_path=str(self.db.db_path),
+            operation=label,
+            reason=item.error or item.status,
+            priority=int(priority),
+        )
+        return False
+
+    def _submit_critical_write(
+        self,
+        operation: Callable[[], object],
+        *,
+        label: str,
+        max_wait_seconds: float = 10.0,
+    ) -> object:
+        """Run a correctness-critical write through the candidate dispatcher."""
+
+        dispatcher = getattr(self, "write_dispatcher", None)
+        if dispatcher is None:
+            return operation()
+        item = dispatcher.submit(
+            operation,
+            priority=10,
+            label=str(label),
+            defer_if_search=False,
+            max_wait_seconds=max(0.0, float(max_wait_seconds)),
+        )
+        if item.status != "COMMITTED":
+            raise RuntimeError(
+                f"关键数据库写入未提交：{label}; "
+                f"status={item.status}; error={item.error or 'unknown'}"
+            )
+        return item.result
+
+    def _submit_best_effort_write(
+        self,
+        operation: Callable[[], object],
+        *,
+        label: str,
+    ) -> bool:
+        """Try telemetry/recovery bookkeeping without blocking content writes."""
+
+        dispatcher = getattr(self, "write_dispatcher", None)
+        if dispatcher is None:
+            return bool(operation())
+        item = dispatcher.submit(
+            operation,
+            priority=80,
+            label=str(label),
+            defer_if_search=False,
+            max_wait_seconds=0.0,
+        )
+        return item.status == "COMMITTED" and bool(item.result)
 
     def _schedule_parse_lanes_with_recovery(
         self,
@@ -2438,8 +2575,12 @@ class IndexManager:
         )
         try:
             try:
-                self.db.start_index_run(metrics, timeout_seconds=0.25)
-                run_recorded = True
+                run_recorded = self._submit_index_metadata_write(
+                    lambda: self.db.start_index_run(metrics, timeout_seconds=0.25),
+                    label="start_index_run",
+                    priority=25,
+                    max_wait_seconds=1.0,
+                )
                 heartbeat_thread = threading.Thread(
                     target=self._heartbeat_index_run,
                     args=(run_id, heartbeat_stop),
@@ -2455,8 +2596,13 @@ class IndexManager:
                     root_id,
                 )
             try:
-                self.db.update_root_scan_time(
-                    root_id, "indexing", timeout_seconds=0.25
+                self._submit_index_metadata_write(
+                    lambda: self.db.update_root_scan_time(
+                        root_id, "indexing", timeout_seconds=0.25
+                    ),
+                    label="root_state_indexing",
+                    priority=80,
+                    max_wait_seconds=0.0,
                 )
             except Exception as exc:
                 if not _is_database_busy_error(exc):
@@ -2970,10 +3116,22 @@ class IndexManager:
                 ),
             )
             if usn_fast and not target_ids:
-                summary.deleted += self.db.mark_deleted_paths(usn_deleted_paths)
+                summary.deleted += int(
+                    self._submit_critical_write(
+                        lambda: self.db.mark_deleted_paths(usn_deleted_paths),
+                        label="mark_deleted_usn_paths",
+                    )
+                    or 0
+                )
             elif not target_ids:
                 missing_paths = previous_paths - seen_paths
-                summary.deleted += self.db.mark_deleted_paths(missing_paths)
+                summary.deleted += int(
+                    self._submit_critical_write(
+                        lambda: self.db.mark_deleted_paths(missing_paths),
+                        label="mark_deleted_missing_paths",
+                    )
+                    or 0
+                )
 
             last_heartbeat = 0.0
             last_resource_control = 0.0
@@ -4164,10 +4322,15 @@ class IndexManager:
                             exc_info=True,
                         )
             try:
-                self.db.update_root_scan_time(
-                    root_id,
-                    "ready" if is_complete else "incomplete",
-                    timeout_seconds=0.25,
+                self._submit_index_metadata_write(
+                    lambda: self.db.update_root_scan_time(
+                        root_id,
+                        "ready" if is_complete else "incomplete",
+                        timeout_seconds=0.25,
+                    ),
+                    label="root_state_final",
+                    priority=25,
+                    max_wait_seconds=1.0,
                 )
             except Exception:
                 # Status bookkeeping must not turn durable parse results into a
@@ -4347,8 +4510,13 @@ class IndexManager:
                 writer.abort()
                 metrics.database_write_ms = writer.summary.write_ms
             try:
-                self.db.update_root_scan_time(
-                    root_id, "cancelled", timeout_seconds=0.25
+                self._submit_index_metadata_write(
+                    lambda: self.db.update_root_scan_time(
+                        root_id, "cancelled", timeout_seconds=0.25
+                    ),
+                    label="root_state_cancelled",
+                    priority=25,
+                    max_wait_seconds=1.0,
                 )
             except Exception:
                 logger.warning("Unable to persist cancelled root status: root=%s", root_path, exc_info=True)
@@ -4379,8 +4547,13 @@ class IndexManager:
                             exc_info=True,
                         )
                 try:
-                    self.db.update_root_scan_time(
-                        root_id, "failed", timeout_seconds=0.25
+                    self._submit_index_metadata_write(
+                        lambda: self.db.update_root_scan_time(
+                            root_id, "failed", timeout_seconds=0.25
+                        ),
+                        label="root_state_interrupted",
+                        priority=25,
+                        max_wait_seconds=1.0,
                     )
                 except Exception:
                     logger.warning(
@@ -4417,8 +4590,13 @@ class IndexManager:
                     except Exception:
                         logger.debug("Writer stopped during forced cancellation", exc_info=True)
                 try:
-                    self.db.update_root_scan_time(
-                        root_id, "cancelled", timeout_seconds=0.25
+                    self._submit_index_metadata_write(
+                        lambda: self.db.update_root_scan_time(
+                            root_id, "cancelled", timeout_seconds=0.25
+                        ),
+                        label="root_state_forced_cancelled",
+                        priority=25,
+                        max_wait_seconds=1.0,
                     )
                 except Exception:
                     logger.warning("Unable to persist cancelled root status: root=%s", root_path, exc_info=True)
@@ -4443,8 +4621,13 @@ class IndexManager:
                     except Exception:
                         logger.exception("Index writer shutdown failed")
                 try:
-                    self.db.update_root_scan_time(
-                        root_id, "failed", timeout_seconds=0.25
+                    self._submit_index_metadata_write(
+                        lambda: self.db.update_root_scan_time(
+                            root_id, "failed", timeout_seconds=0.25
+                        ),
+                        label="root_state_failed",
+                        priority=25,
+                        max_wait_seconds=1.0,
                     )
                 except Exception:
                     logger.warning("Unable to persist failed root status: root=%s", root_path, exc_info=True)
@@ -4564,11 +4747,16 @@ class IndexManager:
             try:
                 if run_recorded:
                     try:
-                        self.db.finish_index_run(
-                            metrics,
-                            run_status,
-                            asdict(summary),
-                            timeout_seconds=0.25,
+                        self._submit_index_metadata_write(
+                            lambda: self.db.finish_index_run(
+                                metrics,
+                                run_status,
+                                asdict(summary),
+                                timeout_seconds=0.25,
+                            ),
+                            label="finish_index_run",
+                            priority=25,
+                            max_wait_seconds=1.0,
                         )
                     except Exception as exc:
                         if not _is_database_busy_error(exc):
@@ -5254,13 +5442,16 @@ class IndexManager:
                 self._planning_metadata.update(
                     {item.path: item for item in recovered_metadata}
                 )
-            prepared, errors = self.db.upsert_precomputed_file_metadata_many(
-                root_id,
-                metadata,
-                retry_failed_files=self.settings.retry_failed_files,
-                compute_full_hash=self.settings.compute_full_hash,
-                mark_processing=False,
-                parser_versions=versions,
+            prepared, errors = self._submit_critical_write(
+                lambda: self.db.upsert_precomputed_file_metadata_many(
+                    root_id,
+                    metadata,
+                    retry_failed_files=self.settings.retry_failed_files,
+                    compute_full_hash=self.settings.compute_full_hash,
+                    mark_processing=False,
+                    parser_versions=versions,
+                ),
+                label="upsert_file_metadata",
             )
             for file_path, exc in [*stat_errors, *errors]:
                 logger.error("Failed to read metadata for %s: %s", file_path, exc)
@@ -5275,7 +5466,12 @@ class IndexManager:
                 )
                 if file_path.suffix.lower() in VIDEO_EXTENSIONS:
                     if changed:
-                        self.db.mark_video_excluded([file_id])
+                        self._submit_critical_write(
+                            lambda file_id=file_id: self.db.mark_video_excluded(
+                                [file_id]
+                            ),
+                            label="mark_video_excluded",
+                        )
                     summary.excluded_video += 1
                 elif file_path.suffix.lower() == ".zip" and (
                     changed or self.db.zip_container_requires_sync(file_id)
@@ -5963,12 +6159,21 @@ class IndexManager:
         if cached_links:
             batch_link = getattr(self.db, "link_cached_documents_batch", None)
             if callable(batch_link):
-                batch_link(cached_links)
+                self._submit_critical_write(
+                    lambda: batch_link(cached_links),
+                    label="link_cached_documents",
+                )
             else:
                 for link in cached_links:
-                    self.db.link_cached_document(*link)
+                    self._submit_critical_write(
+                        lambda link=link: self.db.link_cached_document(*link),
+                        label="link_cached_document",
+                    )
 
-        task_ids = self.db.create_parse_tasks(task_specs)
+        task_ids = self._submit_critical_write(
+            lambda: self.db.create_parse_tasks(task_specs),
+            label="create_parse_tasks",
+        )
         for job, task_id in zip(task_jobs, task_ids, strict=True):
             job.task_id = task_id
             if job.parser_name in {"pdf", "zip", "xlsx_stream", "image_ocr"}:
@@ -5993,8 +6198,11 @@ class IndexManager:
         if pending_hash_updates:
             hash_write_started = time.perf_counter()
             try:
-                written_hashes = self.db.set_content_hash_full_many(
-                    list(pending_hash_updates.items())
+                written_hashes = self._submit_critical_write(
+                    lambda: self.db.set_content_hash_full_many(
+                        list(pending_hash_updates.items())
+                    ),
+                    label="set_content_hash_full_many",
                 )
                 metrics.dedup_strategy_metrics["hash_db_batch_count"] = 1
                 metrics.dedup_strategy_metrics["hash_db_batch_rows"] = written_hashes
@@ -6362,7 +6570,13 @@ class IndexManager:
         submitted = [int(task_id) for task_id in task_ids]
         if not submitted:
             return
-        if self.db.try_mark_tasks_running(submitted, timeout_seconds=0.25):
+        if self._submit_best_effort_write(
+            lambda: self.db.try_mark_tasks_running(
+                submitted,
+                timeout_seconds=0.25,
+            ),
+            label="mark_tasks_running",
+        ):
             return
         # A writer can hold SQLite's single write slot while a large result
         # batch is committed. Task state is telemetry/recovery metadata; the
@@ -7560,10 +7774,14 @@ class IndexManager:
                 "pdf_ocr_page",
             }
         ):
-            if not self.db.try_mark_task_spooled(
-                job.task_id,
-                descriptor.spool_path,
-                descriptor.checksum,
+            if not self._submit_best_effort_write(
+                lambda: self.db.try_mark_task_spooled(
+                    job.task_id,
+                    descriptor.spool_path,
+                    descriptor.checksum,
+                    timeout_seconds=0.25,
+                ),
+                label="mark_task_spooled",
             ):
                 logger.debug(
                     "Skipped parse task spooled-state update while SQLite is busy: task_id=%s",
