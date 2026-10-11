@@ -114,6 +114,8 @@ class ScanWorker(QObject):
 
     @Slot()
     def run(self) -> None:
+        # run() 位于 MainWindow 创建的 scan QThread 中。这个线程负责整轮索引
+        # 的“总调度”；具体 PDF、Office、OCR 解析还会下发给后面的进程池。
         # The scan identifier is durable diagnostic context even when startup
         # fails before a candidate or index run can be created.
         self._scan_started_at = utc_now()
@@ -147,6 +149,8 @@ class ScanWorker(QObject):
             )
             self._phase_event("candidate_begin", "started")
             try:
+                # 创建 gen-(N+1).building.db。此时 SearchWorker 仍然读取已发布的
+                # gen-N.db，因此索引和搜索可以并行进行而不争用同一 SQLite 文件。
                 self.candidate = self.generation_store.begin_candidate(
                     scan_id=self.scan_id
                 )
@@ -164,6 +168,7 @@ class ScanWorker(QObject):
                 candidate_path=str(self.candidate.path),
             )
             self._phase_event("candidate_database_initialize", "started")
+            # 本轮所有扫描、解析结果和数据库写入都指向候选库，不修改旧快照。
             db = DatabaseManager(self.candidate.path)
             self.database = db
             # A current-schema database is already usable by the GUI.  Avoid
@@ -263,6 +268,7 @@ class ScanWorker(QObject):
                 "disk_class": hardware.disk_class,
             }
             self._phase_event("index_manager_create", "started")
+            # IndexManager 负责枚举文件、分配解析通道、启动进程池并提交写库任务。
             self.manager = IndexManager(
                 db,
                 effective_settings,
@@ -288,6 +294,8 @@ class ScanWorker(QObject):
                 root_ids=list(self.root_ids),
                 file_ids=list(self.file_ids),
             )
+            # 这是本轮最主要的耗时步骤。虽然调用形式是同步的，但当前已经位于
+            # scan QThread，因此不会阻塞界面；内部解析还会多进程并行。
             summary = self.manager.index_enabled_roots(
                 self.token,
                 self.progress.emit,
@@ -304,6 +312,8 @@ class ScanWorker(QObject):
             self.run_ids = [str(row.get("id") or "") for row in run_reports]
             if bool(getattr(summary, "cancelled", False)) or self.token.cancelled:
                 raise CancelledError("本轮索引已取消，候选数据库不会发布")
+            # 发布前必须确认候选库达到可搜索条件。未通过时保留旧 generation，
+            # 不允许用户看到一份半成品索引。
             readiness = db.index_readiness(reconcile=False)
             self._last_blocking_files = [
                 dict(row) for row in (readiness.get("blocking_file_samples") or [])
@@ -397,6 +407,8 @@ class ScanWorker(QObject):
             )
             usn_state = db.export_usn_state(usn_root_ids)
             published_at = utc_now()
+            # 校验通过后原子发布候选 generation。manifest 切换后，新搜索会读取
+            # 新版本；切换前已经开始的搜索仍可通过租约继续读取旧版本。
             published = self.generation_store.publish(
                 self.candidate,
                 file_count=int(readiness.get("file_count") or 0),

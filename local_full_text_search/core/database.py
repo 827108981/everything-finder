@@ -356,7 +356,12 @@ def _replace_file_with_retry(
 
 
 class DatabaseManager:
-    """SQLite gateway with backward-compatible schema migrations."""
+    """SQLite gateway with backward-compatible schema migrations.
+
+    教学提示：SearchEngine 决定“查什么、如何匹配和排序”，DatabaseManager
+    负责“怎样安全地打开 SQLite、管理事务、表结构和读写连接”。把两者分开后，
+    搜索算法不需要同时承担数据库连接与迁移细节。
+    """
 
     def __init__(self, db_path: Path = DB_PATH, *, read_only: bool = False) -> None:
         self.db_path = db_path
@@ -385,6 +390,8 @@ class DatabaseManager:
         handles SQLite locking and transaction lifecycle, so a planned search
         pause can no longer be misreported as ``database is locked``.
         """
+        # 已发布 generation 由 SearchWorker 以 read_only=True 创建；任何代码
+        # 误用 connect() 尝试写快照都会立即失败，保护索引版本不可变。
         if self.read_only:
             raise sqlite3.OperationalError(
                 "活动搜索快照是只读数据库，禁止写入"
@@ -938,6 +945,7 @@ class DatabaseManager:
     ) -> Iterator[sqlite3.Connection]:
         """Open a non-writing WAL reader for foreground search work."""
 
+        # mode=ro 从 SQLite 层保证只读，而不仅仅依赖调用者“自觉不写”。
         timeout = max(0.0, float(timeout_seconds))
         uri = f"file:{self.db_path.as_posix()}?mode=ro"
         con = sqlite3.connect(uri, uri=True, timeout=timeout)
@@ -945,6 +953,7 @@ class DatabaseManager:
             self._active_connections.add(con)
         started = time.monotonic()
         try:
+            # sqlite3.Row 让上层可以使用 row["filename"]，而不是记忆列下标。
             con.row_factory = sqlite3.Row
             try:
                 from local_full_text_search.core.text_blob_codec import decode_text_blob
@@ -953,6 +962,7 @@ class DatabaseManager:
             except ImportError:
                 # Operational databases do not use the compact snapshot view.
                 pass
+            # query_only 再增加一道连接级只读保护。
             con.execute("PRAGMA query_only = ON")
             con.execute(f"PRAGMA busy_timeout = {max(0, int(timeout * 1000))}")
             # Do not set PRAGMA synchronous on a read-only connection. SQLite
@@ -962,6 +972,7 @@ class DatabaseManager:
             # These cache pragmas are connection-local and safe for readers.
             con.execute("PRAGMA cache_size = -65536")
             con.execute("PRAGMA mmap_size = 268435456")
+            # 把连接交给 SearchEngine；离开 with 块后 finally 统一关闭。
             yield con
         except sqlite3.OperationalError as exc:
             if _is_database_busy(exc):
@@ -1768,8 +1779,12 @@ class DatabaseManager:
             con.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
 
     def _ensure_fts(self, con: sqlite3.Connection) -> None:
+        # FTS5 是 SQLite 的全文检索模块。trigram（连续三个字符切片）尤其适合
+        # 中文和子串搜索，例如“资料智能检索”可产生多个三字候选片段。
         tokenizer = "tokenize='trigram'"
         try:
+            # block_id/file_id 只负责关联原始记录（UNINDEXED）；filename、path、
+            # location_text、normalized_text 才参与全文候选召回。
             con.execute(
                 f"""
                 CREATE VIRTUAL TABLE IF NOT EXISTS content_fts USING fts5(
@@ -1794,6 +1809,8 @@ class DatabaseManager:
                 """
             )
         except sqlite3.OperationalError:
+            # 某些 SQLite 构建不支持 trigram；此时退回默认 FTS5 tokenizer，
+            # 保证功能仍可启动，只是中文子串候选能力可能有所不同。
             con.execute(
                 """
                 CREATE VIRTUAL TABLE IF NOT EXISTS content_fts USING fts5(
@@ -8819,6 +8836,8 @@ class DatabaseManager:
     def search_projection_readiness(self) -> dict[str, object]:
         """Return the bounded, strict gate used before an ordinary search."""
 
+        # 搜索前的安全门：检查启用目录、正在运行的索引任务、未完成解析任务和
+        # staging 数据，避免 SearchEngine 在尚未提交完整投影时返回误导性结果。
         terminal = tuple(sorted(TERMINAL_PARSE_TASK_STATUSES))
         placeholders = ",".join("?" for _ in terminal)
         with self.connect_read_only(timeout_seconds=1.0) as con:

@@ -102,6 +102,8 @@ class SearchEngine:
         selected immutable snapshot has no writer to pause.
         """
 
+        # SearchEngine 不创建线程。调用它的 SearchWorker 已经运行在搜索 QThread；
+        # 这里专注于协调读取快照、执行算法并返回 SearchPage。
         lease = None
         request_id = str(request_id or f"search-{uuid.uuid4().hex}")
         query_hash = hashlib.sha256(query.text.encode("utf-8")).hexdigest()
@@ -120,6 +122,8 @@ class SearchEngine:
                 # The active generation is immutable and the indexer writes a
                 # different candidate file. There is no shared SQLite writer
                 # to pause and no search lease should throttle indexing.
+                # 中文理解：搜索读 gen-N.db，索引写 gen-(N+1).building.db，两个
+                # SQLite 文件彼此隔离，所以搜索不需要暂停后台索引。
                 log_event(
                     "search.snapshot.active",
                     component="search_engine",
@@ -132,6 +136,8 @@ class SearchEngine:
                 if token.cancelled:
                     raise CancelledError("搜索已取消")
             else:
+                # 兼容旧模式：搜索和索引可能访问同一数据库，必须向协调器申请
+                # 搜索租约，让写入在搜索期间安全暂停。
                 log_event(
                     "search.waiting_for_index" if not search_active() else "search.waiting_for_lease",
                     component="search_engine",
@@ -164,17 +170,23 @@ class SearchEngine:
                 # An immutable published generation never pauses the writer;
                 # it is a read-only snapshot alongside the candidate file.
                 status_callback("snapshot_active")
+            # 单独的计时器只负责在超时时设置 CancelToken；实际搜索代码会在
+            # 检查 token 时退出。这不是执行搜索的线程。
             timeout_timer = threading.Timer(
                 MAX_SEARCH_SECONDS,
                 lambda: token.cancel(reason="SEARCH_TIMEOUT"),
             )
             timeout_timer.daemon = True
             timeout_timer.start()
+            # 整次搜索只使用同一个只读连接和同一个事务快照，避免“查文件名时
+            # 看到版本A、查正文时却看到版本B”的不一致。
             with self.db.connect_read_only(timeout_seconds=2.0) as connection:
                 connection.execute("BEGIN")
                 previous = self._snapshot_connection
                 self._snapshot_connection = connection
                 try:
+                    # _search_impl 完成：解析关键词 -> 找候选 -> 精确确认 ->
+                    # 计算分数 -> 分页封装。
                     result = self._search_impl(
                         query,
                         token,
@@ -259,6 +271,7 @@ class SearchEngine:
         progress_callback: Callable[[dict[str, object]], None] | None = None,
         partial_callback: Callable[[SearchPage], None] | None = None,
     ) -> SearchPage:
+        # 第一步不是立刻查表，而是确认当前已提交投影确实可以用于搜索。
         # Full readiness diagnostics scan large tables. Keep the foreground
         # search on the bounded committed-projection gate instead.
         readiness = (
@@ -278,10 +291,15 @@ class SearchEngine:
             and any(character.isspace() for character in query.text)
             and not query.ignore_spaces
         ):
+            # 中文关键词中空格经常只是输入分隔符。这里复制一份新 SearchQuery
+            # 并开启 ignore_spaces，不直接修改调用方传入的请求对象。
             query = replace(query, ignore_spaces=True)
+        # 从这里开始统计真正的检索耗时。
         started = time.perf_counter()
         token = cancel_token or CancelToken()
+        # regex 模式会预编译正则；普通模式返回 None。
         regex_pattern = self._compile_regex(query)
+        # 先按搜索模式切分原始关键词，再用与索引一致的规则进行归一化。
         raw_terms = parse_terms(query.text, query.mode)
         normalized_terms = [
             normalize_text(
@@ -295,8 +313,11 @@ class SearchEngine:
         ]
         normalized_terms = [term for term in normalized_terms if term]
         if not normalized_terms:
+            # 归一化后没有有效关键词，不访问大表，直接返回空页。
             return SearchPage([], 0, 0, 0, query.page, query.page_size, 0, False)
+        # 根据 SearchQuery 的三个来源开关，决定查询文件名/路径还是正文。
         search_filename, search_path, search_content = self._source_flags(query)
+        # 同一个文件可能由文件名和多个正文块重复命中；字典以 file_id 合并结果。
         confirmed_by_file: dict[int, SearchResult] = {}
         page_start = max(0, (max(1, int(query.page)) - 1) * max(1, int(query.page_size)))
         page_end = page_start + max(1, min(100, int(query.page_size)))
@@ -1257,6 +1278,8 @@ class SearchEngine:
         regex_pattern: re.Pattern[str] | None,
         token: CancelToken | None = None,
     ) -> bool:
+        # 候选召回只是“可能命中”；_matches 会读取真实文本做最终确认，
+        # 防止 FTS/LIKE 候选因为分词或归一化规则产生假阳性。
         if token is not None:
             token.throw_if_cancelled()
         if regex_pattern is not None:
@@ -1289,10 +1312,13 @@ class SearchEngine:
             )
         mode = query.mode
         if mode in {"exact", "phrase", "filename"}:
+            # 精确、短语和文件名模式都要求完整目标串出现。
             return terms[0] in text
         if mode == "all":
+            # all 模式要求每个关键词都出现。
             return all(term in text for term in terms)
         if mode == "any":
+            # any 模式只要求至少一个关键词出现。
             return any(term in text for term in terms)
         return terms[0] in text
 
@@ -1305,6 +1331,8 @@ class SearchEngine:
         regex_pattern: re.Pattern[str] | None,
         token: CancelToken | None = None,
     ) -> SearchResult:
+        # 将一条确认命中的数据库行转换成 UI 可以直接使用的 SearchResult，
+        # 同时生成上下文片段、命中次数和相关度分数。
         if token is not None:
             token.throw_if_cancelled()
         raw_text = str(row["raw_text"] or "")
@@ -1353,17 +1381,23 @@ class SearchEngine:
             ignore_spaces=query.ignore_spaces,
             ignore_hyphens=query.ignore_hyphens,
         )
+        # 基础分是正文中的命中次数。
         score = float(hits)
         first = normalized_terms[0]
         if filename_norm == first:
+            # 文件名完全等于关键词通常最相关，因此给予最高加分。
             score += 1000
         elif filename_norm.startswith(first):
+            # 文件名以关键词开头，相关度次之。
             score += 500
         elif first in filename_norm:
+            # 文件名只要包含关键词，也比纯正文命中更靠前。
             score += 250
         if str(row["source_type"]) == "metadata":
+            # metadata 表示文件名/路径等元数据命中。
             score += 50
         if str(row["source_type"]) == "ocr":
+            # OCR 可能存在识别误差，所以相同条件下稍微降权。
             score -= 25
         confidence = float(row["ocr_confidence"]) if row["ocr_confidence"] is not None else None
         is_fuzzy = (

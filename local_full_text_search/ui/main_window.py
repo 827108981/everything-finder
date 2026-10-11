@@ -174,7 +174,12 @@ def format_index_scope_status(readiness: dict[str, object]) -> str:
 
 
 class MainWindow(QMainWindow):
-    """Product-style shell: navigation first, search central, management behind pages."""
+    """应用级编排窗口：连接页面、后台任务和全局生命周期。
+
+    MainWindow知道SearchPage和SearchWorker的存在，是为了把“用户意图”安排成
+    一次完整后台任务，并在结束后把结果送回页面。它持有Worker不等于它执行
+    搜索算法；真正检索仍由SearchWorker和SearchEngine负责。
+    """
 
     file_change_detected = Signal(str)
 
@@ -190,9 +195,8 @@ class MainWindow(QMainWindow):
     ) -> None:
         super().__init__()
         self.db = db
-        # ``db`` remains the mutable indexing/control database for legacy UI
-        # operations. Searches resolve the immutable published generation via
-        # this store and never read ``db`` while a scan is writing it.
+        # db 仍然是供索引和界面管理功能使用的可写控制数据库。搜索会通过
+        # generation 管理器选择不可变的已发布快照，不会在扫描写入时读取 db。
         self.generation_base_path = Path(generation_base_path or db.db_path).resolve()
         self.index_generation_store = IndexGenerationStore(self.generation_base_path)
         self.settings = settings
@@ -200,6 +204,8 @@ class MainWindow(QMainWindow):
         self.database_location_service = (
             database_location_service or DatabaseLocationService()
         )
+        # 搜索尚未开始时两者都是None；任务开始后，MainWindow持有QThread和
+        # SearchWorker，便于取消、判断是否仍在运行、等待退出并防止对象过早销毁。
         self.search_thread: QThread | None = None
         self.search_worker: SearchWorker | None = None
         self.search_priority_active = False
@@ -220,6 +226,8 @@ class MainWindow(QMainWindow):
         self.exclusion_outcome: tuple[str, object] | None = None
         self.exclusion_progress_payload: dict[str, object] = {}
         self.exclusion_started_at = 0.0
+        # 用户在旧搜索尚未结束时又提交新条件，先将pending_search设为True，
+        # 取消旧任务；等旧线程真正清理完成后再启动最新搜索，避免两个结果竞争UI。
         self.pending_search = False
         self.pending_monitor_scan = False
         self.force_complete_after_retry = False
@@ -280,13 +288,15 @@ class MainWindow(QMainWindow):
         )
         self.resize(1440, 900)
         self.setMinimumSize(1100, 700)
+        # 开始组装整个窗口。_build_shell() 会创建 SearchPage；SearchPage 的
+        # __init__() 又会创建 SearchBox。调用返回后，搜索框才算初始化完成。
         self._build_shell()
         self.settings_page.set_database_info(self.generation_base_path)
         self._install_shortcuts()
         self.file_change_detected.connect(self.on_monitored_file_changed)
         if defer_initial_refresh:
-            # The first aggregate queries can scan a large SQLite database.
-            # Run them after the window is paintable and off the Qt UI thread.
+            # 首次汇总查询可能扫描较大的SQLite数据库，因此等窗口可以显示后，
+            # 再把它安排到Qt界面线程之外执行，避免启动阶段界面迟迟不出现。
             QTimer.singleShot(0, self.start_database_snapshot)
         else:
             self.refresh_all()
@@ -313,6 +323,8 @@ class MainWindow(QMainWindow):
         body_layout.addWidget(self.sidebar)
 
         self.stack = QStackedWidget()
+        # 创建搜索页面会进入 SearchPage.__init__(settings)。SearchBox 不是由
+        # MainWindow 直接创建，而是作为 SearchPage 的内部子组件被创建。
         self.search_page = SearchPage(self.settings)
         self.index_page = IndexPage()
         self.failed_page = FailedPage()
@@ -338,6 +350,8 @@ class MainWindow(QMainWindow):
         root_layout.addWidget(body, 1)
         self.setCentralWidget(central)
 
+        # SearchPage 把内部 SearchBox 的搜索信号转发到这里；MainWindow 收到后
+        # 才调用 request_search()。初始化阶段只建立连接，不会立即执行搜索。
         self.search_page.search_requested.connect(self.request_search)
         self.search_page.stop_requested.connect(self.cancel_search)
         self.search_page.add_root_requested.connect(self.add_root)
@@ -1629,6 +1643,8 @@ class MainWindow(QMainWindow):
         performance_mode: bool = False,
         file_ids: object = None,
     ) -> None:
+        # start_scan() 在界面主线程中只做“任务编排”，不亲自遍历和解析文件。
+        # 如果迁移或另一项索引维护正在进行，先阻止创建相互冲突的新任务。
         if self.database_migration_thread is not None:
             self.index_page.task_label.setText("数据库正在迁移，请等待完成")
             return
@@ -1649,6 +1665,8 @@ class MainWindow(QMainWindow):
             # Manual, startup and monitor refreshes share one scheduler. Merge
             # a request that arrives during the active generation instead of
             # losing it or starting another worker for the same root.
+            # 教学提示：已有索引线程时不再创建第二个 ScanWorker，而是合并请求，
+            # 等当前任务结束后再检查变化。这可以避免两份候选 generation 同时写入。
             self.pending_monitor_scan = True
             if selected_root_ids:
                 self._pending_scan_root_ids.update(selected_root_ids)
@@ -1667,6 +1685,8 @@ class MainWindow(QMainWindow):
         self._pending_scan_root_ids.clear()
         self._pending_scan_all_roots = False
         self._pending_scan_performance = False
+        # 这里的 _scan_generation 只是界面层的“第几次扫描任务”流水号；
+        # 它不同于 IndexGenerationStore 中代表数据库版本的 generation。
         self._scan_generation += 1
         self._active_scan_generation = self._scan_generation
         self._scan_progress_text = "正在准备索引"
@@ -1683,7 +1703,9 @@ class MainWindow(QMainWindow):
             },
         )
         self.hide_preview()
+        # 创建独立的索引调度线程，使耗时扫描不会阻塞 Qt 界面事件循环。
         self.scan_thread = QThread()
+        # ScanWorker 负责一整轮候选数据库的创建、索引、校验和发布。
         self.scan_worker = ScanWorker(
             self.generation_base_path,
             self.settings,
@@ -1692,13 +1714,17 @@ class MainWindow(QMainWindow):
             root_ids=selected_root_ids,
             file_ids=tuple(int(file_id) for file_id in (file_ids or ())),
         )
+        # QObject 默认属于创建它的主线程；moveToThread 后，run() 会在 scan_thread 执行。
         self.scan_worker.moveToThread(self.scan_thread)
+        # QThread 发出 started 信号时调用 ScanWorker.run，正式开始后台索引。
         self.scan_thread.started.connect(self.scan_worker.run)
+        # 以下信号把后台进度和最终状态安全地送回界面主线程。
         self.scan_worker.progress.connect(self.on_scan_progress)
         self.scan_worker.finished.connect(self.on_scan_finished)
         self.scan_worker.failed.connect(self.on_scan_failed)
         self.scan_worker.cancelled.connect(self.on_scan_cancelled)
         self.scan_worker.ended.connect(self.on_scan_ended)
+        # 无论成功、失败还是取消，ScanWorker 都会发 ended，让线程事件循环退出。
         self.scan_worker.ended.connect(self.scan_thread.quit)
         self.scan_thread.finished.connect(self.cleanup_scan_thread)
         self._active_scan_id = self.scan_worker.scan_id
@@ -1708,6 +1734,7 @@ class MainWindow(QMainWindow):
         self.top_bar.set_index_status(self._scan_progress_text, is_running=True)
         self.index_page.set_task_running(True)
         self.failed_page.set_index_running(True)
+        # start() 只负责启动线程；真正的索引入口是上面连接的 ScanWorker.run。
         self.scan_thread.start()
 
     def confirm_performance_scan(self, root_ids: object = None) -> None:
@@ -2038,16 +2065,20 @@ class MainWindow(QMainWindow):
         self._finish_close_if_idle()
 
     def request_search(self) -> None:
+        # request_search() 是界面层入口：检查能否搜索并安排任务，不执行 SQL。
+        # 第一层业务门禁：数据库迁移期间文件位置和状态可能变化，不能启动搜索。
         if self.database_migration_thread is not None:
             self.search_page.set_status("数据库正在迁移，请等待完成")
             return
-        # Scope changes are written to the indexing/control database. The
-        # published snapshot remains readable while that operation runs.
+        # 范围变更写入索引/控制数据库；已发布快照在此期间仍保持只读可用。
         readiness = self.search_page.index_readiness()
+        # 第二层业务门禁：只有完整发布的generation才能对用户提供一致结果。
         if self.index_generation_store.active() is None:
+            # 没有完整发布的 generation 时，候选 building 数据库不能拿来搜索。
             self.search_page.show_index_not_ready_state()
             return
         if not self.search_page.text():
+            # 空关键词不是搜索任务，直接恢复第一页和空闲展示。
             self.page = 1
             self.total_confirmed = 0
             self.search_page.show_idle_state()
@@ -2055,14 +2086,19 @@ class MainWindow(QMainWindow):
             return
         self.page = 1
         if self.search_thread is not None:
+            # 用户在旧搜索尚未结束时再次搜索：先取消旧任务，cleanup 后会启动新任务。
             self.pending_search = True
             self.cancel_search()
             return
         self._run_search()
 
     def _run_search(self) -> None:
+        # _run_search()负责把“页面上的当前状态”编排成“一次后台搜索任务”。
+        # 它不写SQL，也不实现关键词匹配和排序。
         if not self.search_page.text():
             return
+        # SearchQuery 是本次搜索条件的“快照式申请单”。创建后，后台线程只依赖
+        # 这组固定下来的值，不再反复读取可能被用户修改的界面控件。
         query = SearchQuery(
             text=self.search_page.text(),
             mode=self.search_page.mode_value(),
@@ -2080,10 +2116,17 @@ class MainWindow(QMainWindow):
             page=self.page,
             sort_by=self.search_page.sort_value(),
         )
+        # 搜索使用独立 QThread，因此 SQLite 查询和结果确认不会卡住界面。
         self.search_thread = QThread()
+        # SearchWorker 负责线程适配、generation 选择、取消和错误信号。
+        # Worker必须保存为MainWindow字段而不是临时局部变量：任务运行期间还要
+        # 接收它的信号、响应停止按钮，并保证Qt对象不会过早失去引用。
         self.search_worker = SearchWorker(self.generation_base_path, query)
+        # 将 Worker 的线程归属从界面主线程迁移到搜索线程。
         self.search_worker.moveToThread(self.search_thread)
+        # 线程启动后调用 run()；run() 内部再创建 DatabaseManager 和 SearchEngine。
         self.search_thread.started.connect(self.search_worker.run)
+        # 搜索结果、部分结果和进度通过信号回到 MainWindow，由主线程更新界面。
         self.search_worker.finished.connect(self.on_search_finished)
         self.search_worker.partial.connect(self.on_search_partial)
         self.search_worker.progress.connect(self.on_search_progress)
@@ -2092,17 +2135,22 @@ class MainWindow(QMainWindow):
         self.search_worker.lease_status.connect(self.on_search_lease_status)
         self.search_worker.quiesce_timeout.connect(self.on_search_quiesce_timeout)
         self.search_worker.timed_out.connect(self.on_search_timed_out)
+        # 所有终止路径都必须让 QThread 退出，防止后台线程残留。
         self.search_worker.finished.connect(self.search_thread.quit)
         self.search_worker.cancelled.connect(self.search_thread.quit)
         self.search_worker.failed.connect(self.search_thread.quit)
         self.search_worker.quiesce_timeout.connect(self.search_thread.quit)
         self.search_worker.timed_out.connect(self.search_thread.quit)
+        # 线程完全结束后清理引用；如果 pending_search=True，会继续下一次搜索。
         self.search_thread.finished.connect(self.cleanup_search_thread)
         self.search_page.set_running(True)
         self.failed_page.set_search_running(True)
+        # 从这里开始后台执行；本函数随后返回，Qt 主线程继续响应用户操作。
         self.search_thread.start()
 
     def cancel_search(self) -> None:
+        # MainWindow只转达取消意图；具体怎样设置CancelToken和中断SQLite连接，
+        # 由SearchWorker.cancel()负责。
         if self.search_worker is not None:
             self.search_worker.cancel()
 
@@ -2146,7 +2194,10 @@ class MainWindow(QMainWindow):
                 self.update_index_status()
 
     def on_search_finished(self, page: object) -> None:
+        # 该槽函数由 SearchWorker.finished 触发。Qt 跨线程连接会让界面更新
+        # 回到 MainWindow 所属的主线程执行，而不是在搜索线程直接操作控件。
         self.total_confirmed = page.available_results
+        # MainWindow不自己绘制结果，只把后台返回的数据交给SearchPage展示。
         self.search_page.set_results(page)
         if self.settings.save_search_history and self.search_worker is not None:
             self._start_search_history_update(self.search_worker.query.text)
@@ -2154,6 +2205,8 @@ class MainWindow(QMainWindow):
             self.hide_preview()
 
     def on_search_partial(self, page: object) -> None:
+        # 文件名/路径结果可能先于正文搜索返回；仍由MainWindow把跨线程信号
+        # 转交给页面，Worker不直接操作Qt界面控件。
         if self.search_thread is None or page is None:
             return
         self.search_page.set_partial_results(page)
@@ -2187,11 +2240,14 @@ class MainWindow(QMainWindow):
         self.search_page.show_interrupted_state("搜索未完成")
 
     def cleanup_search_thread(self) -> None:
+        # thread.finished说明后台线程已经真正退出。此时才能清除运行状态和引用，
+        # 不能在刚调用cancel()时就假设任务已经结束。
         self.search_page.set_running(False)
         self.failed_page.set_search_running(False)
         self.search_thread = None
         self.search_worker = None
         if self.pending_search and not self.closing:
+            # 旧任务清理完成后，从页面“此刻”的最新条件创建下一份SearchQuery。
             self.pending_search = False
             self._run_search()
         else:
@@ -2745,6 +2801,15 @@ class Sidebar(QFrame):
 
 
 class SearchPage(QWidget):
+    """完整的搜索功能页面，负责聚合输入、筛选、状态和结果展示。
+
+    SearchBox 只是一个输入组件；SearchPage 才是页面级边界。它把回车、
+    自动搜索、筛选变化和翻页等不同控件事件，整理成供 MainWindow 监听的
+    统一业务信号，同时把页面上的各项条件通过 getter 方法对外提供。
+    """
+
+    # 页面级输出信号。MainWindow 只依赖这些公开信号，不需要了解页面内部
+    # 使用了哪些输入框、下拉框、复选框和结果控件。
     search_requested = Signal()
     stop_requested = Signal()
     add_root_requested = Signal()
@@ -2758,48 +2823,72 @@ class SearchPage(QWidget):
     clear_history_requested = Signal()
 
     def __init__(self, settings: AppSettings) -> None:
+        # MainWindow._build_shell() 执行 SearchPage(self.settings) 时进入这里。
         super().__init__()
         self.setObjectName("Page")
+        # 保存页面展示需要的索引统计和就绪状态；这些状态不执行搜索算法。
         self._stats: dict[str, int] = {}
         self._has_roots = False
         self._index_ready = False
         self._readiness: dict[str, object] = {}
+        # debounce 是“防抖计时器”：用户连续输入时不断重新计时，停止输入一段
+        # 时间后只发出一次搜索请求，避免每敲一个字符都启动后台搜索。
         self.debounce = QTimer(self)
+        # SingleShot=True 表示每次启动后只触发一次 timeout，不会周期性重复搜索。
         self.debounce.setSingleShot(True)
+        # 计时结束后统一发出页面级 search_requested，MainWindow 无需认识计时器。
         self.debounce.timeout.connect(self.search_requested.emit)
         self.auto_search_enabled = False
         self._history: list[str] = []
         self.partial_results_visible = False
         self._estimator = SearchTimeEstimator()
         self._active_estimate_context: SearchEstimateContext | None = None
+        # _build() 负责创建 SearchPage 内部的 SearchBox、筛选器和结果列表。
         self._build()
+        # 所有控件创建完成后，再把应用设置同步到这些控件。
         self.apply_settings(settings)
 
     def _build(self) -> None:
+        # 创建搜索页面的纵向布局；后面创建的 SearchBox 会加入这个布局。
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 20, 24, 20)
         layout.setSpacing(14)
 
+        # 这里才真正创建 SearchBox，并立即进入 SearchBox.__init__()。
+        # __init__() 返回后，self.search_box 才引用一个初始化完成的搜索框对象。
         self.search_box = SearchBox()
+        # 用户每输入或删除一个字符，QLineEdit.textChanged 都会调用
+        # SearchPage._on_text_changed()，用于更新按钮和自动搜索计时器。
         self.search_box.input.textChanged.connect(self._on_text_changed)
+        # SearchBox 只知道“用户按了回车”；SearchPage 在这里把这个内部信号
+        # 原样转发为自己的 search_requested，供 MainWindow 统一监听。
         self.search_box.search_requested.connect(self.search_requested.emit)
+        # 停止信号采用同样的转发方式，SearchBox 不直接接触后台线程。
         self.search_box.stop_requested.connect(self.stop_requested.emit)
+        # 历史按钮由 SearchPage 自己处理，所以直接连接到 _show_history()。
         self.search_box.history_requested.connect(self._show_history)
+        # 把已经初始化完成的 SearchBox 放到搜索页面最上方。
         layout.addWidget(self.search_box)
 
+        # 下面开始创建基础筛选区。SearchPage 拥有这些控件，所以它能够把一组
+        # 分散的界面值整理成 MainWindow 构造 SearchQuery 所需的统一读取接口。
         filters = QHBoxLayout()
         filters.setSpacing(8)
+        # mode_combo 保存关键词匹配方式；显示文字和内部值分开存储。
         self.mode_combo = chip_combo()
         self.mode_combo.addItem("完全包含", "exact")
         self.mode_combo.addItem("完整短语", "phrase")
         self.mode_combo.addItem("全部关键词", "all")
         self.mode_combo.addItem("任意关键词", "any")
         self.mode_combo.addItem("正则表达式", "regex")
+        # file_type_combo 保存文件类型分组，extensions() 会把分组转换成扩展名列表。
         self.file_type_combo = chip_combo()
         for label in ("全部", "PDF", "Word", "Excel", "PowerPoint", "图片", "文本/日志", "压缩包"):
             self.file_type_combo.addItem("全部格式" if label == "全部" else label, label)
+        # scope_combo 保存搜索范围；None 代表全部根目录，整数代表一个 root_id。
         self.scope_combo = chip_combo()
         self.scope_combo.addItem("全部范围", None)
+        # sort_combo 只决定结果排序方式，不会修改索引数据。
         self.sort_combo = chip_combo()
         for label, value in (
             ("相关性", "relevance"),
@@ -2823,6 +2912,7 @@ class SearchPage(QWidget):
         filters.addStretch(1)
         layout.addLayout(filters)
 
+        # 高级筛选单独封装成 AdvancedFilters，默认折叠，需要时再展开。
         self.advanced = AdvancedFilters()
         self.advanced.setVisible(False)
         layout.addWidget(self.advanced)
@@ -2846,9 +2936,12 @@ class SearchPage(QWidget):
         self.search_progress.setVisible(False)
         layout.addWidget(self.search_progress)
 
+        # content_stack 在“空状态”和“结果列表”之间切换，同一时刻只显示一个。
         self.content_stack = QStackedWidget()
         self.empty_state = EmptyState()
         self.result_view = ResultView()
+        # ResultView 内部产生的打开文件、定位和重新索引事件，也由 SearchPage
+        # 转发成页面级信号，保持 MainWindow 不依赖 ResultView 的内部结构。
         self.result_view.open_requested.connect(self.open_requested.emit)
         self.result_view.open_folder_requested.connect(self.open_folder_requested.emit)
         self.result_view.open_location_requested.connect(self.open_location_requested.emit)
@@ -2858,6 +2951,7 @@ class SearchPage(QWidget):
         self.content_stack.addWidget(self.result_view)
         layout.addWidget(self.content_stack, 1)
 
+        # 翻页控件只发出上一页/下一页意图；真正页码和重新搜索由 MainWindow 管理。
         self.pager = QFrame()
         self.pager.setObjectName("Pager")
         pager_layout = QHBoxLayout(self.pager)
@@ -2875,6 +2969,8 @@ class SearchPage(QWidget):
         self.pager.setVisible(False)
         layout.addWidget(self.pager)
 
+        # 基础筛选发生变化时统一进入 _filter_changed()；只要已有关键词，就重新
+        # 发出 search_requested，让同一条后台搜索流程重新读取最新页面条件。
         self.file_type_combo.currentIndexChanged.connect(self._filter_changed)
         self.mode_combo.currentIndexChanged.connect(self._filter_changed)
         self.scope_combo.currentIndexChanged.connect(self._filter_changed)
@@ -2892,15 +2988,19 @@ class SearchPage(QWidget):
         self.show_idle_state()
 
     def _on_text_changed(self, text: str) -> None:
+        # 该函数由 QLineEdit.textChanged 触发，每输入或删除一个字符都会进入。
         self.search_box.update_clear_button()
         if not text.strip():
+            # 输入为空时取消尚未触发的自动搜索，并恢复页面空闲状态。
             self.debounce.stop()
             self.show_idle_state()
             return
         if self.auto_search_enabled:
+            # start() 会重新开始单次计时；连续输入时旧计时不会提前触发搜索。
             self.debounce.start()
 
     def _filter_changed(self) -> None:
+        # 没有关键词时，修改筛选只保存界面状态，不发起一次无意义的空搜索。
         if self.text():
             self.search_requested.emit()
 
@@ -2926,6 +3026,8 @@ class SearchPage(QWidget):
         self.more_button.style().polish(self.more_button)
 
     def set_roots(self, roots: list[object]) -> None:
+        # 外层刷新搜索目录时，临时屏蔽下拉框信号，防止重建选项的中间过程
+        # 被误认为用户修改范围，从而意外触发搜索。
         current = self.scope_combo.currentData()
         self.scope_combo.blockSignals(True)
         self.scope_combo.clear()
@@ -2989,9 +3091,13 @@ class SearchPage(QWidget):
         self.show_idle_state()
 
     def text(self) -> str:
+        # MainWindow 需要关键词时，通过 SearchPage.text() 读取内部输入框。
+        # strip() 去掉用户不小心输入在关键词首尾的空格。
         return self.search_box.input.text().strip()
 
     def mode_value(self) -> str:
+        # getter 方法把控件内部值转换成稳定的普通 Python 类型。MainWindow
+        # 通过这些公开方法读取条件，不直接访问 mode_combo 等页面内部控件。
         return str(self.mode_combo.currentData())
 
     def root_ids(self) -> list[int]:
@@ -2999,6 +3105,7 @@ class SearchPage(QWidget):
         return [int(value)] if value is not None else []
 
     def extensions(self) -> list[str]:
+        # 页面显示“PDF”等业务分组，SearchQuery 实际需要的是扩展名列表。
         label = str(self.file_type_combo.currentData())
         return sorted(FILE_TYPE_GROUPS.get(label, set()))
 
@@ -3024,6 +3131,8 @@ class SearchPage(QWidget):
         return self.advanced.case_sensitive.isChecked()
 
     def set_running(self, running: bool) -> None:
+        # MainWindow 在任务开始/结束时调用此方法。SearchPage 只改变展示状态，
+        # 不创建线程，也不判断 SearchWorker 是否真的已经结束。
         self.search_box.set_running(running)
         if running:
             self.partial_results_visible = False
@@ -3047,6 +3156,8 @@ class SearchPage(QWidget):
             self.search_progress.setValue(0)
 
     def set_search_progress(self, payload: object) -> None:
+        # SearchWorker 的进度最终由 MainWindow 转交到这里；页面把普通字典转换成
+        # 进度条、阶段文字、命中数量和耗时提示。
         if not isinstance(payload, dict):
             return
         phase = str(payload.get("phase_label") or "正在搜索...")
@@ -3065,10 +3176,8 @@ class SearchPage(QWidget):
         if elapsed_ms >= 2_000:
             slow_reason = str(payload.get("slow_reason") or "")
             if "关键词较短" in slow_reason:
-                # The generic estimator is trained on ordinary searches and
-                # can show a stale multi-minute range for a two-character
-                # compatibility scan. Keep the live phase visible without
-                # presenting an ungrounded ETA.
+                # 通用估时器基于普通搜索训练，对两字关键词兼容扫描可能显示过时的
+                # 数分钟范围，因此这里只展示实时阶段，不展示没有依据的预计时间。
                 self.timing_label.setText("两字关键词兼容检索中")
                 self.timing_label.setVisible(True)
             suffix = f" · {detail}" if detail else ""
@@ -3080,6 +3189,8 @@ class SearchPage(QWidget):
             self.set_status(phase + (f" · {detail}" if detail else ""))
 
     def set_partial_results(self, page: object) -> None:
+        # 正文搜索尚未结束时，可以先展示文件名/路径命中。这里只更新界面，
+        # 不代表整次搜索已经完成，所以暂时隐藏分页。
         if page is None or int(page.total_confirmed) <= 0:
             return
         self.partial_results_visible = True
@@ -3094,6 +3205,8 @@ class SearchPage(QWidget):
         )
 
     def set_results(self, page: object) -> None:
+        # 完整 SearchPage 结果到达后，更新耗时模型、状态文字、结果列表和分页。
+        # 参数 page 是搜索结果数据对象，与当前这个 UI 类 SearchPage 同名但含义不同。
         self.partial_results_visible = False
         if self._active_estimate_context is not None:
             self._estimator.observe(self._active_estimate_context, int(page.elapsed_ms))
@@ -3148,6 +3261,7 @@ class SearchPage(QWidget):
         return text_hits, ocr_hits, fuzzy_hits
 
     def apply_settings(self, settings: AppSettings) -> None:
+        # 初始化末尾统一应用设置，使“创建控件”和“用配置填充控件”分成两个步骤。
         self.auto_search_enabled = bool(settings.auto_search)
         self.debounce.setInterval(max(100, int(settings.search_debounce_ms)))
         mode_index = self.mode_combo.findData(settings.default_search_mode)
@@ -3318,25 +3432,48 @@ class SearchPage(QWidget):
 
 
 class SearchBox(QFrame):
+    """搜索输入区域，只负责收集输入和发出用户操作信号。
+
+    它是整条搜索链路的起点，但不是搜索控制器：
+    1. 它不知道数据库在哪里；
+    2. 它不知道怎样创建 SearchQuery；
+    3. 它不知道怎样启动 SearchWorker；
+    4. 它只把“搜索、停止、查看历史”这三种用户意图通知给外层。
+    """
+
+    # SearchBox 是纯界面组件：它只发出“搜索/停止/历史”意图，不创建
+    # SearchQuery，也不知道 SearchWorker、SearchEngine 或数据库的存在。
+    # Signal() 可以理解成一个“通知出口”：SearchBox 负责发出，外层负责接收。
     search_requested = Signal()
     stop_requested = Signal()
     history_requested = Signal()
 
     def __init__(self) -> None:
+        # __init__ 只在创建 SearchBox 时执行一次，用来组装输入框和按钮。
         super().__init__()
+        # objectName 主要供 Qt 样式表定位这个控件，不参与搜索逻辑。
         self.setObjectName("SearchBox")
+        # 创建左侧的搜索图标。
         icon = QLabel("⌕")
         icon.setObjectName("SearchIcon")
+        # QLineEdit 只负责接收和显示用户输入。
         self.input = QLineEdit()
         self.input.setObjectName("SearchInput")
+        # 输入框为空时显示提示文字；这段文字不属于真正的搜索关键词。
         self.input.setPlaceholderText("搜索文件名、正文、表格、幻灯片和图片文字")
+        # 用户按回车时只发信号；MainWindow 收到信号后才统一安排搜索。
+        # returnPressed 是 QLineEdit 自带的信号，search_requested 是本类对外信号。
+        # 这行完成了一次“信号转发”，中间没有执行数据库查询。
         self.input.returnPressed.connect(self.search_requested.emit)
+        # 创建“清空”按钮，并设置它的样式名、文字、尺寸和提示。
         self.clear_button = QPushButton()
         self.clear_button.setObjectName("SearchActionButton")
         self.clear_button.setText("清空")
         self.clear_button.setFixedSize(48, 30)
         self.clear_button.setToolTip("清空搜索内容")
+        # 点击清空按钮时，直接调用 QLineEdit.clear() 清除输入文字。
         self.clear_button.clicked.connect(self.input.clear)
+        # 创建搜索历史按钮。当前功能未开放，所以按钮被禁用并隐藏。
         self.history_button = QPushButton()
         self.history_button.setObjectName("SearchActionButton")
         self.history_button.setText("历史")
@@ -3344,29 +3481,40 @@ class SearchBox(QFrame):
         self.history_button.setToolTip("搜索历史")
         self.history_button.setEnabled(False)
         self.history_button.setVisible(False)
+        # 将来按钮显示后，点击它只发出“查看历史”信号。
         self.history_button.clicked.connect(self.history_requested.emit)
+        # 创建停止按钮。点击时只发出停止意图，不直接操作后台线程。
         self.stop_button = QPushButton("停止")
         self.stop_button.setObjectName("StopButton")
         self.stop_button.clicked.connect(self.stop_requested.emit)
+        # 初始没有搜索任务，所以停止按钮不可见。
         self.stop_button.setVisible(False)
+        # 创建输入区和按钮区之间的竖直分隔线。
         self.action_separator = QFrame()
         self.action_separator.setObjectName("SearchActionSeparator")
         self.action_separator.setFixedSize(1, 24)
+        # 使用水平布局，从左到右排列图标、输入框、分隔线和三个按钮。
         layout = QHBoxLayout(self)
         layout.setContentsMargins(16, 0, 10, 0)
         layout.setSpacing(8)
         layout.addWidget(icon)
+        # 第二个参数 1 表示输入框可以占用剩余的可伸缩空间。
         layout.addWidget(self.input, 1)
         layout.addWidget(self.action_separator)
         layout.addWidget(self.history_button)
         layout.addWidget(self.clear_button)
         layout.addWidget(self.stop_button)
+        # 根据输入框当前是否有文字，设置“清空”按钮的初始显示状态。
         self.update_clear_button()
 
     def update_clear_button(self) -> None:
+        # self.input.text() 返回字符串；bool(字符串) 把它转换成是否有内容。
+        # 有文字时显示“清空”，空字符串时隐藏。
         self.clear_button.setVisible(bool(self.input.text()))
 
     def set_running(self, running: bool) -> None:
+        # 外层开始搜索时传入 True，显示停止按钮；搜索结束时传入 False。
+        # SearchBox 只改变按钮显示，不负责判断任务究竟是否结束。
         self.stop_button.setVisible(running)
 
 

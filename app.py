@@ -2830,6 +2830,9 @@ def main() -> int:
             seed_failure_fallback_demo(db, demo_root)
         diagnostics.stage_completed()
         diagnostics.stage_started("创建图形界面")
+        # 程序界面的初始化入口：调用 MainWindow(...) 会立即进入
+        # MainWindow.__init__()。MainWindow 随后创建 SearchPage，SearchPage 再创建
+        # SearchBox，因此 SearchBox 不是 app.py 直接创建的，而是逐层组合出来的。
         window = MainWindow(
             db,
             settings,

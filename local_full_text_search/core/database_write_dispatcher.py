@@ -68,7 +68,12 @@ def _writer_state_for(database_path: Path | str | None) -> _DatabaseWriterState:
 
 
 class DatabaseWriteDispatcher:
-    """Serialize application writes and preserve deferred work explicitly."""
+    """Serialize application writes and preserve deferred work explicitly.
+
+    教学提示：上游可以并行解析多个文件，但 SQLite 最终写入不能毫无节制地
+    并发执行。这个调度器用队列和 execution_lock 把写事务串行化，从而避免
+    大量 ``database is locked`` 冲突。
+    """
 
     def __init__(
         self,
@@ -99,6 +104,7 @@ class DatabaseWriteDispatcher:
         defer_if_search: bool = True,
         max_wait_seconds: float | None = None,
     ) -> WriteOperation:
+        # 每次写库先包装为可追踪的 WriteOperation，记录优先级、名称和状态。
         item = WriteOperation(
             operation_id=f"db-write:{uuid.uuid4().hex}",
             operation=operation,
@@ -108,6 +114,8 @@ class DatabaseWriteDispatcher:
         with self._lock:
             state = self.coordinator.snapshot().state
             if defer_if_search and state in {SEARCH_QUIESCING, SEARCH_ACTIVE}:
+                # 旧的共享数据库模式下，前台搜索活跃时把写任务放回待处理队列，
+                # 等搜索释放租约后由 drain() 继续执行。
                 item.status = DEFERRED
                 self._pending.append(item)
                 self._sort_pending()
@@ -175,6 +183,8 @@ class DatabaseWriteDispatcher:
         allow_defer: bool,
         max_wait_seconds: float | None,
     ) -> WriteOperation:
+        # execution_lock 以数据库路径为范围，同一数据库同一时刻只允许一个
+        # dispatcher 进入真实写事务。解析可以并行，提交数据库必须有序。
         if max_wait_seconds is None:
             acquired = self._writer_state.execution_lock.acquire()
         else:

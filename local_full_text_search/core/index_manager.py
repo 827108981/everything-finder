@@ -7076,6 +7076,11 @@ class IndexManager:
         jobs: list[ParseJob],
         spool_dir: Path,
     ) -> tuple[dict[str, ParseLane], list[Executor], list[ProcessPoolExecutor]]:
+        # 这里容易被误称为“多线程解析”，但当前实现的解析通道实际主要使用
+        # ProcessPoolExecutor。独立进程既能绕开 Python GIL 使用多核，也能把
+        # 容易崩溃或卡住的 PDF、Office、OCR 解析器与主界面进程隔离。
+        # normal：普通文件；zip：压缩包/慢文件；ocr：图片文字识别；
+        # pdf：PDF 专用；office_process：Office 专用。
         normal_executor = _new_process_executor(
             self.settings,
             self.settings.parser_workers,
@@ -7151,6 +7156,8 @@ class IndexManager:
                 "legacy_powerpoint",
             )
         }
+        # ParseLane 不只保存执行器，还保存待提交窗口、资源预算和工作进程数，
+        # 防止一次性把所有大文件任务塞进进程池导致内存失控。
         lanes = {
             "normal": ParseLane(
                 "normal",
@@ -8618,6 +8625,8 @@ def _new_process_executor(
     *,
     persistent: bool = False,
 ) -> ProcessPoolExecutor:
+    # 非持久进程处理一定数量任务后会回收重建，降低第三方解析库长期运行造成的
+    # 内存增长；OCR/PDF 等需要复用昂贵初始化状态的通道可以设 persistent=True。
     max_tasks = (
         None
         if persistent
@@ -8630,6 +8639,7 @@ def _new_process_executor(
             ),
         )
     )
+    # max_workers 决定这个通道最多同时运行多少个独立 Python 子进程。
     return ProcessPoolExecutor(
         max_workers=max(1, int(workers or 1)),
         max_tasks_per_child=max_tasks,

@@ -57,6 +57,8 @@ def _is_compact_file(path: Path) -> bool:
 
 @dataclass(frozen=True, slots=True)
 class PublishedGeneration:
+    # 已通过完整性校验并发布的索引版本。frozen=True 表示对象创建后不能修改，
+    # 对应磁盘上只读、不可变的 gen-xxxxxx.db 搜索快照。
     generation: int
     path: Path
     published_at: str
@@ -68,20 +70,25 @@ class PublishedGeneration:
 
 @dataclass(frozen=True, slots=True)
 class CandidateGeneration:
+    # 正在构建的新索引版本。它写入 *.building.db，尚未发布时不能用于搜索。
     generation: int
     path: Path
+    # baseline 是构建候选版本时所基于的上一份已发布快照。
     baseline: PublishedGeneration | None
     scan_id: str = ""
     owner_nonce: str = ""
 
 
 class GenerationLease:
+    """一次“我正在读取某个 generation”的使用凭证。"""
+
     def __init__(self, registry: "GenerationLeaseRegistry", generation: int) -> None:
         self._registry = registry
         self.generation = int(generation)
         self._released = False
 
     def release(self) -> None:
+        # release 可以被 finally 和上下文管理器重复调用，因此用标记保证只减一次。
         if not self._released:
             self._released = True
             self._registry.release(self.generation)
@@ -94,11 +101,14 @@ class GenerationLease:
 
 
 class GenerationLeaseRegistry:
+    """线程安全地记录每个 generation 当前有多少个搜索者。"""
+
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._counts: dict[int, int] = {}
 
     def acquire(self, generation: int) -> GenerationLease:
+        # 多个 SearchWorker 可能同时登记，必须用锁保护计数器。
         with self._lock:
             key = int(generation)
             self._counts[key] = self._counts.get(key, 0) + 1
@@ -151,14 +161,18 @@ class IndexGenerationStore:
         return self._leases
 
     def active(self) -> PublishedGeneration | None:
+        # manifest 是“当前正式版本指针”。搜索只相信这里登记的 generation，
+        # 不会把目录中尚未完成的 *.building.db 当成可搜索数据库。
         payload = self._read_manifest()
         if payload is None:
             return None
         try:
             generation = int(payload["active_generation"])
+            # active_file 只允许位于索引根目录，避免 manifest 指向目录外文件。
             path = (self.root / str(payload["active_file"])).resolve()
             if path.parent != self.root or not path.is_file() or path.stat().st_size <= 0:
                 return None
+            # 文件存在还不够，还要验证数据库内部记录的 generation 与 manifest 一致。
             self._validate_read_only_database(path, generation)
             return PublishedGeneration(
                 generation=generation,
@@ -180,6 +194,9 @@ class IndexGenerationStore:
         live parse failures while the last published generation remains the
         search snapshot.
         """
+
+        # 教学重点：这个方法只给管理页面展示实时构建状态；SearchWorker 调用的是
+        # active()，因此用户不会读到尚未完整提交的候选数据。
 
         if not self.build_lock_path.is_file():
             return None
@@ -219,6 +236,7 @@ class IndexGenerationStore:
 
     @contextmanager
     def acquire_active(self) -> Iterator[tuple[PublishedGeneration, GenerationLease]]:
+        # 先读取当前快照，再登记租约。调用方离开 with 块时 finally 自动释放。
         generation = self.active()
         if generation is None:
             raise FileNotFoundError("尚无完整发布的搜索数据库")
@@ -540,6 +558,10 @@ class IndexGenerationStore:
         force: bool = False,
         scan_id: str = "",
     ) -> CandidateGeneration:
+        # 创建新一轮索引的基本策略：
+        # 1. active() 找到当前已发布版本作为 baseline；
+        # 2. 新 generation = baseline + 1；
+        # 3. 新内容始终写入独立的 *.building.db。
         self.root.mkdir(parents=True, exist_ok=True)
         baseline = self.active()
         baseline_compact = bool(baseline and _is_compact_file(baseline.path))
@@ -623,6 +645,7 @@ class IndexGenerationStore:
                 lock.write(lock_payload)
         except FileExistsError as exc:
             raise RuntimeError("已有索引候选正在构建") from exc
+        # generation 是索引数据库的版本号，不是线程编号，也不是文件数量。
         generation = (baseline.generation + 1) if baseline else 1
         candidate = self.root / (
             f"{self.database_path.stem}.gen-{generation:06d}.building.db"
@@ -636,6 +659,8 @@ class IndexGenerationStore:
             sidecar.unlink(missing_ok=True)
         try:
             if baseline is not None:
+                # 增量索引从上一份完整快照复制/展开出可写候选库。旧快照本身
+                # 始终保持不变，所以同一时间搜索可以继续读取 baseline。
                 if baseline_compact:
                     from local_full_text_search.core.compact_snapshot_builder import (
                         expand_compact_snapshot_isolated,
@@ -849,6 +874,8 @@ class IndexGenerationStore:
         published_at: str,
         partial: bool = False,
     ) -> PublishedGeneration:
+        # publish 是候选库从“正在建设”变为“正式可搜索版本”的唯一入口。
+        # 在调用它之前，ScanWorker 已完成索引和 readiness 检查。
         if candidate.owner_nonce:
             lock_payload = self._read_build_lock_payload()
             lock_pid = self._int_field(lock_payload.get("pid")) if lock_payload else None
@@ -923,10 +950,14 @@ class IndexGenerationStore:
         except Exception:
             compact_path.unlink(missing_ok=True)
             raise
+        # 先把候选文件改成正式 generation 文件名。os.replace 在同一文件系统上
+        # 是原子操作，其他线程不会看到一半改名的文件。
         final_path = self.root / f"{self.database_path.stem}.gen-{candidate.generation:06d}.db"
         os.replace(path, final_path)
         if source_path != final_path:
             source_path.unlink(missing_ok=True)
+        # manifest 相当于“当前版本指针”。previous_file 保留上一版本的信息，
+        # active_file 则告诉后续 SearchWorker 应该打开哪个只读数据库。
         payload = {
             "format_version": MANIFEST_FORMAT_VERSION,
             "active_generation": candidate.generation,
@@ -938,6 +969,9 @@ class IndexGenerationStore:
             "block_count": int(block_count),
             "partial": bool(partial),
         }
+        # 先完整写临时 manifest，再用 os.replace 一次性切换，避免搜索线程读到
+        # 只写了一半的 JSON。已经开始的搜索仍持有旧文件和旧 generation 租约；
+        # 切换之后新开始的搜索才会选择新 generation。
         temporary = self.manifest_path.with_suffix(self.manifest_path.suffix + ".tmp")
         temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         os.replace(temporary, self.manifest_path)
@@ -1067,6 +1101,7 @@ class IndexGenerationStore:
         self.build_lock_path.unlink(missing_ok=True)
 
     def cleanup_retired(self, *, keep_generations: int = 1) -> list[str]:
+        # 清理只处理已经退休的正式版本；当前 active 和最近保留版本不能删除。
         active = self.active()
         active_generation = active.generation if active else None
         removed: list[str] = []
@@ -1077,6 +1112,7 @@ class IndexGenerationStore:
                 continue
             if generation == active_generation or generation >= (active_generation or 0) - keep_generations:
                 continue
+            # 即使版本已经退休，只要某个 SearchWorker 仍持有租约，就继续保留。
             if self._leases.active(generation):
                 continue
             try:
