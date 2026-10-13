@@ -2793,6 +2793,8 @@ def main() -> int:
     instance_guard = None
     try:
         diagnostics.stage_started("检查重复启动")
+        # QApplication代表整个Qt桌面应用。它统一管理窗口、系统事件、字体样式
+        # 和主事件循环；一个正常的图形程序进程通常只创建一个QApplication。
         app = QApplication(sys.argv)
         app.setApplicationName(APP_DISPLAY_NAME)
         install_qt_message_logging(diagnostics)
@@ -2849,6 +2851,8 @@ def main() -> int:
             window.switch_page("failed")
         diagnostics.runtime_event("WINDOW_CONSTRUCTED")
         diagnostics.runtime_event("WINDOW_SHOW_REQUESTED")
+        # show()只是请求Qt把窗口显示出来；按钮点击、键盘输入和窗口重绘要等
+        # 下面app.exec()启动事件循环后，才能被持续接收和分发。
         window.show()
         diagnostics.stage_completed()
         diagnostics.mark_window_visible()
@@ -2878,6 +2882,9 @@ def main() -> int:
             window.top_bar.set_index_status("已恢复上次未完成的启动状态", is_pending=True)
         try:
             diagnostics.runtime_event("EVENT_LOOP_ENTERED")
+            # 进入Qt主事件循环。程序会在这里持续等待并处理鼠标、键盘、重绘、
+            # 定时器和跨线程信号，直到所有窗口关闭或应用收到退出请求。
+            # 因此界面槽函数必须尽快返回；耗时搜索和索引要交给后台线程。
             exit_code = app.exec()
             diagnostics.runtime_event(
                 "EVENT_LOOP_RETURNED",
