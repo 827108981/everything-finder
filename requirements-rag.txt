@@ -1,0 +1,4 @@
+fastembed>=0.9,<1
+httpx>=0.27,<1
+keyring>=25,<26
+tiktoken>=0.8,<1

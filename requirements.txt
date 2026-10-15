@@ -12,3 +12,7 @@ watchdog>=4.0
 pywin32>=306; platform_system=="Windows"
 pyinstaller>=6.0
 pytest>=8.0
+fastembed>=0.9,<1
+httpx>=0.27,<1
+keyring>=25,<26
+tiktoken>=0.8,<1

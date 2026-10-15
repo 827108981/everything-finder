@@ -63,7 +63,23 @@ hiddenimports = [
     "lxml",
     "lxml.etree",
     "psutil",
+    "keyring.backends.Windows",
+    "keyring.backends.Windows.WinVaultKeyring",
+    "tokenizers",
+    "onnxruntime",
+    "tiktoken",
 ]
+
+# RAG dependencies remain lazy at runtime so ordinary keyword search works
+# before an embedding model is downloaded or an API key is configured. The
+# frozen distribution still carries their Python modules and ONNX runtime.
+for package_name in ("fastembed", "onnxruntime", "keyring", "tiktoken"):
+    package_datas, package_binaries, package_hiddenimports = collect_all(package_name)
+    datas += package_datas
+    binaries += package_binaries
+    hiddenimports += package_hiddenimports
+for distribution_name in ("fastembed", "onnxruntime", "keyring", "tiktoken"):
+    datas += copy_metadata(distribution_name)
 
 if not skip_ocr:
     datas += [

@@ -56,12 +56,16 @@ from local_full_text_search.core.search_index_coordinator import (
     get_search_index_coordinator,
 )
 from local_full_text_search.models.search_query import SearchQuery
+from local_full_text_search.rag.index_store import RagIndexStore
+from local_full_text_search.rag.model_manager import CredentialStore, RagModelManager
+from local_full_text_search.rag.models import RagAnswer, RagQuery
 from local_full_text_search.services.settings_service import SettingsService
 from local_full_text_search.services.logging_service import log_event
 from local_full_text_search.services.database_location_service import (
     DatabaseLocationService,
 )
 from local_full_text_search.ui.preview_panel import PreviewPanel
+from local_full_text_search.ui.rag_page import RagPage
 from local_full_text_search.ui.result_view import ResultView, result_hits
 from local_full_text_search.version import __build_timestamp__, __version__
 from local_full_text_search.workers.scan_worker import ScanWorker
@@ -77,7 +81,7 @@ from local_full_text_search.workers.search_worker import SearchWorker
 from local_full_text_search.workers.search_history_worker import SearchHistoryWorker
 
 
-PAGE_INDEX = {"search": 0, "index": 1, "failed": 2, "settings": 3}
+PAGE_INDEX = {"search": 0, "index": 1, "failed": 2, "rag": 3, "settings": 4}
 logger = logging.getLogger(__name__)
 
 
@@ -199,6 +203,8 @@ class MainWindow(QMainWindow):
         # generation 管理器选择不可变的已发布快照，不会在扫描写入时读取 db。
         self.generation_base_path = Path(generation_base_path or db.db_path).resolve()
         self.index_generation_store = IndexGenerationStore(self.generation_base_path)
+        self.rag_index_store = RagIndexStore(self.generation_base_path)
+        self.rag_model_manager = RagModelManager()
         self.settings = settings
         self.settings_service = settings_service
         self.database_location_service = (
@@ -208,6 +214,15 @@ class MainWindow(QMainWindow):
         # SearchWorker，便于取消、判断是否仍在运行、等待退出并防止对象过早销毁。
         self.search_thread: QThread | None = None
         self.search_worker: SearchWorker | None = None
+        self.rag_index_thread: QThread | None = None
+        self.rag_index_worker = None
+        self.rag_query_thread: QThread | None = None
+        self.rag_query_worker = None
+        self.rag_api_test_thread: QThread | None = None
+        self.rag_api_test_worker = None
+        self.pending_rag_query: RagQuery | None = None
+        self._rag_build_pending = False
+        self._rag_model_settings_key = self._rag_settings_key(settings)
         self.search_priority_active = False
         self.search_history_thread: QThread | None = None
         self.search_history_worker: SearchHistoryWorker | None = None
@@ -292,6 +307,7 @@ class MainWindow(QMainWindow):
         # __init__() 又会创建 SearchBox。调用返回后，搜索框才算初始化完成。
         self._build_shell()
         self.settings_page.set_database_info(self.generation_base_path)
+        self._refresh_rag_api_key_status()
         self._install_shortcuts()
         self.file_change_detected.connect(self.on_monitored_file_changed)
         if defer_initial_refresh:
@@ -300,6 +316,8 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(0, self.start_database_snapshot)
         else:
             self.refresh_all()
+        if self.settings.rag_enabled and self.settings.rag_auto_build:
+            QTimer.singleShot(1500, self.maybe_auto_build_rag)
 
     def _build_shell(self) -> None:
         central = QWidget()
@@ -328,6 +346,7 @@ class MainWindow(QMainWindow):
         self.search_page = SearchPage(self.settings)
         self.index_page = IndexPage()
         self.failed_page = FailedPage()
+        self.rag_page = RagPage(self.settings)
         self.settings_page = SettingsPage(self.settings)
 
         self.search_splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -345,6 +364,7 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.search_splitter)
         self.stack.addWidget(self.index_page)
         self.stack.addWidget(self.failed_page)
+        self.stack.addWidget(self.rag_page)
         self.stack.addWidget(self.settings_page)
         body_layout.addWidget(self.stack, 1)
         root_layout.addWidget(body, 1)
@@ -400,7 +420,17 @@ class MainWindow(QMainWindow):
             self.cancel_scope_exclusion
         )
 
+        self.rag_page.ask_requested.connect(self.request_rag_query)
+        self.rag_page.index_requested.connect(self.start_rag_index)
+        self.rag_page.cancel_query_requested.connect(self.cancel_rag_query)
+        self.rag_page.cancel_index_requested.connect(self.cancel_rag_index)
+        self.rag_page.open_location_requested.connect(self.open_location)
+        self.rag_page.settings_requested.connect(lambda: self.switch_page("settings"))
+
         self.settings_page.save_requested.connect(self.save_settings)
+        self.settings_page.api_key_save_requested.connect(self.save_rag_api_key)
+        self.settings_page.api_key_clear_requested.connect(self.clear_rag_api_key)
+        self.settings_page.api_test_requested.connect(self.test_rag_api)
         self.settings_page.database_migration_requested.connect(
             self.request_database_migration
         )
@@ -427,12 +457,14 @@ class MainWindow(QMainWindow):
             "search": "本地全文搜索",
             "index": "索引管理",
             "failed": "未成功索引",
+            "rag": "智能问答",
             "settings": "设置",
         }
         subtitle_map = {
             "search": "搜索文件名、正文、表格、幻灯片和图片文字",
             "index": "管理需要搜索的本地文件夹和索引状态",
             "failed": "查看无法解析、仅元数据或需要处理的文件",
+            "rag": "使用本地资料回答问题，并查看可追溯来源",
             "settings": "调整搜索、索引和 OCR 默认行为",
         }
         self.top_bar.set_title(title_map[key], subtitle_map[key])
@@ -463,6 +495,7 @@ class MainWindow(QMainWindow):
         readiness = self.db.index_readiness(reconcile=False)
         self._latest_readiness = dict(readiness)
         self.search_page.set_roots(roots)
+        self.rag_page.set_roots(roots)
         self.search_page.set_stats(stats, has_roots=bool(roots))
         search_readiness = self._search_readiness_from_published_snapshot(readiness)
         self.search_page.set_index_ready(
@@ -611,6 +644,7 @@ class MainWindow(QMainWindow):
         readiness = dict(payload.get("readiness") or {})
         self._latest_readiness = readiness
         self.search_page.set_roots(roots)
+        self.rag_page.set_roots(roots)
         self.search_page.set_stats(readiness, has_roots=bool(roots))
         self.sidebar.set_failed_alert(
             0
@@ -678,6 +712,7 @@ class MainWindow(QMainWindow):
         self._last_snapshot_completed_monotonic = time.monotonic()
         self._latest_readiness = readiness
         self.search_page.set_roots(roots)
+        self.rag_page.set_roots(roots)
         self.search_page.set_stats(stats, has_roots=bool(roots))
         self.sidebar.set_failed_alert(
             0
@@ -694,6 +729,8 @@ class MainWindow(QMainWindow):
             roots,
             dict(payload.get("root_stats_by_id") or {}),
         )
+        if self.settings.rag_enabled and self.settings.rag_auto_build:
+            QTimer.singleShot(0, self.maybe_auto_build_rag)
         self.index_page.set_readiness(readiness)
         self.failed_page.set_rows(
             failed_rows,
@@ -2062,6 +2099,243 @@ class MainWindow(QMainWindow):
         if self.pending_force_complete_confirmation and not self.closing:
             self.pending_force_complete_confirmation = False
             QTimer.singleShot(0, self.confirm_force_complete_remaining)
+        if self._rag_build_pending and not self.closing:
+            QTimer.singleShot(0, self.start_rag_index)
+        elif self.settings.rag_enabled and self.settings.rag_auto_build and not self.closing:
+            QTimer.singleShot(0, self.maybe_auto_build_rag)
+        self._finish_close_if_idle()
+
+    @staticmethod
+    def _rag_settings_key(settings: AppSettings) -> tuple[str, ...]:
+        return (str(settings.rag_embedding_model_id or ""),)
+
+    def _refresh_rag_api_key_status(self) -> None:
+        try:
+            exists = bool(CredentialStore().get_api_key())
+        except Exception as exc:
+            self.settings_page.set_api_key_status(f"凭据库不可用：{exc}")
+            return
+        self.settings_page.set_api_key_status(
+            "已配置 API key（保存在 Windows 凭据库）。"
+            if exists
+            else "尚未保存 API key；输入后保存到 Windows 凭据库。"
+        )
+
+    def save_rag_api_key(self, api_key: str) -> None:
+        try:
+            CredentialStore().save_api_key(api_key)
+        except Exception as exc:
+            self.settings_page.set_api_key_status(f"密钥保存失败：{exc}")
+            return
+        self.settings_page.set_api_key_status("API key 已保存到 Windows 凭据库，未写入 settings.json。")
+
+    def clear_rag_api_key(self) -> None:
+        try:
+            CredentialStore().delete_api_key()
+        except Exception as exc:
+            self.settings_page.set_api_key_status(f"删除密钥失败：{exc}")
+            return
+        self.settings_page.set_api_key_status("已从 Windows 凭据库删除 API key。")
+
+    def test_rag_api(self, base_url: str, model: str) -> None:
+        from local_full_text_search.workers.rag_api_check_worker import RagApiCheckWorker
+
+        if self.rag_api_test_thread is not None:
+            return
+        self.settings_page.set_api_key_status("正在后台测试 API 连接…")
+        self.rag_api_test_thread = QThread()
+        self.rag_api_test_worker = RagApiCheckWorker(base_url, model)
+        self.rag_api_test_worker.moveToThread(self.rag_api_test_thread)
+        self.rag_api_test_thread.started.connect(self.rag_api_test_worker.run)
+        self.rag_api_test_worker.finished.connect(self.on_rag_api_test_finished)
+        self.rag_api_test_worker.failed.connect(self.on_rag_api_test_failed)
+        self.rag_api_test_worker.ended.connect(self.rag_api_test_thread.quit)
+        self.rag_api_test_thread.finished.connect(self.cleanup_rag_api_test_thread)
+        self.rag_api_test_thread.start()
+
+    def on_rag_api_test_finished(self, health: object) -> None:
+        available = bool(getattr(health, "available", False))
+        message = str(getattr(health, "message", "API 返回了无效状态"))
+        self.settings_page.set_api_key_status(
+            f"API 测试成功：{message}" if available else f"API 测试失败：{message}"
+        )
+
+    def on_rag_api_test_failed(self, message: str) -> None:
+        self.settings_page.set_api_key_status(f"API 测试失败：{message}")
+
+    def cleanup_rag_api_test_thread(self) -> None:
+        self.rag_api_test_thread = None
+        self.rag_api_test_worker = None
+        self._finish_close_if_idle()
+
+    def maybe_auto_build_rag(self) -> None:
+        if (
+            self.closing
+            or not self.settings.rag_enabled
+            or not self.settings.rag_auto_build
+        ):
+            return
+        if self.scan_thread is not None:
+            self._rag_build_pending = True
+            self.rag_page.set_status("搜索索引更新完成后会自动构建智能问答索引。")
+            return
+        self.start_rag_index()
+
+    def start_rag_index(self) -> None:
+        from local_full_text_search.workers.rag_index_worker import RagIndexWorker
+
+        if self.closing:
+            return
+        if not self.settings.rag_enabled:
+            self.rag_page.set_status("请先在设置中启用智能问答。")
+            return
+        if self.index_generation_store.active() is None:
+            self.rag_page.set_status("请先完成搜索索引构建。")
+            return
+        if self.rag_index_thread is not None:
+            return
+        if self.scan_thread is not None:
+            self._rag_build_pending = True
+            self.rag_page.set_task_state("index_running", "等待搜索索引更新结束后构建。")
+            return
+        self._rag_build_pending = False
+        if self.rag_query_thread is not None:
+            self._rag_build_pending = True
+            self.rag_page.set_status("当前问答结束后开始构建智能索引。")
+            self.cancel_rag_query()
+            return
+        self.rag_index_thread = QThread()
+        self.rag_index_worker = RagIndexWorker(
+            self.generation_base_path,
+            self.settings,
+            self.rag_model_manager,
+        )
+        self.rag_index_worker.moveToThread(self.rag_index_thread)
+        self.rag_index_thread.started.connect(self.rag_index_worker.run)
+        self.rag_index_worker.progress.connect(self.rag_page.set_progress)
+        self.rag_index_worker.finished.connect(self.on_rag_index_finished)
+        self.rag_index_worker.failed.connect(self.on_rag_index_failed)
+        self.rag_index_worker.cancelled.connect(self.on_rag_index_cancelled)
+        self.rag_index_worker.ended.connect(self.rag_index_thread.quit)
+        self.rag_index_thread.finished.connect(self.cleanup_rag_index_thread)
+        self.rag_page.set_task_state("index_running", "正在准备智能问答索引。")
+        self.rag_index_thread.start()
+
+    def cancel_rag_index(self) -> None:
+        self._rag_build_pending = False
+        self.pending_rag_query = None
+        if self.rag_index_worker is not None:
+            self.rag_index_worker.cancel()
+
+    def on_rag_index_finished(self, report: object) -> None:
+        count = int(getattr(report, "chunk_count", 0) or 0)
+        mode = str(getattr(report, "fts_mode", "unknown"))
+        self.rag_page.set_status(
+            f"智能索引已就绪：{count:,} 个证据块 · 词法索引 {mode}。"
+        )
+
+    def on_rag_index_failed(self, message: str) -> None:
+        logger.error("RAG index build failed: %s", message)
+        self.rag_page.set_task_state("idle", f"智能索引构建失败：{message}")
+
+    def on_rag_index_cancelled(self) -> None:
+        self.rag_page.set_task_state("idle", "智能索引构建已取消；当前已发布版本仍可使用。")
+
+    def cleanup_rag_index_thread(self) -> None:
+        self.rag_index_thread = None
+        self.rag_index_worker = None
+        if self.closing:
+            self.rag_model_manager.stop()
+            self._finish_close_if_idle()
+            return
+        pending_query = self.pending_rag_query
+        self.pending_rag_query = None
+        if pending_query is not None:
+            QTimer.singleShot(0, lambda query=pending_query: self._start_rag_query(query))
+        else:
+            self.rag_page.set_task_state("idle")
+        self._finish_close_if_idle()
+
+    def request_rag_query(self, query: object) -> None:
+        if not isinstance(query, RagQuery):
+            return
+        if not self.settings.rag_enabled:
+            self.rag_page.set_status("请先在设置中启用智能问答。")
+            return
+        if self.rag_index_thread is not None:
+            self.pending_rag_query = query
+            self.rag_page.set_status("智能索引构建完成后开始回答。")
+            return
+        if self.rag_query_thread is not None:
+            self.pending_rag_query = query
+            self.rag_page.set_status("正在停止上一个问题，然后处理最新问题。")
+            self.cancel_rag_query()
+            self.pending_rag_query = query
+            return
+        self._start_rag_query(query)
+
+    def _start_rag_query(self, query: RagQuery) -> None:
+        from local_full_text_search.workers.rag_query_worker import RagQueryWorker
+
+        if self.closing or self.rag_query_thread is not None or self.rag_index_thread is not None:
+            self.pending_rag_query = query
+            return
+        self.rag_query_thread = QThread()
+        self.rag_query_worker = RagQueryWorker(
+            self.generation_base_path,
+            self.settings,
+            query,
+            self.rag_model_manager,
+        )
+        self.rag_query_worker.moveToThread(self.rag_query_thread)
+        self.rag_query_thread.started.connect(self.rag_query_worker.run)
+        self.rag_query_worker.progress.connect(self.rag_page.set_progress)
+        self.rag_query_worker.finished.connect(self.on_rag_query_finished)
+        self.rag_query_worker.failed.connect(self.on_rag_query_failed)
+        self.rag_query_worker.cancelled.connect(self.on_rag_query_cancelled)
+        self.rag_query_worker.ended.connect(self.rag_query_thread.quit)
+        self.rag_query_thread.finished.connect(self.cleanup_rag_query_thread)
+        self.rag_page.set_task_state("query_running", "正在检索证据并准备本地模型。")
+        self.rag_query_thread.start()
+
+    def cancel_rag_query(self) -> None:
+        if self.rag_query_worker is not None:
+            self.rag_query_worker.cancel()
+
+    def on_rag_query_finished(self, answer: object) -> None:
+        if not isinstance(answer, RagAnswer):
+            self.rag_page.set_status("问答返回了无效结果。")
+            return
+        if answer.status == "index_stale" and self.settings.rag_auto_build and not self.closing:
+            self.pending_rag_query = self.rag_query_worker.query if self.rag_query_worker else None
+            self._rag_build_pending = True
+            self.rag_page.set_answer(answer)
+            return
+        self.rag_page.set_answer(answer)
+
+    def on_rag_query_failed(self, message: str) -> None:
+        logger.error("RAG query failed: %s", message)
+        self.rag_page.set_task_state("idle", f"智能问答失败：{message}")
+
+    def on_rag_query_cancelled(self) -> None:
+        self.rag_page.set_task_state("idle", "智能问答已停止。")
+
+    def cleanup_rag_query_thread(self) -> None:
+        self.rag_query_thread = None
+        self.rag_query_worker = None
+        if self.closing:
+            self.rag_model_manager.stop()
+            self._finish_close_if_idle()
+            return
+        if self._rag_build_pending:
+            self._rag_build_pending = False
+            QTimer.singleShot(0, self.start_rag_index)
+        elif self.pending_rag_query is not None:
+            query = self.pending_rag_query
+            self.pending_rag_query = None
+            QTimer.singleShot(0, lambda: self._start_rag_query(query))
+        else:
+            self.rag_page.set_task_state("idle")
         self._finish_close_if_idle()
 
     def request_search(self) -> None:
@@ -2377,11 +2651,24 @@ class MainWindow(QMainWindow):
         self.failed_page.set_status(f"已导出全部 {len(rows):,} 条明细：{target}")
 
     def save_settings(self, settings: AppSettings) -> None:
+        if self.rag_index_thread is not None or self.rag_query_thread is not None:
+            self.settings_page.rag_model_status.setText(
+                "请等待当前智能问答任务结束后再保存设置。"
+            )
+            return
+        previous_key = self._rag_model_settings_key
         self.settings = settings
         self.settings_service.save(settings)
         self.search_page.apply_settings(settings)
+        self.rag_page.apply_settings(settings)
+        new_key = self._rag_settings_key(settings)
+        if new_key != previous_key:
+            self.rag_model_manager.stop()
+        self._rag_model_settings_key = new_key
         self.refresh_file_monitor()
         self.search_page.set_status("设置已保存")
+        if settings.rag_enabled and settings.rag_auto_build:
+            QTimer.singleShot(0, self.maybe_auto_build_rag)
 
     def request_database_migration(self, target_directory: str) -> None:
         if self.database_migration_thread is not None:
@@ -2390,6 +2677,8 @@ class MainWindow(QMainWindow):
             self.scan_thread is not None
             or self.search_thread is not None
             or self.exclusion_thread is not None
+            or self.rag_index_thread is not None
+            or self.rag_query_thread is not None
         ):
             QMessageBox.information(
                 self,
@@ -2531,6 +2820,8 @@ class MainWindow(QMainWindow):
                 self.index_generation_store = IndexGenerationStore(
                     self.generation_base_path
                 )
+                self.rag_index_store = RagIndexStore(self.generation_base_path)
+                self.rag_model_manager.stop()
                 self.settings_page.set_database_info(self.generation_base_path)
                 self.settings_page.set_database_migration_completed(payload)
                 self.refresh_all()
@@ -2592,6 +2883,9 @@ class MainWindow(QMainWindow):
                 "database_migration": self.database_migration_thread is not None,
                 "database_snapshot": self.database_snapshot_thread is not None,
                 "root_removal": self.root_removal_thread is not None,
+                "rag_index": self.rag_index_thread is not None,
+                "rag_query": self.rag_query_thread is not None,
+                "rag_api_test": self.rag_api_test_thread is not None,
             },
         )
         get_search_index_coordinator().begin_stopping()
@@ -2604,7 +2898,11 @@ class MainWindow(QMainWindow):
             and self.database_migration_thread is None
             and self.database_snapshot_thread is None
             and self.root_removal_thread is None
+            and self.rag_index_thread is None
+            and self.rag_query_thread is None
+            and self.rag_api_test_thread is None
         ):
+            self.rag_model_manager.stop()
             _log_ui_lifecycle_event("app.window.close_completed", mode="immediate")
             event.accept()
             return
@@ -2624,6 +2922,10 @@ class MainWindow(QMainWindow):
         self.cancel_search()
         self.cancel_scope_exclusion()
         self.cancel_database_migration()
+        self.cancel_rag_index()
+        self.cancel_rag_query()
+        if self.rag_api_test_worker is not None:
+            self.rag_api_test_worker.cancel()
         if self.database_snapshot_worker is not None:
             self.database_snapshot_worker.cancel()
         self.hide()
@@ -2641,11 +2943,15 @@ class MainWindow(QMainWindow):
             and self.database_migration_thread is None
             and self.database_snapshot_thread is None
             and self.root_removal_thread is None
+            and self.rag_index_thread is None
+            and self.rag_query_thread is None
+            and self.rag_api_test_thread is None
         ):
             _log_ui_lifecycle_event(
                 "app.shutdown_workers_idle",
                 scan_id=self._active_scan_id or None,
             )
+            self.rag_model_manager.stop()
             self._force_exit("workers_idle")
 
     def shutdown_for_interrupt(self, timeout_ms: int = 3000) -> None:
@@ -2667,6 +2973,10 @@ class MainWindow(QMainWindow):
         self.cancel_search()
         self.cancel_scope_exclusion()
         self.cancel_database_migration()
+        self.cancel_rag_index()
+        self.cancel_rag_query()
+        if self.rag_api_test_worker is not None:
+            self.rag_api_test_worker.cancel()
         if self.database_snapshot_worker is not None:
             self.database_snapshot_worker.cancel()
         self.db.interrupt_active_connections()
@@ -2679,6 +2989,9 @@ class MainWindow(QMainWindow):
             self.database_migration_thread,
             self.database_snapshot_thread,
             self.root_removal_thread,
+            self.rag_index_thread,
+            self.rag_query_thread,
+            self.rag_api_test_thread,
         )
         for thread in threads:
             if thread is None:
@@ -2689,6 +3002,7 @@ class MainWindow(QMainWindow):
             thread.quit()
             thread.wait(remaining)
         self._interrupt_shutdown_in_progress = False
+        self.rag_model_manager.stop()
         _log_ui_lifecycle_event(
             "app.shutdown_interrupt_completed",
             scan_id=self._active_scan_id or None,
@@ -2701,6 +3015,10 @@ class MainWindow(QMainWindow):
                 scan_id=self._active_scan_id or None,
                 reason=str(reason),
             )
+            try:
+                self.rag_model_manager.stop()
+            except Exception:
+                logger.exception("Failed to stop the owned RAG model service")
             os._exit(0)
 
 
@@ -2764,6 +3082,7 @@ class Sidebar(QFrame):
         self._add_button(layout, "搜索", "search")
         self._add_button(layout, "索引管理", "index")
         self._add_button(layout, "未成功索引", "failed")
+        self._add_button(layout, "智能问答", "rag")
         layout.addStretch(1)
         layout.addWidget(separator())
         self._add_button(layout, "设置", "settings")
@@ -5115,6 +5434,9 @@ class FailedPage(QWidget):
 
 class SettingsPage(QWidget):
     save_requested = Signal(object)
+    api_key_save_requested = Signal(str)
+    api_key_clear_requested = Signal()
+    api_test_requested = Signal(str, str)
     database_migration_requested = Signal(str)
     database_migration_cancel_requested = Signal()
 
@@ -5248,6 +5570,87 @@ class SettingsPage(QWidget):
             )
         )
 
+        self.rag_enabled = QCheckBox("启用智能问答")
+        self.rag_enabled.setChecked(settings.rag_enabled)
+        self.rag_auto_build = QCheckBox("搜索索引更新后自动构建 RAG 索引")
+        self.rag_auto_build.setChecked(settings.rag_auto_build)
+        self.rag_embedding_model_id = QLineEdit(settings.rag_embedding_model_id)
+        self.rag_embedding_model_id.setPlaceholderText("BAAI/bge-small-zh-v1.5")
+        self.rag_llm_base_url = QLineEdit(settings.rag_llm_base_url)
+        self.rag_llm_base_url.setPlaceholderText("https://api.openai.com/v1")
+        self.rag_llm_model = QLineEdit(settings.rag_llm_model)
+        self.rag_llm_model.setPlaceholderText("填写 API 平台提供的 model ID")
+        api_model_row = QWidget()
+        api_model_layout = QHBoxLayout(api_model_row)
+        api_model_layout.setContentsMargins(0, 0, 0, 0)
+        api_model_layout.addWidget(self.rag_llm_model, 1)
+        self.rag_api_test_button = QPushButton("测试连接")
+        self.rag_api_test_button.clicked.connect(
+            lambda: self.api_test_requested.emit(
+                self.rag_llm_base_url.text().strip(),
+                self.rag_llm_model.text().strip(),
+            )
+        )
+        api_model_layout.addWidget(self.rag_api_test_button)
+        self.rag_llm_api_key = QLineEdit()
+        self.rag_llm_api_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self.rag_llm_api_key.setPlaceholderText("输入后保存到 Windows 凭据库")
+        self.rag_llm_api_key_save = QPushButton("保存密钥")
+        self.rag_llm_api_key_clear = QPushButton("删除已保存密钥")
+        self.rag_llm_api_key_status = QLabel("密钥不写入应用设置文件。")
+        self.rag_llm_api_key_status.setObjectName("MutedText")
+        self.rag_llm_api_key_status.setWordWrap(True)
+        api_key_row = QWidget()
+        api_key_layout = QHBoxLayout(api_key_row)
+        api_key_layout.setContentsMargins(0, 0, 0, 0)
+        api_key_layout.addWidget(self.rag_llm_api_key, 1)
+        api_key_layout.addWidget(self.rag_llm_api_key_save)
+        api_key_layout.addWidget(self.rag_llm_api_key_clear)
+        self.rag_llm_context = QSpinBox()
+        self.rag_llm_context.setRange(2048, 131072)
+        self.rag_llm_context.setSingleStep(1024)
+        self.rag_llm_context.setValue(settings.rag_llm_context_tokens)
+        self.rag_top_k = QSpinBox()
+        self.rag_top_k.setRange(1, 20)
+        self.rag_top_k.setValue(settings.rag_top_k)
+        self.rag_context_tokens = QSpinBox()
+        self.rag_context_tokens.setRange(256, 16000)
+        self.rag_context_tokens.setSingleStep(128)
+        self.rag_context_tokens.setValue(settings.rag_context_max_tokens)
+        self.rag_answer_tokens = QSpinBox()
+        self.rag_answer_tokens.setRange(64, 4096)
+        self.rag_answer_tokens.setSingleStep(64)
+        self.rag_answer_tokens.setValue(settings.rag_answer_max_tokens)
+        self.rag_model_status = QLabel("首次构建智能索引时会下载并缓存中文 Embedding ONNX 模型。")
+        self.rag_model_status.setObjectName("MutedText")
+        self.rag_model_status.setWordWrap(True)
+        self.rag_api_privacy_status = QLabel(
+            "提问时，问题和选中的资料片段会发送到上方配置的 API URL。"
+        )
+        self.rag_api_privacy_status.setObjectName("MutedText")
+        self.rag_api_privacy_status.setWordWrap(True)
+
+        host_layout.addWidget(
+            settings_card(
+                "智能问答 API",
+                [
+                    ("", self.rag_enabled),
+                    ("", self.rag_auto_build),
+                    ("Embedding 模型 ID", self.rag_embedding_model_id),
+                    ("API Base URL", self.rag_llm_base_url),
+                    ("API Model", api_model_row),
+                    ("API Key", api_key_row),
+                    ("", self.rag_llm_api_key_status),
+                    ("", self.rag_api_privacy_status),
+                    ("模型上下文长度", self.rag_llm_context),
+                    ("每次提问最多使用证据块", self.rag_top_k),
+                    ("上下文 token 预算", self.rag_context_tokens),
+                    ("回答 token 上限", self.rag_answer_tokens),
+                    ("", self.rag_model_status),
+                ],
+            )
+        )
+
         self.enable_ocr = QCheckBox("启用 OCR")
         self.enable_ocr.setChecked(settings.enable_ocr)
         self.ocr_images = QCheckBox("索引图片 OCR")
@@ -5362,6 +5765,9 @@ class SettingsPage(QWidget):
         self.auto_search.toggled.connect(self.search_delay.setEnabled)
         self.search_delay.setEnabled(self.auto_search.isChecked())
         self.enable_ocr.toggled.connect(self._update_ocr_controls)
+        self.rag_enabled.toggled.connect(self._update_rag_controls)
+        self.rag_llm_api_key_save.clicked.connect(self._save_rag_api_key)
+        self.rag_llm_api_key_clear.clicked.connect(self.api_key_clear_requested.emit)
         self.advanced_toggle.toggled.connect(self._toggle_advanced)
         self.database_choose_button.clicked.connect(
             self.choose_database_directory
@@ -5374,6 +5780,7 @@ class SettingsPage(QWidget):
             self.database_migration_cancel_requested.emit
         )
         self._update_ocr_controls(self.enable_ocr.isChecked())
+        self._update_rag_controls(self.rag_enabled.isChecked())
         self._refresh_database_actions()
 
     def set_database_info(self, path: Path) -> None:
@@ -5553,6 +5960,31 @@ class SettingsPage(QWidget):
         ):
             widget.setEnabled(enabled)
 
+    def _update_rag_controls(self, enabled: bool) -> None:
+        for widget in (
+            self.rag_auto_build,
+            self.rag_embedding_model_id,
+            self.rag_llm_base_url,
+            self.rag_llm_model,
+            self.rag_api_test_button,
+            self.rag_llm_api_key,
+            self.rag_llm_api_key_save,
+            self.rag_llm_api_key_clear,
+            self.rag_llm_context,
+            self.rag_top_k,
+            self.rag_context_tokens,
+            self.rag_answer_tokens,
+        ):
+            widget.setEnabled(enabled)
+
+    def _save_rag_api_key(self) -> None:
+        value = self.rag_llm_api_key.text().strip()
+        if not value:
+            self.rag_llm_api_key_status.setText("请输入 API key 后保存。")
+            return
+        self.api_key_save_requested.emit(value)
+        self.rag_llm_api_key.clear()
+
     def apply(self) -> None:
         self.settings.page_size = int(self.page_size.value())
         self.settings.max_results = int(self.max_results.value())
@@ -5575,7 +6007,19 @@ class SettingsPage(QWidget):
         self.settings.monitor_file_changes = self.monitor_changes.isChecked()
         self.settings.include_hidden_files = self.hidden_files.isChecked()
         self.settings.excluded_dirs = [line.strip() for line in self.exclude_dirs.toPlainText().splitlines() if line.strip()]
+        self.settings.rag_enabled = self.rag_enabled.isChecked()
+        self.settings.rag_auto_build = self.rag_auto_build.isChecked()
+        self.settings.rag_embedding_model_id = self.rag_embedding_model_id.text().strip() or "BAAI/bge-small-zh-v1.5"
+        self.settings.rag_llm_base_url = self.rag_llm_base_url.text().strip()
+        self.settings.rag_llm_model = self.rag_llm_model.text().strip()
+        self.settings.rag_llm_context_tokens = int(self.rag_llm_context.value())
+        self.settings.rag_top_k = int(self.rag_top_k.value())
+        self.settings.rag_context_max_tokens = int(self.rag_context_tokens.value())
+        self.settings.rag_answer_max_tokens = int(self.rag_answer_tokens.value())
         self.save_requested.emit(self.settings)
+
+    def set_api_key_status(self, text: str) -> None:
+        self.rag_llm_api_key_status.setText(str(text))
 
 
 def separator() -> QFrame:

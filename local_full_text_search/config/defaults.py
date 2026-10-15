@@ -7,7 +7,7 @@ from .constants import DEFAULT_EXCLUDED_DIRS, DEFAULT_EXCLUDED_FILE_PATTERNS
 
 @dataclass(slots=True)
 class AppSettings:
-    settings_version: int = 10
+    settings_version: int = 11
     default_search_mode: str = "exact"
     case_sensitive: bool = False
     auto_search: bool = False
@@ -93,6 +93,16 @@ class AppSettings:
     max_zip_file_count: int = 2000
     max_zip_uncompressed_bytes: int = 1024 * 1024 * 1024
     max_zip_depth: int = 2
+    rag_enabled: bool = False
+    rag_auto_build: bool = True
+    rag_embedding_model_id: str = "BAAI/bge-small-zh-v1.5"
+    rag_llm_base_url: str = "https://api.openai.com/v1"
+    rag_llm_model: str = ""
+    rag_llm_context_tokens: int = 8192
+    rag_top_k: int = 8
+    rag_include_ocr: bool = True
+    rag_context_max_tokens: int = 2300
+    rag_answer_max_tokens: int = 512
     excluded_dirs: list[str] = field(default_factory=lambda: sorted(DEFAULT_EXCLUDED_DIRS))
     excluded_file_patterns: list[str] = field(
         default_factory=lambda: list(DEFAULT_EXCLUDED_FILE_PATTERNS)
@@ -116,7 +126,7 @@ class AppSettings:
             # Terminal failures now require an explicit retry request. A
             # changed source identity is still scheduled automatically.
             values["retry_failed_files"] = False
-        values["settings_version"] = 10
+        values["settings_version"] = 11
         return cls(**values)
 
 
