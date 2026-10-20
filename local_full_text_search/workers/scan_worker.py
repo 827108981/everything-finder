@@ -22,6 +22,7 @@ from local_full_text_search.core.index_generation_store import (
     CandidateGeneration,
     IndexGenerationStore,
 )
+from local_full_text_search.core.index_change_detector import check_published_index_changes
 from local_full_text_search.core.errors import CancelledError
 from local_full_text_search.core.task_manager import CancelToken
 from local_full_text_search.core.search_index_coordinator import (
@@ -60,6 +61,7 @@ class ScanWorker(QObject):
         self.db_path = db_path
         self.control_db_path = Path(control_db_path or db_path)
         self.generation_store = IndexGenerationStore(db_path)
+        self._change_check = None
         self.candidate: CandidateGeneration | None = None
         self.candidate_published = False
         self.settings = settings
@@ -141,6 +143,63 @@ class ScanWorker(QObject):
             if runtime_issues:
                 raise RuntimeError(frozen_runtime_error_message(runtime_issues))
             self._phase_event("runtime_check", "completed")
+            self.progress.emit(
+                {
+                    "stage": "change_check",
+                    "phase_label": "正在只读检查文件与索引版本是否有变化…",
+                }
+            )
+            self._phase_event("change_check", "started")
+            from local_full_text_search.core.index_manager import parser_identity_for_path
+
+            change_check = check_published_index_changes(
+                self.generation_store,
+                self.control_db_path,
+                self.settings,
+                root_ids=self.root_ids,
+                file_ids=self.file_ids,
+                parser_identity=parser_identity_for_path,
+                cancel_token=self.token,
+            )
+            self._change_check = change_check
+            self._phase_event(
+                "change_check",
+                "completed",
+                **change_check.to_dict(),
+            )
+            log_event(
+                "index.scan.change_check",
+                component="scan_worker",
+                scan_id=self.scan_id,
+                database_path=str(self.db_path),
+                control_database_path=str(self.control_db_path),
+                **change_check.to_dict(),
+            )
+            if change_check.unchanged:
+                current_active = self.generation_store.active()
+                message = (
+                    f"索引未变化，继续使用第 {change_check.active_generation} 代；"
+                    "未创建新的索引数据库"
+                )
+                self._terminal_status = "finished"
+                self._terminal_payload = {
+                    "status": "finished",
+                    "unchanged": True,
+                    "message": message,
+                    "active_generation": change_check.active_generation,
+                    "active_database_path": str(current_active.path if current_active else ""),
+                    "scan_id": self.scan_id,
+                    "run_ids": [],
+                    "change_check": change_check.to_dict(),
+                }
+                self.progress.emit(
+                    {
+                        "stage": "unchanged",
+                        "phase_label": message,
+                        "change_check": change_check.to_dict(),
+                    }
+                )
+                return
             self.progress.emit(
                 {
                     "stage": "snapshot_candidate",
@@ -416,6 +475,13 @@ class ScanWorker(QObject):
                 block_count=int(readiness.get("block_count") or 0),
                 published_at=published_at,
                 partial=self.partial_publish,
+                scan_signature=(
+                    self._change_check.scan_signature
+                    if self._change_check is not None
+                    and not self.root_ids
+                    and not self.file_ids
+                    else None
+                ),
             )
             self.candidate_published = True
             if self.partial_publish:
@@ -491,6 +557,7 @@ class ScanWorker(QObject):
                 self._terminal_status = "failed"
                 self._last_error_message = (
                     "目录发现子进程意外中断，已停止本轮候选发布"
+                    f"（{type(exc).__name__}）"
                 )
                 self._terminal_payload = {
                     "status": "failed",

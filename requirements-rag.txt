@@ -1,0 +1,13 @@
+# Optional dependencies for the local RAG pipeline.
+# PyTorch CPU wheels keep the desktop installer from pulling CUDA runtimes.
+--extra-index-url https://download.pytorch.org/whl/cpu
+chromadb>=1.0,<2
+huggingface-hub>=0.30,<2
+kubernetes>=28.1,<35
+numpy>=1.26,<3
+openai>=1.80,<3
+PyYAML==6.0.2
+safetensors>=0.4
+sentence-transformers>=5.0,<6
+torch>=2.4,<3
+transformers>=4.49,<5

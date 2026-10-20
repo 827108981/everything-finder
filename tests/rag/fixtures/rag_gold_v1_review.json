@@ -1,0 +1,872 @@
+{
+  "_阅读说明": {
+    "用途": "供业务人员逐题审核的排版版 JSON；cases 与 rag_gold_v1.jsonl 的题目内容一致。",
+    "证据文件相对目录": "E:/免疫资料",
+    "审核顺序": "先看 question、expected_behavior 和 required_facts，再核对 gold_evidence；最后检查 forbidden_claims 与 hard_negatives。",
+    "状态提示": "已核实本批有引文的证据存在于已发布 AI 索引包 g000008-9f01fc283b；第017–018题属于超声影像产线，gold_evidence 为空，仅保留易误用的免疫仪片段。当前全文索引为第24代，AI索引仍是较早发布的版本。18道题均已由业务人员审核，可计入针对本 AI 索引版本的正式评测。",
+    "AI索引目录": "E:/everythingfinder-db/rag/rag.g000008-9f01fc283b"
+  },
+  "_字段说明": {
+    "id": "题目唯一编号，不随问法或排序改变。",
+    "group_id": "同一业务问题的不同问法共用组名；不同业务问题使用不同组名。",
+    "question": "拟真的用户原话；未明确的条件不得从问题外补入。",
+    "corpus_snapshot": "标注所对应的已发布 AI 索引包 bundle_id；本批为 g000008-9f01fc283b，不等同于当前全文索引代数。",
+    "expected_behavior": "期望系统采取的回答方式；具体取值见 _取值说明.expected_behavior。",
+    "constraints": {
+      "说明": "只记录问题中明确的限制条件；未明确一律为空字符串。",
+      "scope": "涉及单个、多个还是全部项目。",
+      "stage": "样本检测、定标、质控等发生阶段。",
+      "direction": "偏低、偏高或异常等变化方向。",
+      "object": "用户询问的指标、部件或操作对象。"
+    },
+    "gold_evidence": {
+      "说明": "一条记录是一个来源片段，可承载连续的完整操作流程；并非每个操作步骤都要单列一条证据。required_facts 把答案拆成可核对的步骤或要点。超出当前语料范围的拒答题没有正面证据，使用空数组。",
+      "file": "相对于上方“证据文件相对目录”的 PDF 文件名。",
+      "page": "PDF 阅读器显示的页码，从 1 开始。",
+      "position": "页内标题或位置，帮助快速找到原文。",
+      "quote": "PDF 原文短句。",
+      "relevance": "与本题事实的相关性等级；具体取值见 _取值说明.relevance。"
+    },
+    "hard_negatives": {
+      "说明": "可能被错误召回或误用的相似证据。",
+      "file": "相对 PDF 文件名。",
+      "page": "PDF 页码，从 1 开始。",
+      "position": "页内标题或位置。",
+      "quote": "容易误用的原文短句。",
+      "reason": "为什么不能用此片段回答本题。"
+    },
+    "required_facts": "合格回答必须包含的事实或必要的证据不足说明；这是审核答案的要点，不是系统运行结果。",
+    "forbidden_claims": "回答中不得出现的错误、跨场景或无依据结论。",
+    "missing_fields": "若需澄清，必须向用户补充询问的条件；无缺失则为空数组。",
+    "review_status": "业务审核状态；具体取值见 _取值说明.review_status。"
+  },
+  "_取值说明": {
+    "expected_behavior": {
+      "answer": "现有证据足以回答问题，应完整回答。",
+      "partial_answer": "只回答资料直接支持的部分，并明确剩余部分缺少依据。",
+      "clarify": "缺少决定答案的关键条件，应先询问。",
+      "refuse": "资料不足，不能给出用户要求的具体判断、部件或操作。"
+    },
+    "relevance": {
+      "0": "不相关。",
+      "1": "相关但不足以支持该条事实或整题结论。",
+      "2": "直接支持该条事实。"
+    },
+    "review_status": {
+      "pending": "待业务人员审核。",
+      "reviewed": "人工核实通过，可计入针对本索引版本的正式评测。",
+      "disputed": "证据或预期行为存在争议，暂不纳入评测。"
+    }
+  },
+  "cases": [
+    {
+      "id": "rag-biz-001",
+      "question": "仪器已上电、网线也接好了，交换机这个端口灯还是灭的，怎么查？",
+      "expected_behavior": "answer",
+      "required_facts": [
+        "步骤1：确认交换机已上电，电源指示灯亮起。",
+        "步骤2：确认模式开关处于标准模式。",
+        "步骤3：仪器上电且网线已连接时，检查对应端口灯是否常亮或闪烁。",
+        "步骤4：若端口灯灭，来回拨动模式开关并最终拨回标准模式，再尝试更换插口。",
+        "步骤5：上述检查后仍异常，才考虑更换交换机。"
+      ],
+      "forbidden_claims": [
+        "把主控板D107当成交换机端口灯。",
+        "未做端口和模式检查就断言交换机必须更换。"
+      ],
+      "constraints": {
+        "scope": "",
+        "stage": "",
+        "direction": "异常",
+        "object": "交换机端口指示灯"
+      },
+      "missing_fields": [],
+      "gold_evidence": [
+        {
+          "file": "免疫场景化培训教材-硬件V1.1.pdf",
+          "page": 9,
+          "position": "交换机／检查点1–5，完整排查流程",
+          "quote": "检查点：检查确认交换机的工作状态及指示灯状态\n1. 检查交换机是否已上电-指示灯亮起\n2. 交换机的模式开关是否在【标准模式】下；\n3. 仪器上电状态下，已连接网线的接口对应的指示灯是否处于常亮或闪烁的状态；\n4. 若接口对应的指示灯为灭：\na) 尝试来回拨动模式开关，并最终拨回标准模式（模式开关接触不良）；\nb) 尝试更换插口\n5. 存在异常则考虑更换交换机；",
+          "relevance": 2
+        }
+      ],
+      "hard_negatives": [
+        {
+          "file": "免疫场景化培训教材-硬件V1.1.pdf",
+          "page": 22,
+          "position": "主控板／指示灯",
+          "quote": "D107：24V 指示，灯常亮上电，灯灭下电，灯闪异常",
+          "reason": "主控板D107是24V供电指示，不是交换机端口灯。"
+        }
+      ],
+      "group_id": "switch_port_light_off",
+      "corpus_snapshot": "g000008-9f01fc283b",
+      "review_status": "reviewed"
+    },
+    {
+      "id": "rag-biz-002",
+      "question": "CL-8000i功率驱动板上的D63、D64灯分别表示什么？",
+      "expected_behavior": "answer",
+      "required_facts": [
+        "D63表示+12V光子计数电源上电。",
+        "D64表示-12V光子计数电源上电。",
+        "两灯在整机上电后应亮起。"
+      ],
+      "forbidden_claims": [
+        "把D63/D64说成主控板24V/12V数字电源灯。"
+      ],
+      "constraints": {
+        "scope": "",
+        "stage": "",
+        "direction": "",
+        "object": "功率驱动板D63、D64指示灯"
+      },
+      "missing_fields": [],
+      "gold_evidence": [
+        {
+          "file": "免疫场景化培训教材-硬件V1.1.pdf",
+          "page": 20,
+          "position": "功率驱动板／光子计数电源指示灯D63–D64",
+          "quote": "D63：绿色，整机上电后应亮起，表示+12V光子计数电源已经上电；\nD64：绿色，整机上电后应亮起，表示-12V光子计数电源已经上电；",
+          "relevance": 2
+        }
+      ],
+      "hard_negatives": [
+        {
+          "file": "免疫场景化培训教材-硬件V1.1.pdf",
+          "page": 22,
+          "position": "主控板／指示灯",
+          "quote": "D107：24V 指示，灯常亮上电，灯灭下电，灯闪异常",
+          "reason": "D107属于主控板的24V指示，不是功率驱动板的光子计数电源指示。"
+        }
+      ],
+      "group_id": "photon_power_led",
+      "corpus_snapshot": "g000008-9f01fc283b",
+      "review_status": "reviewed"
+    },
+    {
+      "id": "rag-biz-003",
+      "question": "更换主控板前后，整机参数、IP和序列号要怎么处理？",
+      "expected_behavior": "answer",
+      "required_facts": [
+        "更换前进入参数配置查询界面，把整机调试参数备份到PC；通常在更换后恢复到新主控板。",
+        "部分带扣板的主控板可将旧扣板移至新主控板；此时无需重新导入整机参数。",
+        "更换后重新配置各模块IP或机器号。",
+        "更换后在研发权限下重新配置仪器序列号。",
+        "拆装板卡须断电、佩戴防静电手环，严禁带电插拔。"
+      ],
+      "forbidden_claims": [
+        "说更换主控板无需备份参数。",
+        "忽略旧扣板移用例外，声称所有更换场景都必须重新导入参数。",
+        "把温度采集板的标贴参数当作主控板参数。",
+        "允许带电插拔板卡。"
+      ],
+      "constraints": {
+        "scope": "",
+        "stage": "",
+        "direction": "",
+        "object": "主控板更换"
+      },
+      "missing_fields": [],
+      "gold_evidence": [
+        {
+          "file": "免疫场景化培训教材-硬件V1.1.pdf",
+          "page": 23,
+          "position": "主控板／更换前后参数",
+          "quote": "更换前进入参数配置查询界面，备份所有参数到PC，更换主控板后再将所有参数重新恢复到新主控板中",
+          "relevance": 2
+        },
+        {
+          "file": "免疫场景化培训教材-硬件V1.1.pdf",
+          "page": 23,
+          "position": "主控板／旧扣板移用例外",
+          "quote": "注意：扣板主要储存整机参数，如主控板故障，将旧扣板更换到\n新主控板上，则无需重新导入整机参数（仅部分主控板有）；",
+          "relevance": 2
+        },
+        {
+          "file": "免疫场景化培训教材-硬件V1.1.pdf",
+          "page": 53,
+          "position": "更换板卡的注意事项／主控板更换",
+          "quote": "更换主控板后需要重新配置IP（机器号）",
+          "relevance": 2
+        },
+        {
+          "file": "免疫场景化培训教材-硬件V1.1.pdf",
+          "page": 53,
+          "position": "更换板卡的注意事项／主控板更换",
+          "quote": "更换主控板后需要在研发权限下重新配置序列号",
+          "relevance": 2
+        },
+        {
+          "file": "免疫场景化培训教材-硬件V1.1.pdf",
+          "page": 53,
+          "position": "更换板卡的注意事项／断电与防静电",
+          "quote": "1. 拆卸板卡：断电操作，带防静电手环，避免手触碰到板卡上的元器件，严禁带电插拔板卡。",
+          "relevance": 2
+        }
+      ],
+      "hard_negatives": [
+        {
+          "file": "免疫场景化培训教材-硬件V1.1.pdf",
+          "page": 53,
+          "position": "更换板卡的注意事项／温度采集板更换",
+          "quote": "需要重新配置参数，将新板卡上标贴纸所示参数替换原参数",
+          "reason": "温度采集板的标贴参数替换规则不能代替主控板的参数备份与恢复。"
+        }
+      ],
+      "group_id": "mainboard_replacement",
+      "corpus_snapshot": "g000008-9f01fc283b",
+      "review_status": "reviewed"
+    },
+    {
+      "id": "rag-biz-004",
+      "question": "CL-8000i三块温度采集板分别采集哪些位置？",
+      "expected_behavior": "answer",
+      "required_facts": [
+        "1#采集第一磁分离盘及底物预热温度。",
+        "2#采集第二磁分离盘及底物预热温度。",
+        "3#采集反应盘温度。"
+      ],
+      "forbidden_claims": [
+        "把气泡检测板计入三块温度采集板。",
+        "把3#说成第二磁分离盘温度采集板。"
+      ],
+      "constraints": {
+        "scope": "",
+        "stage": "",
+        "direction": "",
+        "object": "温度采集板"
+      },
+      "missing_fields": [],
+      "gold_evidence": [
+        {
+          "file": "免疫场景化培训教材-硬件V1.1.pdf",
+          "page": 31,
+          "position": "CL-8000i三块温度采集板分工",
+          "quote": "1#温度采集板，实现对第一磁分离盘及底物预热温度传感器信号的采集；\n➢ 2#温度采集板，实现对第二磁分离盘及底物预热温度传感器信号的采集；\n➢ 3#温度采集板，实现对反应盘温度传感器信号的采集；反应盘温度传感器一共有3个；",
+          "relevance": 2
+        }
+      ],
+      "hard_negatives": [
+        {
+          "file": "免疫场景化培训教材-硬件V1.1.pdf",
+          "page": 32,
+          "position": "气泡检测板／功能",
+          "quote": "气泡检测板采集气泡传感器的信号，将采集结果输出至主控板或电机驱动板",
+          "reason": "气泡检测板采集气泡信号，不是三块温度采集板的分工。"
+        }
+      ],
+      "group_id": "temperature_board_roles",
+      "corpus_snapshot": "g000008-9f01fc283b",
+      "review_status": "reviewed"
+    },
+    {
+      "id": "rag-biz-005",
+      "question": "怀疑某块硬件板卡故障，教材建议按什么思路定位？",
+      "expected_behavior": "answer",
+      "required_facts": [
+        "步骤1：查看板卡的供电及通讯链路。",
+        "步骤2：排查该板卡的输入与输出。",
+        "步骤3：排查电源系统的输入与输出。",
+        "步骤4：保留系统工作的最小配置，比较接入或拔去可疑板卡、负载前后的运行状态，以缩小故障范围。",
+        "涉及拔插板卡时要断电并注意防静电，严禁带电插拔。"
+      ],
+      "forbidden_claims": [
+        "一开始就断定某块板卡损坏并更换。",
+        "将蠕动泵检查流程当成所有板卡的流程。"
+      ],
+      "constraints": {
+        "scope": "",
+        "stage": "",
+        "direction": "异常",
+        "object": "硬件板卡故障"
+      },
+      "missing_fields": [],
+      "gold_evidence": [
+        {
+          "file": "免疫场景化培训教材-硬件V1.1.pdf",
+          "page": 54,
+          "position": "硬件板卡类故障处理思路／1–4步",
+          "quote": "板卡类故障处理思路：\n1. 查看板卡的供电及通讯链路；\n2. 排查该板卡的输入、输出；\n3. 排查电源系统的输入、输出；\n4. 最小系统法排查：拔去怀疑有故障的板卡或负载，并根据机器在此前和此后的运行情况对比，判断定位故障\n所在。拔插板卡或负载的基本要求是保留系统工作的最小配置，以便缩小故障的范围。",
+          "relevance": 2
+        },
+        {
+          "file": "免疫场景化培训教材-硬件V1.1.pdf",
+          "page": 53,
+          "position": "更换板卡的注意事项／断电与防静电",
+          "quote": "1. 拆卸板卡：断电操作，带防静电手环，避免手触碰到板卡上的元器件，严禁带电插拔板卡。",
+          "relevance": 2
+        }
+      ],
+      "hard_negatives": [
+        {
+          "file": "免疫场景化培训教材-液路V1.1.pdf",
+          "page": 22,
+          "position": "仪器液路-原理举例／磁分离吸液检查",
+          "quote": "如果蠕动泵通电正常但是不转动，则蠕动泵损坏需要更换",
+          "reason": "蠕动泵不转的条件判断只适用于该泵，不是通用板卡故障流程。"
+        }
+      ],
+      "group_id": "hardware_board_fault_isolation",
+      "corpus_snapshot": "g000008-9f01fc283b",
+      "review_status": "reviewed"
+    },
+    {
+      "id": "rag-biz-006",
+      "question": "以教材中的CL-8000i示例，清洗液缓冲容器何时开始、停止吸液？一瓶空了会怎样？",
+      "expected_behavior": "answer",
+      "required_facts": [
+        "低位液位传感器触发后，P01泵启动，SV01/SV02开启并吸入清洗液。",
+        "高位传感器触发后泵阀关闭，停止吸液。",
+        "一个清洗剂容器空后，仪器自动切换另一瓶并提示警告。"
+      ],
+      "forbidden_claims": [
+        "把底物注射器SR09当作清洗液进液动力。"
+      ],
+      "constraints": {
+        "scope": "",
+        "stage": "",
+        "direction": "",
+        "object": "清洗液吸入单元"
+      },
+      "missing_fields": [],
+      "gold_evidence": [
+        {
+          "file": "免疫场景化培训教材-液路V1.1.pdf",
+          "page": 7,
+          "position": "清洗液吸入单元／低位启动至高位停止",
+          "quote": "清洗液缓冲容器内设计有\n高低位液位传感器，当低\n位传感器触发时，系统控\n制P01泵启动，同时控制电\n磁阀SV01/SV02开启，将\n清洗液从清洗液容器吸入\n到缓冲容器中，当高位传\n感器触发后，系统控制泵\n阀关闭，停止吸液;",
+          "relevance": 2
+        },
+        {
+          "file": "免疫场景化培训教材-液路V1.1.pdf",
+          "page": 7,
+          "position": "仪器液路-原理举例／清洗液吸入",
+          "quote": "当一个清洗剂容器空后，仪器自动切换使用另外一瓶清洗剂容器，并提示警告信息",
+          "relevance": 2
+        }
+      ],
+      "hard_negatives": [
+        {
+          "file": "免疫场景化培训教材-液路V1.1.pdf",
+          "page": 26,
+          "position": "仪器液路-原理举例／底物液路",
+          "quote": "底物注射器从底物瓶吸取底物液通过电磁阀配合注入已完成磁分离清洗的反应杯中",
+          "reason": "底物注射器的吸注液流程属于底物液路，不是清洗液缓冲容器控制。"
+        }
+      ],
+      "group_id": "wash_buffer_intake",
+      "corpus_snapshot": "g000008-9f01fc283b",
+      "review_status": "reviewed"
+    },
+    {
+      "id": "rag-biz-007",
+      "question": "CL-8000i磁分离盘吸液流量标准是多少？",
+      "expected_behavior": "answer",
+      "required_facts": [
+        "CL-8000i使用BM80磁分离盘，吸液流量为140±5 μL/s，使用蠕动泵吸液。"
+      ],
+      "forbidden_claims": [
+        "回答115±5 μL/s。",
+        "将CL-900i（BM50）的真空负压方式套用到CL-8000i。"
+      ],
+      "constraints": {
+        "scope": "",
+        "stage": "",
+        "direction": "",
+        "object": "磁分离吸液流量"
+      },
+      "missing_fields": [],
+      "gold_evidence": [
+        {
+          "file": "免疫场景化培训教材-液路V1.1.pdf",
+          "page": 19,
+          "position": "仪器液路-原理举例／磁分离吸液流量表",
+          "quote": "CL-8000i BM80 140±5 使用蠕动泵吸液",
+          "relevance": 2
+        }
+      ],
+      "hard_negatives": [
+        {
+          "file": "免疫场景化培训教材-液路V1.1.pdf",
+          "page": 19,
+          "position": "仪器液路-原理举例／磁分离吸液流量表",
+          "quote": "CL-2000i原机型 无标识 115±5 使用蠕动泵吸液",
+          "reason": "CL-2000i原机型无标识磁分离盘的115±5 μL/s不适用于CL-8000i。"
+        }
+      ],
+      "group_id": "aspiration_flow_cl8000",
+      "corpus_snapshot": "g000008-9f01fc283b",
+      "review_status": "reviewed"
+    },
+    {
+      "id": "rag-biz-008",
+      "question": "磁分离蠕动泵通电正常但不转；如果能转却报堵转，又分别检查什么？",
+      "expected_behavior": "answer",
+      "required_facts": [
+        "先在软件界面控制蠕动泵转动，观察响应。",
+        "若蠕动泵通电正常但不转动，教材判断泵损坏，需要更换。",
+        "若能转动但报警堵转，检查蠕动泵转速光耦；光耦异常则更换。"
+      ],
+      "forbidden_claims": [
+        "把能转但堵转直接判为蠕动泵电机损坏。",
+        "使用注射器无法复位的检查结论。"
+      ],
+      "constraints": {
+        "scope": "",
+        "stage": "",
+        "direction": "异常",
+        "object": "磁分离蠕动泵"
+      },
+      "missing_fields": [],
+      "gold_evidence": [
+        {
+          "file": "免疫场景化培训教材-液路V1.1.pdf",
+          "page": 22,
+          "position": "磁分离吸液检查／软件控制及不转、堵转分支",
+          "quote": "软件中控制蠕动泵转动，如果蠕动泵通电正常但是不转动，则蠕动泵损坏需要更换；\n• 如蠕动泵能转动但是报警堵转则需检查蠕动泵转速光耦，异常则更换；",
+          "relevance": 2
+        }
+      ],
+      "hard_negatives": [
+        {
+          "file": "免疫场景化培训教材-液路V1.1.pdf",
+          "page": 49,
+          "position": "仪器液路-注射器／检查",
+          "quote": "注射器完全无动作测量电机供电正常则电机损坏",
+          "reason": "注射器电机供电正常却无动作的判断不能直接套用于蠕动泵。"
+        }
+      ],
+      "group_id": "peristaltic_pump_stall",
+      "corpus_snapshot": "g000008-9f01fc283b",
+      "review_status": "reviewed"
+    },
+    {
+      "id": "rag-biz-009",
+      "question": "教材中的底物液路示例：从选择底物瓶到注入反应杯，SV30、SV31、SV32/SV33及SR09依次怎样动作？",
+      "expected_behavior": "answer",
+      "required_facts": [
+        "该液路示例的底物需避光，注入反应杯前需预加热；注入对象是已完成磁分离清洗的反应杯。",
+        "吸液：通过SV30选用底物1或2；SV31打开，SV32和SV33关闭，底物注射器下拉从瓶中吸取底物。",
+        "注液：SV31关闭，SV32或SV33打开，底物注射器SR09上推，将底物注入对应磁分离盘的反应杯。"
+      ],
+      "forbidden_claims": [
+        "把清洗液P01泵说成底物吸注动力。",
+        "把吸液和注液时SV31、SV32、SV33的开关状态颠倒。",
+        "遗漏SV30选择底物瓶或SR09上推注液的动作，却声称已完整说明操作顺序。"
+      ],
+      "constraints": {
+        "scope": "",
+        "stage": "",
+        "direction": "",
+        "object": "底物液路"
+      },
+      "missing_fields": [],
+      "gold_evidence": [
+        {
+          "file": "免疫场景化培训教材-液路V1.1.pdf",
+          "page": 26,
+          "position": "仪器液路-原理举例／底物液路总述",
+          "quote": "底物注射器从底物瓶吸取底物液通过电磁阀配合注入已完成磁分离清洗的反应杯中（底物需要避光，注入\n反应杯前需要预加热）；",
+          "relevance": 2
+        },
+        {
+          "file": "免疫场景化培训教材-液路V1.1.pdf",
+          "page": 26,
+          "position": "仪器液路-原理举例／底物液路动作示例",
+          "quote": "通过SV30切换确认使用底物1或者2，SV31阀打开，SV32和\nSV33阀关闭，注射器下拉从底物瓶吸取底物；\n• SV31关闭， SV32或者SV33阀打开，底物注射器SR09上推，\n注入底物到对应磁分离盘的反应杯中；",
+          "relevance": 2
+        }
+      ],
+      "hard_negatives": [
+        {
+          "file": "免疫场景化培训教材-液路V1.1.pdf",
+          "page": 7,
+          "position": "仪器液路-原理举例／清洗液吸入",
+          "quote": "当低位传感器触发时，系统控制P01泵启动，同时控制电磁阀SV01/SV02开启",
+          "reason": "P01、SV01/SV02控制清洗液吸入，不是底物吸注液。"
+        }
+      ],
+      "group_id": "substrate_injection_path",
+      "corpus_snapshot": "g000008-9f01fc283b",
+      "review_status": "reviewed"
+    },
+    {
+      "id": "rag-biz-010",
+      "question": "CL-8000i调底物注液回吸量，前提和合格位置是什么？",
+      "expected_behavior": "answer",
+      "required_facts": [
+        "必须先完成液路灌注再执行调试。",
+        "回吸后底物液终端应距预热块上端面0～5 mm。",
+        "发光液应回吸到气泡检测光耦右侧边沿。"
+      ],
+      "forbidden_claims": [
+        "把磁分离吸液流量当作回吸量合格标准。",
+        "未完成灌注就执行该调试。"
+      ],
+      "constraints": {
+        "scope": "",
+        "stage": "",
+        "direction": "",
+        "object": "底物注液回吸量调试"
+      },
+      "missing_fields": [],
+      "gold_evidence": [
+        {
+          "file": "免疫场景化培训教材-液路V1.1.pdf",
+          "page": 29,
+          "position": "CL-8000i底物回吸量调试／前提与标准",
+          "quote": "本调试必须在液路灌注完成后才能执行；\n✓ 调试标准：底物注液回吸后，底物液终端距离预热块上端面\n0～5mm范围内（参数每16微步约为3mm）；\n✓ 底物注液回吸后，发光液正好回吸到气泡检测光耦右侧边沿；",
+          "relevance": 2
+        }
+      ],
+      "hard_negatives": [
+        {
+          "file": "免疫场景化培训教材-液路V1.1.pdf",
+          "page": 19,
+          "position": "仪器液路-原理举例／磁分离吸液流量表",
+          "quote": "CL-8000i BM80 140±5 使用蠕动泵吸液",
+          "reason": "磁分离吸液流量140±5 μL/s是另一项指标，不能用作底物回吸位置标准。"
+        }
+      ],
+      "group_id": "substrate_retraction_cl8000",
+      "corpus_snapshot": "g000008-9f01fc283b",
+      "review_status": "reviewed"
+    },
+    {
+      "id": "rag-biz-011",
+      "question": "CL-8000i清洗液气泡检测光耦，有水和无水时AD多少算正常？",
+      "expected_behavior": "answer",
+      "required_facts": [
+        "CL-8000i有水时1988≤AD≤2108。",
+        "无水时AD≤900。"
+      ],
+      "forbidden_claims": [
+        "把CL-8000i阈值宣称适用于所有机型。",
+        "把有水和无水的阈值对调。"
+      ],
+      "constraints": {
+        "scope": "",
+        "stage": "",
+        "direction": "",
+        "object": "清洗液气泡检测光耦"
+      },
+      "missing_fields": [],
+      "gold_evidence": [
+        {
+          "file": "免疫场景化培训教材-液路V1.1.pdf",
+          "page": 40,
+          "position": "仪器液路-清洗液气泡检测／CL-8000i",
+          "quote": "有水:1988≤AD≤2108，无水：AD ≤ 900",
+          "relevance": 2
+        }
+      ],
+      "hard_negatives": [
+        {
+          "file": "免疫场景化培训教材-液路V1.1.pdf",
+          "page": 41,
+          "position": "仪器液路-清洗液气泡检测／CL-6000i",
+          "quote": "操作软件【应用】→【诊断】→【诊断】 →【M1】→【清洗液气泡检测诊断】",
+          "reason": "CL-6000i页面只列出诊断入口，未给出CL-8000i的AD阈值。"
+        }
+      ],
+      "group_id": "bubble_detector_ad_cl8000",
+      "corpus_snapshot": "g000008-9f01fc283b",
+      "review_status": "reviewed"
+    },
+    {
+      "id": "rag-biz-012",
+      "question": "注射器会动但回不到初始位，教材让检查哪些地方？",
+      "expected_behavior": "answer",
+      "required_facts": [
+        "检查注射器是否卡滞或松脱。",
+        "确认初始位传感器是否异常。"
+      ],
+      "forbidden_claims": [
+        "只要有动作就判定注射器正常。",
+        "直接套用蠕动泵转速光耦检查。"
+      ],
+      "constraints": {
+        "scope": "",
+        "stage": "",
+        "direction": "异常",
+        "object": "注射器复位"
+      },
+      "missing_fields": [],
+      "gold_evidence": [
+        {
+          "file": "免疫场景化培训教材-液路V1.1.pdf",
+          "page": 49,
+          "position": "仪器液路-注射器／检查",
+          "quote": "注射器有动作但是无法复位则检测是否存在卡滞或者松脱情况，并确认初始位传感器无异常",
+          "relevance": 2
+        }
+      ],
+      "hard_negatives": [
+        {
+          "file": "免疫场景化培训教材-液路V1.1.pdf",
+          "page": 22,
+          "position": "仪器液路-原理举例／磁分离吸液检查",
+          "quote": "如蠕动泵能转动但是报警堵转则需检查蠕动泵转速光耦，异常则更换",
+          "reason": "蠕动泵堵转时检查转速光耦，不是注射器无法复位的直接依据。"
+        }
+      ],
+      "group_id": "syringe_reset_failure",
+      "corpus_snapshot": "g000008-9f01fc283b",
+      "review_status": "reviewed"
+    },
+    {
+      "id": "rag-biz-013",
+      "question": "主真空罐周边漏气或堵塞会导致什么问题？它在针清洗时起什么作用？",
+      "expected_behavior": "answer",
+      "required_facts": [
+        "主真空罐储存真空压力，针清洗时提供负压吸走废液。",
+        "罐体、周边管路或接头漏气或堵塞会造成仪器压力故障。"
+      ],
+      "forbidden_claims": [
+        "把主真空罐说成给底物注射器提供吸液动力。"
+      ],
+      "constraints": {
+        "scope": "",
+        "stage": "",
+        "direction": "异常",
+        "object": "主真空罐"
+      },
+      "missing_fields": [],
+      "gold_evidence": [
+        {
+          "file": "免疫场景化培训教材-液路V1.1.pdf",
+          "page": 51,
+          "position": "主真空罐及周边管路／作用与压力故障",
+          "quote": "主真空罐主要用于储存真空压力在针清洗时提供真空负\n压吸走废液；\n• 主真空罐、周边管路、接头、出现漏气或者堵塞都会造\n成仪器压力故障；",
+          "relevance": 2
+        }
+      ],
+      "hard_negatives": [
+        {
+          "file": "免疫场景化培训教材-液路V1.1.pdf",
+          "page": 26,
+          "position": "仪器液路-原理举例／底物液路",
+          "quote": "底物注射器从底物瓶吸取底物液通过电磁阀配合注入已完成磁分离清洗的反应杯中",
+          "reason": "底物液路与针清洗真空罐的作用不同。"
+        }
+      ],
+      "group_id": "vacuum_tank_pressure",
+      "corpus_snapshot": "g000008-9f01fc283b",
+      "review_status": "reviewed"
+    },
+    {
+      "id": "rag-biz-014",
+      "question": "CL-2000i原机型磁分离吸液流量到底按多少调？",
+      "expected_behavior": "clarify",
+      "required_facts": [
+        "先询问磁分离盘是无标识还是BM10。",
+        "可说明教材中的两个条件值：无标识115±5 μL/s，BM10为140±5 μL/s；不能在未确认盘型时只给一个值。"
+      ],
+      "forbidden_claims": [
+        "不问盘型就断定唯一标准为115±5 μL/s或140±5 μL/s。"
+      ],
+      "constraints": {
+        "scope": "",
+        "stage": "",
+        "direction": "",
+        "object": "磁分离吸液流量"
+      },
+      "missing_fields": [
+        "磁分离盘标识"
+      ],
+      "gold_evidence": [
+        {
+          "file": "免疫场景化培训教材-液路V1.1.pdf",
+          "page": 19,
+          "position": "磁分离吸液流量表／CL-2000i原机型两种盘型",
+          "quote": "CL-2000i原机型 无标识 115±5 使用蠕动泵吸液\nCL-2000i原机型 BM10 140±5 使用无标识磁分离盘更改",
+          "relevance": 2
+        }
+      ],
+      "hard_negatives": [
+        {
+          "file": "免疫场景化培训教材-液路V1.1.pdf",
+          "page": 19,
+          "position": "仪器液路-原理举例／磁分离吸液流量表",
+          "quote": "CL-8000i BM80 140±5 使用蠕动泵吸液",
+          "reason": "CL-8000i的BM80标准不能替代CL-2000i原机型不同磁分离盘的标准。"
+        }
+      ],
+      "group_id": "aspiration_flow_cl2000_ambiguous",
+      "corpus_snapshot": "g000008-9f01fc283b",
+      "review_status": "reviewed"
+    },
+    {
+      "id": "rag-biz-015",
+      "question": "CL-6000i和CL-8000i清洗液气泡检测怎么进入诊断？两款机型的AD合格范围各是多少？",
+      "expected_behavior": "partial_answer",
+      "required_facts": [
+        "CL-8000i在工程维护软件中进入M1/M2→诊断→清洗液气泡检测诊断；有水1988≤AD≤2108、无水AD≤900。",
+        "CL-6000i在操作软件中进入应用→诊断→诊断→M1→清洗液气泡检测诊断。",
+        "这两页未给出CL-6000i的AD合格范围，不能套用CL-8000i的数值。"
+      ],
+      "forbidden_claims": [
+        "宣称CL-6000i与CL-8000i的AD合格范围相同。",
+        "编造CL-6000i的AD阈值。"
+      ],
+      "constraints": {
+        "scope": "",
+        "stage": "",
+        "direction": "",
+        "object": "清洗液气泡检测光耦"
+      },
+      "missing_fields": [],
+      "gold_evidence": [
+        {
+          "file": "免疫场景化培训教材-液路V1.1.pdf",
+          "page": 40,
+          "position": "CL-8000i清洗液气泡检测／入口与AD范围",
+          "quote": "工程维护软件（D:/Mindray/CL8000i/WorkStation/Engnieersoft/ Engnieersoft .exe）→【M1/M2】→【诊断】→【清\n洗液气泡检测诊断】；\n✓ 根据软件提示操作进行有水、无水诊断确认分离液气泡检测光耦是否正常（有水:1988≤AD≤2108，无水：AD ≤ 900）；",
+          "relevance": 2
+        },
+        {
+          "file": "免疫场景化培训教材-液路V1.1.pdf",
+          "page": 41,
+          "position": "仪器液路-清洗液气泡检测／CL-6000i",
+          "quote": "操作软件【应用】→【诊断】→【诊断】 →【M1】→【清洗液气泡检测诊断】",
+          "relevance": 2
+        }
+      ],
+      "hard_negatives": [
+        {
+          "file": "免疫场景化培训教材-硬件V1.1.pdf",
+          "page": 32,
+          "position": "气泡检测板／功能",
+          "quote": "气泡检测板采集气泡传感器的信号，将采集结果输出至主控板或电机驱动板",
+          "reason": "气泡检测板的功能介绍没有两款机型的软件入口或AD阈值。"
+        }
+      ],
+      "group_id": "bubble_diagnosis_model_comparison",
+      "corpus_snapshot": "g000008-9f01fc283b",
+      "review_status": "reviewed"
+    },
+    {
+      "id": "rag-biz-016",
+      "question": "CL-8000i清洗液气泡检测一直报警，教材给出了哪些检查？检查后怎样判断是检测光耦、板卡还是供电问题？",
+      "expected_behavior": "partial_answer",
+      "required_facts": [
+        "CL-8000i可进入工程维护软件的M1/M2→诊断→清洗液气泡检测诊断，按提示做有水和无水诊断。",
+        "教材给出的范围为有水1988≤AD≤2108、无水AD≤900。",
+        "两份教材没有给出仅凭报警就能确定具体故障件的依据；不能直接要求更换板卡或光耦。"
+      ],
+      "forbidden_claims": [
+        "断言报警必由气泡检测板、检测光耦或供电故障造成。",
+        "仅凭报警就指定更换件或编造物料编码。"
+      ],
+      "constraints": {
+        "scope": "",
+        "stage": "",
+        "direction": "异常",
+        "object": "清洗液气泡检测"
+      },
+      "missing_fields": [],
+      "gold_evidence": [
+        {
+          "file": "免疫场景化培训教材-液路V1.1.pdf",
+          "page": 40,
+          "position": "CL-8000i清洗液气泡检测／入口与AD范围",
+          "quote": "工程维护软件（D:/Mindray/CL8000i/WorkStation/Engnieersoft/ Engnieersoft .exe）→【M1/M2】→【诊断】→【清\n洗液气泡检测诊断】；\n✓ 根据软件提示操作进行有水、无水诊断确认分离液气泡检测光耦是否正常（有水:1988≤AD≤2108，无水：AD ≤ 900）；",
+          "relevance": 2
+        }
+      ],
+      "hard_negatives": [
+        {
+          "file": "免疫场景化培训教材-硬件V1.1.pdf",
+          "page": 32,
+          "position": "气泡检测板／功能",
+          "quote": "气泡检测板采集气泡传感器的信号，将采集结果输出至主控板或电机驱动板",
+          "reason": "板卡功能说明不能证明报警由板卡造成，也不能据此指定更换件。"
+        }
+      ],
+      "group_id": "bubble_alarm_diagnostic_limits",
+      "corpus_snapshot": "g000008-9f01fc283b",
+      "review_status": "reviewed"
+    },
+    {
+      "id": "rag-biz-017",
+      "question": "超声影像诊断仪的探头扫查时图像出现竖条纹，应该更换哪块板卡？物料编码是多少？",
+      "expected_behavior": "refuse",
+      "required_facts": [
+        "当前索引核查未找到可用于超声影像诊断仪探头图像竖条纹故障的资料；免疫仪的超声混匀内容不能跨产线使用。",
+        "不能据此指定要更换的板卡或物料编码；需要超声影像设备对应型号的维修资料和实际检查结果。"
+      ],
+      "forbidden_claims": [
+        "把CL-8000i的超声混匀驱动板当成超声影像诊断仪的故障板卡。",
+        "编造或套用免疫仪板卡的物料编码，断言它可用于该超声影像设备。"
+      ],
+      "constraints": {
+        "scope": "",
+        "stage": "",
+        "direction": "异常",
+        "object": "超声影像诊断仪探头图像竖条纹"
+      },
+      "missing_fields": [],
+      "gold_evidence": [],
+      "hard_negatives": [
+        {
+          "file": "免疫场景化培训教材-硬件V1.1.pdf",
+          "page": 42,
+          "position": "超声混匀驱动板／适用机型",
+          "quote": "目前免疫机型只有CL8000i有超声混匀驱动板；",
+          "reason": "这里的“超声”是免疫仪反应杯混匀机构，不是超声影像诊断仪的成像板卡。"
+        },
+        {
+          "file": "免疫场景化培训教材-硬件V1.1.pdf",
+          "page": 54,
+          "position": "硬件板卡类故障处理思路",
+          "quote": "板卡类故障处理思路：",
+          "reason": "这是免疫仪教材中的通用排查标题，不能据此确定超声影像设备的故障板卡或物料编码。"
+        }
+      ],
+      "group_id": "ultrasound_imaging_probe_stripes_out_of_corpus",
+      "corpus_snapshot": "g000008-9f01fc283b",
+      "review_status": "reviewed"
+    },
+    {
+      "id": "rag-biz-018",
+      "question": "超声影像诊断仪的探头发射功率合格范围是多少？在维修软件里怎样调？",
+      "expected_behavior": "refuse",
+      "required_facts": [
+        "当前索引核查未找到超声影像诊断仪探头发射功率的合格范围或维修软件调节步骤。",
+        "不能给出具体数值或操作路径；应依据对应机型的超声影像设备维修资料。"
+      ],
+      "forbidden_claims": [
+        "把免疫仪超声针的200～300V描述当成超声影像探头发射功率标准。",
+        "编造超声影像设备维修软件中的菜单路径或调节步骤。"
+      ],
+      "constraints": {
+        "scope": "",
+        "stage": "",
+        "direction": "",
+        "object": "超声影像诊断仪探头发射功率"
+      },
+      "missing_fields": [],
+      "gold_evidence": [],
+      "hard_negatives": [
+        {
+          "file": "免疫场景化培训教材-液路V1.1.pdf",
+          "page": 14,
+          "position": "免疫仪超声针／电气特征",
+          "quote": "高电压（200-300V），低电流；",
+          "reason": "描述免疫仪超声针的工作特征，既不是超声影像探头发射功率合格范围，也不是其维修调节步骤。"
+        },
+        {
+          "file": "免疫场景化培训教材-硬件V1.1.pdf",
+          "page": 42,
+          "position": "超声混匀驱动板／功能",
+          "quote": "反应杯液体混匀，提供稳定一致的超声能量；",
+          "reason": "描述免疫仪反应杯混匀功能，不能用于超声影像探头的功率调节。"
+        }
+      ],
+      "group_id": "ultrasound_imaging_probe_power_out_of_corpus",
+      "corpus_snapshot": "g000008-9f01fc283b",
+      "review_status": "reviewed"
+    }
+  ]
+}

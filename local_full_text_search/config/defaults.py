@@ -7,7 +7,7 @@ from .constants import DEFAULT_EXCLUDED_DIRS, DEFAULT_EXCLUDED_FILE_PATTERNS
 
 @dataclass(slots=True)
 class AppSettings:
-    settings_version: int = 10
+    settings_version: int = 13
     default_search_mode: str = "exact"
     case_sensitive: bool = False
     auto_search: bool = False
@@ -90,6 +90,44 @@ class AppSettings:
     min_ocr_image_pixels: int = 12_000
     max_ocr_image_side: int = 960
     save_search_history: bool = True
+    # RAG remains optional: absent RAG packages or models never block ordinary search.
+    rag_enabled: bool = False
+    rag_embedding_repo_id: str = "BAAI/bge-small-zh-v1.5"
+    rag_embedding_revision: str = "7999e1d3359715c523056ef9478215996d62a620"
+    rag_reranker_repo_id: str = "BAAI/bge-reranker-base"
+    rag_reranker_revision: str = "2cfc18c9415c912f9d8155881c133215df768a70"
+    rag_chunk_target_chars: int = 900
+    rag_chunk_max_chars: int = 1200
+    rag_chunk_overlap_chars: int = 120
+    rag_embedding_batch_size: int = 16
+    rag_index_write_batch_size: int = 128
+    rag_hnsw_m: int = 16
+    rag_hnsw_construction_ef: int = 200
+    rag_hnsw_search_ef: int = 100
+    rag_max_chunks: int = 200_000
+    rag_reranker_batch_size: int = 4
+    rag_reranker_max_length: int = 512
+    rag_lexical_top_k: int = 50
+    rag_vector_top_k: int = 50
+    rag_fusion_top_k: int = 30
+    rag_reranker_top_k: int = 20
+    rag_final_top_k: int = 8
+    rag_rrf_k: int = 60
+    rag_min_vector_score: float = 0.35
+    rag_min_rerank_score: float = 0.10
+    rag_context_max_chars: int = 12_000
+    rag_max_chunks_per_document: int = 3
+    rag_clarification_enabled: bool = True
+    rag_dedup_jaccard_threshold: float = 0.92
+    rag_constraint_matching_enabled: bool = True
+    rag_answer_review_enabled: bool = True
+    rag_answer_review_max_output_tokens: int = 1400
+    rag_answer_review_strict: bool = True
+    rag_api_base_url: str = "https://api.openai.com/v1"
+    rag_api_model: str = ""
+    rag_api_style: str = "chat_completions"
+    rag_api_timeout_seconds: int = 90
+    rag_api_secret_ref: str = "local-full-text-search.rag.api-key"
     max_zip_file_count: int = 2000
     max_zip_uncompressed_bytes: int = 1024 * 1024 * 1024
     max_zip_depth: int = 2
@@ -116,7 +154,10 @@ class AppSettings:
             # Terminal failures now require an explicit retry request. A
             # changed source identity is still scheduled automatically.
             values["retry_failed_files"] = False
-        values["settings_version"] = 10
+        if previous_version < 13 and "rag_answer_review_enabled" not in data:
+            # 避免升级后静默增加每次问答的 LLM 调用次数；用户可在设置页主动开启。
+            values["rag_answer_review_enabled"] = False
+        values["settings_version"] = 13
         return cls(**values)
 
 

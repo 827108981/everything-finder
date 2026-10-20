@@ -8,6 +8,7 @@ from PyInstaller.utils.hooks import collect_all, copy_metadata
 
 project_dir = Path.cwd()
 skip_ocr = os.environ.get("SKIP_OCR") == "1"
+skip_rag = os.environ.get("SKIP_RAG") == "1"
 build_timestamp = os.environ.get("LFTS_BUILD_TIMESTAMP") or datetime.now().strftime(
     "%Y%m%d%H%M%S"
 )
@@ -97,6 +98,32 @@ if not skip_ocr:
         "pypdfium2",
         "python-bidi",
         "shapely",
+    ):
+        datas += copy_metadata(distribution_name)
+
+if not skip_rag:
+    # Transformers, sentence-transformers, Chroma, and OpenAI-compatible SDKs
+    # contain runtime imports and package data that PyInstaller cannot always
+    # discover from the application's lazy-import paths.
+    for package_name in (
+        "chromadb",
+        "sentence_transformers",
+        "transformers",
+        "torch",
+        "huggingface_hub",
+        "openai",
+    ):
+        package_datas, package_binaries, package_hiddenimports = collect_all(package_name)
+        datas += package_datas
+        binaries += package_binaries
+        hiddenimports += package_hiddenimports
+    for distribution_name in (
+        "chromadb",
+        "sentence-transformers",
+        "transformers",
+        "torch",
+        "huggingface-hub",
+        "openai",
     ):
         datas += copy_metadata(distribution_name)
 

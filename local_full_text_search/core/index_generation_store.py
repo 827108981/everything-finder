@@ -66,6 +66,7 @@ class PublishedGeneration:
     document_count: int = 0
     block_count: int = 0
     partial: bool = False
+    scan_signature: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,6 +183,7 @@ class IndexGenerationStore:
                 document_count=int(payload.get("document_count") or 0),
                 block_count=int(payload.get("block_count") or 0),
                 partial=bool(payload.get("partial", False)),
+                scan_signature=str(payload.get("scan_signature") or "") or None,
             )
         except (OSError, KeyError, TypeError, ValueError, sqlite3.Error):
             return None
@@ -873,6 +875,7 @@ class IndexGenerationStore:
         block_count: int,
         published_at: str,
         partial: bool = False,
+        scan_signature: str | None = None,
     ) -> PublishedGeneration:
         # publish 是候选库从“正在建设”变为“正式可搜索版本”的唯一入口。
         # 在调用它之前，ScanWorker 已完成索引和 readiness 检查。
@@ -968,6 +971,7 @@ class IndexGenerationStore:
             "document_count": int(document_count),
             "block_count": int(block_count),
             "partial": bool(partial),
+            "scan_signature": str(scan_signature or ""),
         }
         # 先完整写临时 manifest，再用 os.replace 一次性切换，避免搜索线程读到
         # 只写了一半的 JSON。已经开始的搜索仍持有旧文件和旧 generation 租约；
@@ -987,7 +991,29 @@ class IndexGenerationStore:
             int(document_count),
             int(block_count),
             bool(partial),
+            str(scan_signature or "") or None,
         )
+
+    def scan_signature(self) -> str | None:
+        """Return the last complete-scan inventory signature from the manifest."""
+
+        payload = self._read_manifest()
+        value = str((payload or {}).get("scan_signature") or "")
+        return value or None
+
+    def set_scan_signature(self, generation: int, signature: str) -> bool:
+        """Persist a verified no-change baseline without creating a DB generation."""
+
+        payload = self._read_manifest()
+        if payload is None or int(payload.get("active_generation") or 0) != int(generation):
+            return False
+        payload["scan_signature"] = str(signature)
+        temporary = self.manifest_path.with_suffix(self.manifest_path.suffix + ".tmp")
+        encoded = json.dumps(payload, ensure_ascii=False, indent=2)
+        temporary.write_text(encoded, encoding="utf-8")
+        os.replace(temporary, self.manifest_path)
+        self.manifest_backup_path.write_text(encoded, encoding="utf-8")
+        return True
 
     @staticmethod
     def _seal_candidate_database(

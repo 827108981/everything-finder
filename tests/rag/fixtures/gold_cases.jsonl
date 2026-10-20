@@ -1,0 +1,1 @@
+{"id":"single-project-luminescence-abnormal","question":"只有某个项目的发光值异常，这个时候该怎么排查","required_constraints":{"scope":"single","object":"发光值"},"positive_evidence_contains":["单个项目","发光值异常"],"negative_evidence_contains":["所有项目","全部项目","大面积"],"expected_correct_candidate_survives":true,"expected_constraint_violations_at_8":0}

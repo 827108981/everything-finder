@@ -16,6 +16,12 @@ if not defined APP_VERSION goto :error
 if not "%SKIP_INSTALL%"=="1" (
     python -m pip install --upgrade pip || goto :error
     python -m pip install -r requirements.txt || goto :error
+    if not "%SKIP_RAG%"=="1" (
+        echo [build] Installing local RAG model, vector database, and API dependencies...
+        python -m pip install -r requirements-rag.txt || goto :error
+    ) else (
+        echo [build] SKIP_RAG=1, packaging without optional RAG runtime dependencies.
+    )
 )
 
 if not "%SKIP_OCR%"=="1" (

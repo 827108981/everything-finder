@@ -7,9 +7,10 @@ import shutil
 import sqlite3
 import time
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 
-from PySide6.QtCore import QTimer, QThread, Qt, Signal
+from PySide6.QtCore import QObject, QTimer, QThread, Qt, Signal
 from PySide6.QtGui import QAction, QCloseEvent, QGuiApplication, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -62,6 +63,8 @@ from local_full_text_search.services.database_location_service import (
     DatabaseLocationService,
 )
 from local_full_text_search.ui.preview_panel import PreviewPanel
+from local_full_text_search.ui.rag_page import RagPage
+from local_full_text_search.ui.rag_eval_page import RagEvalPage
 from local_full_text_search.ui.result_view import ResultView, result_hits
 from local_full_text_search.version import __build_timestamp__, __version__
 from local_full_text_search.workers.scan_worker import ScanWorker
@@ -75,9 +78,23 @@ from local_full_text_search.workers.database_snapshot_worker import (
 )
 from local_full_text_search.workers.search_worker import SearchWorker
 from local_full_text_search.workers.search_history_worker import SearchHistoryWorker
+from local_full_text_search.workers.rag_model_download_worker import RagModelDownloadWorker
+from local_full_text_search.workers.rag_index_worker import RagIndexWorker
+from local_full_text_search.workers.rag_local_state_worker import RagLocalStateWorker
+from local_full_text_search.workers.rag_query_worker import RagQueryWorker
+from local_full_text_search.workers.rag_eval_worker import RagEvalWorker
+from local_full_text_search.workers.rag_connection_test_worker import RagConnectionTestWorker
+from local_full_text_search.rag.models import RagQuery
+from local_full_text_search.rag.evaluation.runner import RagEvalConfig
+from local_full_text_search.rag.diagnostics import (
+    log_rag_exception,
+    new_rag_request_id,
+    provider_host,
+)
+from local_full_text_search.rag.secrets import WindowsCredentialSecretStore
 
 
-PAGE_INDEX = {"search": 0, "index": 1, "failed": 2, "settings": 3}
+PAGE_INDEX = {"search": 0, "index": 1, "failed": 2, "rag": 3, "rag_eval": 4, "settings": 5}
 logger = logging.getLogger(__name__)
 
 
@@ -219,6 +236,12 @@ class MainWindow(QMainWindow):
         self.database_migration_worker: DatabaseMigrationWorker | None = None
         self.database_snapshot_thread: QThread | None = None
         self.database_snapshot_worker: DatabaseSnapshotWorker | None = None
+        self.rag_thread: QThread | None = None
+        self.rag_worker: QObject | None = None
+        self.rag_task_kind = ""
+        self.rag_task_target = "rag"
+        self._rag_connection_config_saved = True
+        self._rag_connection_key_saved = True
         self._snapshot_refresh_pending = False
         self.root_removal_thread: QThread | None = None
         self.root_removal_worker: RootRemovalWorker | None = None
@@ -292,6 +315,12 @@ class MainWindow(QMainWindow):
         # __init__() 又会创建 SearchBox。调用返回后，搜索框才算初始化完成。
         self._build_shell()
         self.settings_page.set_database_info(self.generation_base_path)
+        self.rag_page.set_rag_enabled(self.settings.rag_enabled)
+        self._refresh_rag_api_key_saved_state()
+        if self.settings.rag_enabled:
+            # 窗口显示后在后台只读检查上次落盘的模型与 Chroma 索引；
+            # 不下载模型，也不自动重建索引。
+            QTimer.singleShot(0, self.restore_rag_local_state)
         self._install_shortcuts()
         self.file_change_detected.connect(self.on_monitored_file_changed)
         if defer_initial_refresh:
@@ -328,6 +357,8 @@ class MainWindow(QMainWindow):
         self.search_page = SearchPage(self.settings)
         self.index_page = IndexPage()
         self.failed_page = FailedPage()
+        self.rag_page = RagPage()
+        self.rag_eval_page = RagEvalPage()
         self.settings_page = SettingsPage(self.settings)
 
         self.search_splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -345,6 +376,8 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.search_splitter)
         self.stack.addWidget(self.index_page)
         self.stack.addWidget(self.failed_page)
+        self.stack.addWidget(self.rag_page)
+        self.stack.addWidget(self.rag_eval_page)
         self.stack.addWidget(self.settings_page)
         body_layout.addWidget(self.stack, 1)
         root_layout.addWidget(body, 1)
@@ -407,6 +440,547 @@ class MainWindow(QMainWindow):
         self.settings_page.database_migration_cancel_requested.connect(
             self.cancel_database_migration
         )
+        self.settings_page.rag_api_key_save_requested.connect(self.save_rag_api_key)
+        self.settings_page.rag_api_key_clear_requested.connect(self.clear_rag_api_key)
+        self.settings_page.rag_connection_test_requested.connect(
+            self.test_rag_connection
+        )
+        self.rag_page.download_models_requested.connect(self.download_rag_models)
+        self.rag_page.build_index_requested.connect(self.build_rag_index)
+        self.rag_page.ask_requested.connect(self.ask_rag)
+        self.rag_page.stop_requested.connect(self.cancel_rag_task)
+        self.rag_page.source_open_requested.connect(self.open_location)
+        self.rag_eval_page.start_requested.connect(self.start_rag_eval)
+        self.rag_eval_page.preflight_requested.connect(self.preflight_rag_eval)
+        self.rag_eval_page.stop_requested.connect(self.cancel_rag_task)
+
+    def _launch_rag_worker(self, worker: QObject, task_kind: str, *, target: str = "rag") -> None:
+        if self.rag_thread is not None:
+            return
+        self.rag_task_kind = task_kind
+        self.rag_task_target = target
+        target_page = self.rag_eval_page if target == "rag_eval" else self.rag_page
+        self.rag_thread = QThread(self)
+        self.rag_worker = worker
+        worker.moveToThread(self.rag_thread)
+        self.rag_thread.started.connect(worker.run)
+        worker.progress.connect(target_page.show_progress)
+        worker.finished.connect(self.on_rag_task_finished)
+        worker.cancelled.connect(self.on_rag_task_cancelled)
+        worker.failed.connect(self.on_rag_task_failed)
+        worker.finished.connect(self.rag_thread.quit)
+        worker.cancelled.connect(self.rag_thread.quit)
+        worker.failed.connect(self.rag_thread.quit)
+        self.rag_thread.finished.connect(self.cleanup_rag_thread)
+        target_page.set_busy(True, self._rag_task_label(task_kind))
+        self.rag_thread.start()
+
+    @staticmethod
+    def _rag_task_label(task_kind: str) -> str:
+        return {
+            "download": "正在下载向量与重排模型",
+            "index": "正在构建 RAG 向量索引",
+            "query": "正在检索、重排并生成答案",
+            "connection_test": "正在测试 LLM API",
+            "local_state": "正在读取本地 AI 模型和索引",
+            "eval_preflight": "正在检查 Gold 测试集与已发布 AI 索引",
+            "eval": "正在运行 RAG 批量评测",
+        }.get(task_kind, "正在处理 AI 任务")
+
+    def preflight_rag_eval(self, config: RagEvalConfig) -> None:
+        if self.rag_thread is not None:
+            self.rag_eval_page.show_failure("已有 AI 后台任务正在运行，请等待完成后再检查。")
+            return
+        if self.database_migration_thread is not None:
+            self.rag_eval_page.show_failure("数据库正在迁移，请等待完成后再检查。")
+            return
+        self._launch_rag_worker(
+            RagEvalWorker(self.generation_base_path, self.settings, config, preflight_only=True),
+            "eval_preflight",
+            target="rag_eval",
+        )
+
+    def start_rag_eval(self, config: RagEvalConfig) -> None:
+        if self.rag_thread is not None:
+            self.rag_eval_page.show_failure("已有 AI 后台任务正在运行，请等待完成后再评测。")
+            return
+        if self.database_migration_thread is not None:
+            self.rag_eval_page.show_failure("数据库正在迁移，请等待完成后再评测。")
+            return
+        if config.mode == "full":
+            if self.settings_page.has_unsaved_rag_api_settings():
+                self.rag_eval_page.show_failure("API 配置有未保存的修改，请先到设置页保存后再运行完整问答评测。")
+                return
+            if not self.settings.rag_enabled:
+                self.rag_eval_page.show_failure("请先到设置页启用资料智能问答。")
+                return
+            if not str(self.settings.rag_api_model or "").strip():
+                self.rag_eval_page.show_failure("请先到设置页填写 LLM 模型名。")
+                return
+        self._launch_rag_worker(
+            RagEvalWorker(self.generation_base_path, self.settings, config),
+            "eval",
+            target="rag_eval",
+        )
+
+    def download_rag_models(self) -> None:
+        self._launch_rag_worker(RagModelDownloadWorker(self.settings), "download")
+
+    def restore_rag_local_state(self) -> None:
+        if self.rag_thread is not None or not self.settings.rag_enabled:
+            return
+        self._launch_rag_worker(
+            RagLocalStateWorker(self.generation_base_path, self.settings),
+            "local_state",
+        )
+
+    def build_rag_index(self) -> None:
+        if self.database_migration_thread is not None:
+            self.rag_page.show_failure("数据库正在迁移，请等待完成后重试")
+            return
+        if self.index_generation_store.active() is None:
+            self.rag_page.show_failure("请先完成一次全文索引，生成可供 RAG 使用的发布快照")
+            return
+        self._launch_rag_worker(
+            RagIndexWorker(self.generation_base_path, self.settings), "index"
+        )
+
+    def ask_rag(self, question: str) -> None:
+        request_id = new_rag_request_id("query")
+        config_has_unsaved_changes = self.settings_page.has_unsaved_rag_api_settings()
+        _log_ui_lifecycle_event(
+            "rag.query.requested",
+            request_id=request_id,
+            stage="ui_validation",
+            question_chars=len(str(question).strip()),
+            provider_host=provider_host(self.settings.rag_api_base_url),
+            model=self.settings.rag_api_model,
+            api_style=self.settings.rag_api_style,
+            config_has_unsaved_changes=config_has_unsaved_changes,
+        )
+        if config_has_unsaved_changes:
+            _log_ui_lifecycle_event(
+                "rag.query.rejected",
+                request_id=request_id,
+                stage="ui_validation",
+                error_code="RAG_API_SETTINGS_UNSAVED",
+                saved_model=self.settings.rag_api_model,
+                draft_model=self.settings_page.rag_api_model.text().strip(),
+                draft_provider_host=provider_host(
+                    self.settings_page.rag_api_base_url.text()
+                ),
+                draft_api_style=str(self.settings_page.rag_api_style.currentData()),
+            )
+            self.rag_page.show_failure(
+                "API 配置有未保存的修改。请到设置页点击“保存设置”后再提问。"
+                f"（诊断编号 {request_id}）"
+            )
+            return
+        if not self.settings.rag_enabled:
+            _log_ui_lifecycle_event(
+                "rag.query.rejected",
+                request_id=request_id,
+                stage="ui_validation",
+                error_code="RAG_DISABLED",
+            )
+            self.rag_page.show_failure("请先到设置页启用资料智能问答")
+            return
+        if not self.settings.rag_api_model.strip():
+            _log_ui_lifecycle_event(
+                "rag.query.rejected",
+                request_id=request_id,
+                stage="ui_validation",
+                error_code="RAG_MODEL_MISSING",
+            )
+            self.rag_page.show_failure("请先在设置页填写 LLM 模型名")
+            return
+        if self.rag_thread is not None:
+            _log_ui_lifecycle_event(
+                "rag.query.rejected",
+                request_id=request_id,
+                stage="worker_dispatch",
+                error_code="RAG_TASK_ALREADY_RUNNING",
+                active_task=self.rag_task_kind,
+            )
+            self.rag_page.show_failure("已有 AI 任务正在运行，请等待完成后重试")
+            return
+        query = RagQuery(
+            text=str(question).strip(),
+            include_ocr=True,
+            min_ocr_confidence=float(self.settings.ocr_min_confidence),
+            lexical_top_k=self.settings.rag_lexical_top_k,
+            vector_top_k=self.settings.rag_vector_top_k,
+            fusion_top_k=self.settings.rag_fusion_top_k,
+            reranker_top_k=self.settings.rag_reranker_top_k,
+            final_top_k=self.settings.rag_final_top_k,
+        )
+        self.rag_page.start_diagnostics(request_id, query.text)
+        self._launch_rag_worker(
+            RagQueryWorker(
+                self.generation_base_path,
+                query,
+                self.settings,
+                request_id=request_id,
+            ),
+            "query",
+        )
+
+    def _refresh_rag_api_key_saved_state(self) -> None:
+        request_id = new_rag_request_id("credential-status")
+        try:
+            saved = bool(
+                WindowsCredentialSecretStore().retrieve(self.settings.rag_api_secret_ref)
+            )
+            self.settings_page.set_rag_api_key_saved(saved)
+            log_event(
+                "rag.api_key.status_checked",
+                component="ui.main_window",
+                request_id=request_id,
+                credential_store="windows_credential_manager",
+                credential_present=saved,
+            )
+        except Exception as exc:
+            message, _details = log_rag_exception(
+                "rag.api_key.status_check_failed",
+                exc,
+                request_id=request_id,
+                component="ui.main_window",
+                stage="credential_read",
+                credential_store="windows_credential_manager",
+            )
+            self.settings_page.set_rag_api_key_saved(False)
+            self.settings_page.set_rag_test_status(
+                f"无法读取已保存 Key 的状态（诊断编号 {request_id}）"
+            )
+            logger.warning("RAG API key status check failed: %s", message)
+
+    def test_rag_connection(
+        self,
+        settings: AppSettings,
+        api_key: str,
+        configuration_is_saved: bool,
+        api_key_is_saved: bool,
+    ) -> None:
+        request_id = new_rag_request_id("connection-test")
+        key_is_saved = bool(api_key_is_saved)
+        log_event(
+            "rag.connection_test.requested",
+            component="ui.main_window",
+            request_id=request_id,
+            stage="credential_resolution",
+            provider_host=provider_host(settings.rag_api_base_url),
+            model=settings.rag_api_model,
+            api_style=settings.rag_api_style,
+            timeout_seconds=settings.rag_api_timeout_seconds,
+            api_key_source="saved_credential" if key_is_saved else "current_input",
+            configuration_is_saved=bool(configuration_is_saved),
+        )
+        try:
+            resolved_key = api_key or WindowsCredentialSecretStore().retrieve(
+                settings.rag_api_secret_ref
+            ) or ""
+        except Exception as exc:
+            _message, details = log_rag_exception(
+                "rag.connection_test.credential_read_failed",
+                exc,
+                request_id=request_id,
+                component="ui.main_window",
+                stage="credential_read",
+                credential_store="windows_credential_manager",
+            )
+            self.settings_page.set_rag_test_status(
+                f"读取已保存 Key 失败（诊断编号 {request_id}）"
+            )
+            self._show_rag_error(
+                "无法读取 API Key",
+                "程序无法从 Windows 凭据管理器读取已保存的 Key。请重新输入并保存 Key。",
+                request_id,
+                details,
+            )
+            return
+        if not resolved_key:
+            log_event(
+                "rag.connection_test.rejected",
+                level=logging.WARNING,
+                component="ui.main_window",
+                request_id=request_id,
+                stage="credential_validation",
+                error_code="RAG_API_KEY_MISSING",
+            )
+            self.settings_page.set_rag_test_status(
+                f"尚未填写或保存 API Key（诊断编号 {request_id}）"
+            )
+            self._show_rag_error(
+                "缺少 API Key",
+                "请在 API Key 输入框填写 Key，再点“保存 API Key”或直接重新测试。",
+                request_id,
+                "错误码：RAG_API_KEY_MISSING\n阶段：读取 API Key\n没有找到本次输入或已保存的 Key。",
+                icon=QMessageBox.Icon.Warning,
+            )
+            return
+        if self.rag_thread is not None:
+            log_event(
+                "rag.connection_test.rejected",
+                level=logging.WARNING,
+                component="ui.main_window",
+                request_id=request_id,
+                stage="worker_dispatch",
+                error_code="RAG_TASK_ALREADY_RUNNING",
+                active_task=self.rag_task_kind,
+            )
+            self.settings_page.set_rag_test_status("已有 AI 后台任务正在运行，请等待其完成。")
+            self._show_rag_error(
+                "暂时无法测试连接",
+                "已有 AI 后台任务正在运行。请等待当前任务结束后再测试。",
+                request_id,
+                f"错误码：RAG_TASK_ALREADY_RUNNING\n当前任务：{self.rag_task_kind}",
+                icon=QMessageBox.Icon.Warning,
+            )
+            return
+
+        self._rag_connection_config_saved = bool(configuration_is_saved)
+        self._rag_connection_key_saved = bool(key_is_saved)
+        self.settings_page.set_rag_connection_test_running(True, request_id)
+        self._launch_rag_worker(
+            RagConnectionTestWorker(
+                settings,
+                resolved_key,
+                request_id=request_id,
+                api_key_is_saved=key_is_saved,
+            ),
+            "connection_test",
+        )
+
+    def save_rag_api_key(self, api_key: str) -> None:
+        request_id = new_rag_request_id("api-key-save")
+        if not api_key:
+            self.settings_page.set_rag_test_status("请先输入 API Key。")
+            return
+        log_event(
+            "rag.api_key.save_started",
+            component="ui.main_window",
+            request_id=request_id,
+            stage="credential_write",
+            credential_store="windows_credential_manager",
+            key_present=True,
+        )
+        try:
+            WindowsCredentialSecretStore().save(self.settings.rag_api_secret_ref, api_key)
+            log_event(
+                "rag.api_key.save_succeeded",
+                component="ui.main_window",
+                request_id=request_id,
+                stage="credential_write_completed",
+                credential_store="windows_credential_manager",
+            )
+            self.settings_page.set_rag_api_key_saved(
+                True,
+                message="API Key 已安全保存；输入框中的内容保持遮蔽。",
+            )
+            self.settings_page.set_rag_test_status(
+                f"API Key 已安全保存（诊断编号 {request_id}）。"
+            )
+        except Exception as exc:
+            _message, details = log_rag_exception(
+                "rag.api_key.save_failed",
+                exc,
+                request_id=request_id,
+                component="ui.main_window",
+                secrets=[api_key],
+                stage="credential_write",
+                credential_store="windows_credential_manager",
+                key_present=True,
+            )
+            self.settings_page.set_rag_api_key_save_failed(request_id)
+            self._show_rag_error(
+                "API Key 保存失败",
+                "Windows 没有保存这次输入的 Key。输入内容仍保留在框中；修复保存问题后可再次保存。",
+                request_id,
+                details,
+            )
+
+    def clear_rag_api_key(self) -> None:
+        request_id = new_rag_request_id("api-key-delete")
+        log_event(
+            "rag.api_key.delete_started",
+            component="ui.main_window",
+            request_id=request_id,
+            stage="credential_delete",
+            credential_store="windows_credential_manager",
+        )
+        try:
+            WindowsCredentialSecretStore().delete(self.settings.rag_api_secret_ref)
+            log_event(
+                "rag.api_key.delete_succeeded",
+                component="ui.main_window",
+                request_id=request_id,
+                stage="credential_delete_completed",
+                credential_store="windows_credential_manager",
+            )
+            self.settings_page.set_rag_api_key_saved(False)
+            self.settings_page.set_rag_test_status(
+                f"已删除系统中保存的 API Key（诊断编号 {request_id}）。"
+            )
+        except Exception as exc:
+            _message, details = log_rag_exception(
+                "rag.api_key.delete_failed",
+                exc,
+                request_id=request_id,
+                component="ui.main_window",
+                stage="credential_delete",
+                credential_store="windows_credential_manager",
+            )
+            self.settings_page.set_rag_api_key_delete_failed(request_id)
+            self._show_rag_error(
+                "删除 API Key 失败",
+                "系统没有删除已保存的 Key。当前输入内容保持不变。",
+                request_id,
+                details,
+            )
+
+    def _show_rag_error(
+        self,
+        title: str,
+        summary: str,
+        request_id: str,
+        details: str,
+        *,
+        icon: QMessageBox.Icon = QMessageBox.Icon.Critical,
+    ) -> None:
+        dialog = QMessageBox(self)
+        dialog.setIcon(icon)
+        dialog.setWindowTitle(title)
+        dialog.setText(summary)
+        dialog.setInformativeText(
+            f"诊断编号：{request_id}\n详细日志目录：{LOG_DIR}"
+        )
+        dialog.setDetailedText(details or "没有额外的技术详情。")
+        open_logs = dialog.addButton(
+            "打开日志目录", QMessageBox.ButtonRole.ActionRole
+        )
+        dialog.addButton(QMessageBox.StandardButton.Close)
+        dialog.exec()
+        if dialog.clickedButton() is open_logs:
+            LOG_DIR.mkdir(parents=True, exist_ok=True)
+            open_file(LOG_DIR)
+
+    def cancel_rag_task(self) -> None:
+        worker = self.rag_worker
+        cancel = getattr(worker, "cancel", None)
+        if callable(cancel):
+            cancel()
+            if self.rag_task_target == "rag_eval":
+                self.rag_eval_page.status_label.setText("已请求停止，正在等待当前模型/网络操作退出…")
+            else:
+                self.rag_page.status_label.setText("已请求停止，正在等待当前模型/网络操作退出…")
+
+    def on_rag_task_finished(self, result: object) -> None:
+        if self.rag_task_kind == "eval_preflight":
+            self.rag_eval_page.show_progress(result)
+        elif self.rag_task_kind == "eval":
+            if isinstance(result, dict):
+                self.rag_eval_page.show_run_result(result)
+        elif self.rag_task_kind == "download":
+            self.rag_page.status_label.setText("Embedding 与 Reranker 模型已下载并校验")
+        elif self.rag_task_kind == "index":
+            self.rag_page.show_build_summary(result)
+        elif self.rag_task_kind == "query":
+            self.rag_page.show_answer(result)
+        elif self.rag_task_kind == "local_state":
+            self.rag_page.show_local_state(result)
+        elif self.rag_task_kind == "connection_test":
+            messages = ["连接成功，服务已返回响应。"]
+            if not self._rag_connection_config_saved:
+                messages.append("当前 API 配置尚未保存；请点击页面底部的“保存设置”，否则提问仍会使用旧配置。")
+            if not self._rag_connection_key_saved:
+                messages.append("本次输入的 Key 尚未保存，后续问答请先保存 Key。")
+            self.settings_page.set_rag_test_status(" ".join(messages))
+
+    def on_rag_task_cancelled(self) -> None:
+        if self.rag_task_target == "rag_eval":
+            worker = self.rag_worker
+            partial = getattr(worker, "partial_result", None)
+            if isinstance(partial, dict):
+                self.rag_eval_page.show_run_result(partial, cancelled=True)
+            self.rag_eval_page.show_cancelled()
+            return
+        if self.rag_task_kind == "connection_test":
+            self.settings_page.set_rag_test_status("连接测试已取消")
+        if self.rag_task_kind == "query":
+            self.rag_page.finish_diagnostics("问答已取消")
+        self.rag_page.show_cancelled()
+
+    def on_rag_task_failed(self, message: str) -> None:
+        if self.rag_task_target == "rag_eval":
+            worker = self.rag_worker
+            details = str(getattr(worker, "error_details", "") or message)
+            self.rag_eval_page.show_failure(details)
+            return
+        if self.rag_task_kind == "connection_test":
+            worker = self.rag_worker
+            request_id = str(getattr(worker, "request_id", "")) or new_rag_request_id(
+                "connection-test-error"
+            )
+            safe_message = str(message or "连接测试失败").replace("\r", " ").replace("\n", " ")
+            details = str(getattr(worker, "error_details", "") or safe_message)
+            self.settings_page.set_rag_test_status(
+                f"连接测试失败：{safe_message}（诊断编号 {request_id}）"
+            )
+            self._show_rag_error(
+                "API 连接测试失败",
+                safe_message,
+                request_id,
+                details,
+            )
+            return
+        if self.rag_task_kind == "query":
+            self.rag_page.finish_diagnostics("问答失败")
+            worker = self.rag_worker
+            request_id = str(getattr(worker, "request_id", ""))
+            stage = str(getattr(worker, "current_stage", "unknown"))
+            stage_label = {
+                "model_resolution": "读取本地模型",
+                "embedding_model_loading": "加载向量模型",
+                "reranker_model_loading": "加载重排模型",
+                "checking_index": "检查索引版本",
+                "retrieving": "混合检索",
+                "lexical_retrieval": "关键词检索",
+                "vector_retrieval": "向量检索",
+                "fusion": "合并检索候选",
+                "reranking": "重排候选证据",
+                "checking_evidence": "筛选证据",
+                "building_context": "整理引用上下文",
+                "credential_read": "读取 API Key",
+                "generating": "调用 LLM 生成答案",
+                "validating": "校验答案引用",
+            }.get(stage, stage)
+            safe_message = str(message or "问答失败").replace("\r", " ").replace("\n", " ")
+            self.rag_page.show_failure(
+                f"{safe_message}（阶段：{stage_label}；诊断编号 {request_id}）"
+            )
+            return
+        self.rag_page.show_failure(message)
+
+    def cleanup_rag_thread(self) -> None:
+        finished_task_kind = self.rag_task_kind
+        worker = self.rag_worker
+        thread = self.rag_thread
+        finished_task_target = self.rag_task_target
+        self.rag_worker = None
+        self.rag_thread = None
+        self.rag_task_kind = ""
+        self.rag_task_target = "rag"
+        if finished_task_kind == "connection_test":
+            self.settings_page.set_rag_connection_test_running(False)
+        if worker is not None:
+            worker.deleteLater()
+        if thread is not None:
+            thread.deleteLater()
+        if finished_task_target == "rag_eval":
+            self.rag_eval_page.show_finished()
+        else:
+            self.rag_page.show_task_finished()
+        self._finish_close_if_idle()
 
     def _install_shortcuts(self) -> None:
         QShortcut(QKeySequence("Ctrl+F"), self, activated=self.search_page.focus_search)
@@ -427,12 +1001,16 @@ class MainWindow(QMainWindow):
             "search": "本地全文搜索",
             "index": "索引管理",
             "failed": "未成功索引",
+            "rag": "资料智能问答",
+            "rag_eval": "RAG 批量评测",
             "settings": "设置",
         }
         subtitle_map = {
             "search": "搜索文件名、正文、表格、幻灯片和图片文字",
             "index": "管理需要搜索的本地文件夹和索引状态",
             "failed": "查看无法解析、仅元数据或需要处理的文件",
+            "rag": "本地混合检索与重排，连接你配置的 LLM API 生成引用答案",
+            "rag_eval": "导入 Gold 测试集，查看各题召回、重排和答案表现",
             "settings": "调整搜索、索引和 OCR 默认行为",
         }
         self.top_bar.set_title(title_map[key], subtitle_map[key])
@@ -1972,6 +2550,19 @@ class MainWindow(QMainWindow):
         if self.closing:
             return
         self._scan_refresh_pending = True
+        if bool(payload.get("unchanged")):
+            text = str(payload.get("message") or "索引未变化，继续使用当前已发布版本")
+            details = payload.get("change_check")
+            tooltip = text
+            if isinstance(details, dict):
+                tooltip += (
+                    f"\n只读检查：{details.get('checked_roots', 0)} 个目录，"
+                    f"{details.get('checked_files', 0)} 个文件；"
+                    f"耗时 {details.get('elapsed_ms', 0)} ms。"
+                )
+            self.index_page.show_run_summary(text, tooltip)
+            self.top_bar.set_index_status(text)
+            return
         summary_text, summary_tooltip = format_index_run_summary(payload)
         if summary_text:
             self.index_page.show_run_summary(summary_text, summary_tooltip)
@@ -2380,6 +2971,9 @@ class MainWindow(QMainWindow):
         self.settings = settings
         self.settings_service.save(settings)
         self.search_page.apply_settings(settings)
+        self.rag_page.set_rag_enabled(settings.rag_enabled)
+        if settings.rag_enabled:
+            QTimer.singleShot(0, self.restore_rag_local_state)
         self.refresh_file_monitor()
         self.search_page.set_status("设置已保存")
 
@@ -2389,6 +2983,7 @@ class MainWindow(QMainWindow):
         if (
             self.scan_thread is not None
             or self.search_thread is not None
+            or self.rag_thread is not None
             or self.exclusion_thread is not None
         ):
             QMessageBox.information(
@@ -2587,6 +3182,7 @@ class MainWindow(QMainWindow):
             active_threads={
                 "scan": self.scan_thread is not None,
                 "search": self.search_thread is not None,
+                "rag": self.rag_thread is not None,
                 "search_history": self.search_history_thread is not None,
                 "exclusion": self.exclusion_thread is not None,
                 "database_migration": self.database_migration_thread is not None,
@@ -2599,6 +3195,7 @@ class MainWindow(QMainWindow):
         if (
             self.scan_thread is None
             and self.search_thread is None
+            and self.rag_thread is None
             and self.search_history_thread is None
             and self.exclusion_thread is None
             and self.database_migration_thread is None
@@ -2622,6 +3219,7 @@ class MainWindow(QMainWindow):
         self.pending_monitor_scan = False
         self.cancel_scan(force=True)
         self.cancel_search()
+        self.cancel_rag_task()
         self.cancel_scope_exclusion()
         self.cancel_database_migration()
         if self.database_snapshot_worker is not None:
@@ -2636,6 +3234,7 @@ class MainWindow(QMainWindow):
             and not self._interrupt_shutdown_in_progress
             and self.scan_thread is None
             and self.search_thread is None
+            and self.rag_thread is None
             and self.search_history_thread is None
             and self.exclusion_thread is None
             and self.database_migration_thread is None
@@ -2665,6 +3264,7 @@ class MainWindow(QMainWindow):
         self.file_monitor.stop()
         self.cancel_scan(force=True)
         self.cancel_search()
+        self.cancel_rag_task()
         self.cancel_scope_exclusion()
         self.cancel_database_migration()
         if self.database_snapshot_worker is not None:
@@ -2674,6 +3274,7 @@ class MainWindow(QMainWindow):
         threads = (
             self.scan_thread,
             self.search_thread,
+            self.rag_thread,
             self.search_history_thread,
             self.exclusion_thread,
             self.database_migration_thread,
@@ -2764,6 +3365,8 @@ class Sidebar(QFrame):
         self._add_button(layout, "搜索", "search")
         self._add_button(layout, "索引管理", "index")
         self._add_button(layout, "未成功索引", "failed")
+        self._add_button(layout, "资料智能问答", "rag")
+        self._add_button(layout, "RAG 批量评测", "rag_eval")
         layout.addStretch(1)
         layout.addWidget(separator())
         self._add_button(layout, "设置", "settings")
@@ -5117,11 +5720,16 @@ class SettingsPage(QWidget):
     save_requested = Signal(object)
     database_migration_requested = Signal(str)
     database_migration_cancel_requested = Signal()
+    rag_api_key_save_requested = Signal(str)
+    rag_api_key_clear_requested = Signal()
+    rag_connection_test_requested = Signal(object, str, bool, bool)
 
     def __init__(self, settings: AppSettings) -> None:
         super().__init__()
         self.setObjectName("Page")
         self.settings = settings
+        self._rag_api_key_saved = False
+        self._rag_api_key_input_is_saved = False
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 20, 24, 20)
         layout.setSpacing(14)
@@ -5248,6 +5856,69 @@ class SettingsPage(QWidget):
             )
         )
 
+        self.rag_enabled = QCheckBox("启用资料智能问答")
+        self.rag_enabled.setChecked(settings.rag_enabled)
+        self.rag_api_base_url = QLineEdit(settings.rag_api_base_url)
+        self.rag_api_base_url.setPlaceholderText("https://api.openai.com/v1")
+        self.rag_api_model = QLineEdit(settings.rag_api_model)
+        self.rag_api_model.setPlaceholderText("填写服务商提供的模型名")
+        self.rag_api_style = QComboBox()
+        self.rag_api_style.addItem("Chat Completions（兼容性较好）", "chat_completions")
+        self.rag_api_style.addItem("Responses API", "responses")
+        api_style_index = self.rag_api_style.findData(settings.rag_api_style)
+        self.rag_api_style.setCurrentIndex(api_style_index if api_style_index >= 0 else 0)
+        self.rag_api_timeout = QSpinBox()
+        self.rag_api_timeout.setRange(5, 600)
+        self.rag_api_timeout.setSuffix(" 秒")
+        self.rag_api_timeout.setValue(settings.rag_api_timeout_seconds)
+        self.rag_answer_review_enabled = QCheckBox(
+            "启用 LLM 答案二次复核（通常每次提问调用两次）"
+        )
+        self.rag_answer_review_enabled.setChecked(settings.rag_answer_review_enabled)
+        self.rag_answer_review_enabled.setToolTip(
+            "第一次生成答案，第二次逐条核对引用证据并修订；开启后会增加一次 API 调用和等待时间。"
+        )
+        self.rag_api_key = QLineEdit()
+        self.rag_api_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self.rag_api_key.setPlaceholderText("留空时使用已保存的 Key；输入新 Key 可替换")
+        self.rag_api_key_save_button = QPushButton("保存 Key")
+        rag_api_key_row = QWidget()
+        rag_api_key_row_layout = QHBoxLayout(rag_api_key_row)
+        rag_api_key_row_layout.setContentsMargins(0, 0, 0, 0)
+        rag_api_key_row_layout.setSpacing(8)
+        rag_api_key_row_layout.addWidget(self.rag_api_key, 1)
+        rag_api_key_row_layout.addWidget(self.rag_api_key_save_button)
+        self.rag_api_key_delete_button = QPushButton("删除已保存的 API Key")
+        self.rag_api_key_delete_button.setEnabled(False)
+        self.rag_api_key_status = QLabel("正在检查已保存的 API Key…")
+        self.rag_api_key_status.setObjectName("MutedText")
+        self.rag_api_key_status.setWordWrap(True)
+        self.rag_test_button = QPushButton("测试 API 连接")
+        self.rag_test_status = QLabel("API Key 使用 Windows Credential Manager 保存，不写入设置文件。")
+        self.rag_test_status.setWordWrap(True)
+        self.rag_test_button.clicked.connect(self.test_rag_connection)
+        self.rag_api_key_save_button.clicked.connect(self.save_rag_api_key)
+        self.rag_api_key_delete_button.clicked.connect(self.confirm_delete_rag_api_key)
+        self.rag_api_key.textChanged.connect(self._on_rag_api_key_edited)
+        host_layout.addWidget(
+            settings_card(
+                "资料智能问答 / RAG",
+                [
+                    ("", self.rag_enabled),
+                    ("API Base URL", self.rag_api_base_url),
+                    ("模型名", self.rag_api_model),
+                    ("接口类型", self.rag_api_style),
+                    ("请求超时", self.rag_api_timeout),
+                    ("", self.rag_answer_review_enabled),
+                    ("API Key", rag_api_key_row),
+                    ("", self.rag_api_key_status),
+                    ("", self.rag_api_key_delete_button),
+                    ("", self.rag_test_button),
+                    ("", self.rag_test_status),
+                ],
+            )
+        )
+
         self.enable_ocr = QCheckBox("启用 OCR")
         self.enable_ocr.setChecked(settings.enable_ocr)
         self.ocr_images = QCheckBox("索引图片 OCR")
@@ -5279,6 +5950,22 @@ class SettingsPage(QWidget):
         self.write_batch_size = QSpinBox()
         self.write_batch_size.setRange(1, 200)
         self.write_batch_size.setValue(settings.index_write_batch_size)
+        self.rag_embedding_batch_size = QSpinBox()
+        self.rag_embedding_batch_size.setRange(1, 64)
+        self.rag_embedding_batch_size.setSingleStep(8)
+        self.rag_embedding_batch_size.setSuffix(" 块")
+        self.rag_embedding_batch_size.setValue(settings.rag_embedding_batch_size)
+        self.rag_embedding_batch_size.setToolTip(
+            "每次送入本地向量模型计算的正文块数量。调大可能增加内存占用。"
+        )
+        self.rag_index_write_batch_size = QSpinBox()
+        self.rag_index_write_batch_size.setRange(16, 256)
+        self.rag_index_write_batch_size.setSingleStep(16)
+        self.rag_index_write_batch_size.setSuffix(" 块")
+        self.rag_index_write_batch_size.setValue(settings.rag_index_write_batch_size)
+        self.rag_index_write_batch_size.setToolTip(
+            "每批写入向量数据库并提交 AI 索引正文数据库的块数量。"
+        )
         self.min_ocr_pixels = QSpinBox()
         self.min_ocr_pixels.setRange(0, 2_000_000)
         self.min_ocr_pixels.setValue(settings.min_ocr_image_pixels)
@@ -5341,6 +6028,15 @@ class SettingsPage(QWidget):
                     ("批量写库文件数", self.write_batch_size),
                     ("小图片 OCR 跳过像素", self.min_ocr_pixels),
                     ("OCR 首轮检测边长", self.max_ocr_side),
+                ],
+            )
+        )
+        advanced_layout.addWidget(
+            settings_card(
+                "AI 索引批次",
+                [
+                    ("模型计算批量", self.rag_embedding_batch_size),
+                    ("向量与正文写入批量", self.rag_index_write_batch_size),
                 ],
             )
         )
@@ -5569,13 +6265,131 @@ class SettingsPage(QWidget):
         self.settings.process_parser_workers = int(self.process_parser_workers.value())
         self.settings.large_office_process_min_bytes = int(self.large_office_threshold_mb.value()) * 1024 * 1024
         self.settings.index_write_batch_size = int(self.write_batch_size.value())
+        self.settings.rag_embedding_batch_size = int(
+            self.rag_embedding_batch_size.value()
+        )
+        self.settings.rag_index_write_batch_size = int(
+            self.rag_index_write_batch_size.value()
+        )
         self.settings.min_ocr_image_pixels = int(self.min_ocr_pixels.value())
         self.settings.max_ocr_image_side = int(self.max_ocr_side.value())
         self.settings.index_performance_preset = str(self.performance_preset.currentData())
         self.settings.monitor_file_changes = self.monitor_changes.isChecked()
         self.settings.include_hidden_files = self.hidden_files.isChecked()
         self.settings.excluded_dirs = [line.strip() for line in self.exclude_dirs.toPlainText().splitlines() if line.strip()]
+        self.settings.rag_enabled = self.rag_enabled.isChecked()
+        self.settings.rag_api_base_url = self.rag_api_base_url.text().strip()
+        self.settings.rag_api_model = self.rag_api_model.text().strip()
+        self.settings.rag_api_style = str(self.rag_api_style.currentData())
+        self.settings.rag_api_timeout_seconds = int(self.rag_api_timeout.value())
+        self.settings.rag_answer_review_enabled = self.rag_answer_review_enabled.isChecked()
         self.save_requested.emit(self.settings)
+
+    def save_rag_api_key(self) -> None:
+        api_key = self.rag_api_key.text().strip()
+        if not api_key:
+            QMessageBox.warning(
+                self,
+                "请输入 API Key",
+                "输入新的 API Key 后，再点“保存 Key”。留空不会删除或覆盖已保存的 Key。",
+            )
+            return
+        self.rag_api_key_save_requested.emit(api_key)
+
+    def confirm_delete_rag_api_key(self) -> None:
+        if not self._rag_api_key_saved:
+            self.set_rag_test_status("当前没有已保存的 API Key 可删除。")
+            return
+        answer = QMessageBox.question(
+            self,
+            "删除已保存的 API Key？",
+            "删除后，AI 问答将无法调用 LLM，直到重新保存 Key。此操作不会删除当前输入框中的新 Key。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            self.rag_api_key_clear_requested.emit()
+
+    def _on_rag_api_key_edited(self, _text: str = "") -> None:
+        self._rag_api_key_input_is_saved = False
+        if self.rag_api_key.text().strip():
+            if self._rag_api_key_saved:
+                message = "输入的是新 Key，尚未保存；之前保存的 Key 仍保留。"
+            else:
+                message = "输入的 Key 尚未保存。测试连接不会保存或清空它。"
+            self.rag_api_key_status.setText(message)
+        elif self._rag_api_key_saved:
+            self.rag_api_key_status.setText("已保存 Key；留空时测试和问答会使用它。")
+        else:
+            self.rag_api_key_status.setText("尚未保存 API Key。")
+
+    def set_rag_api_key_saved(self, saved: bool, *, message: str | None = None) -> None:
+        self._rag_api_key_saved = bool(saved)
+        self._rag_api_key_input_is_saved = bool(
+            self._rag_api_key_saved and self.rag_api_key.text().strip() and message
+        )
+        self.rag_api_key_delete_button.setEnabled(self._rag_api_key_saved)
+        if message:
+            self.rag_api_key_status.setText(message)
+        else:
+            self._on_rag_api_key_edited()
+
+    def set_rag_api_key_save_failed(self, request_id: str) -> None:
+        if self._rag_api_key_saved:
+            message = "新输入的 Key 未保存；之前保存的 Key 仍保留。"
+        else:
+            message = "Key 尚未保存；输入内容已保留。"
+        self.rag_api_key_status.setText(f"{message} 诊断编号：{request_id}")
+
+    def set_rag_api_key_delete_failed(self, request_id: str) -> None:
+        self.rag_api_key_status.setText(
+            f"删除失败；已保存的 Key 状态未改变。诊断编号：{request_id}"
+        )
+
+    def set_rag_connection_test_running(
+        self, running: bool, request_id: str | None = None
+    ) -> None:
+        self.rag_test_button.setEnabled(not running)
+        self.rag_test_button.setText("正在测试…" if running else "测试 API 连接")
+        if running:
+            suffix = f"（诊断编号 {request_id}）" if request_id else ""
+            self.set_rag_test_status(f"正在连接服务并等待响应{suffix}。")
+
+    def _rag_api_settings_snapshot(self) -> AppSettings:
+        return replace(
+            self.settings,
+            rag_enabled=self.rag_enabled.isChecked(),
+            rag_api_base_url=self.rag_api_base_url.text().strip(),
+            rag_api_model=self.rag_api_model.text().strip(),
+            rag_api_style=str(self.rag_api_style.currentData()),
+            rag_api_timeout_seconds=int(self.rag_api_timeout.value()),
+        )
+
+    def has_unsaved_rag_api_settings(self) -> bool:
+        snapshot = self._rag_api_settings_snapshot()
+        return any(
+            getattr(snapshot, name) != getattr(self.settings, name)
+            for name in (
+                "rag_api_base_url",
+                "rag_api_model",
+                "rag_api_style",
+                "rag_api_timeout_seconds",
+            )
+        )
+
+    def test_rag_connection(self) -> None:
+        api_key = self.rag_api_key.text().strip()
+        settings_snapshot = self._rag_api_settings_snapshot()
+        configuration_is_saved = not self.has_unsaved_rag_api_settings()
+        self.rag_connection_test_requested.emit(
+            settings_snapshot,
+            api_key,
+            configuration_is_saved,
+            not bool(api_key) or self._rag_api_key_input_is_saved,
+        )
+
+    def set_rag_test_status(self, message: str) -> None:
+        self.rag_test_status.setText(message)
 
 
 def separator() -> QFrame:
