@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import json
+from dataclasses import replace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -55,6 +56,73 @@ def test_page_preserves_model_citation_ids_and_source_payload() -> None:
     assert item.data(Qt.ItemDataRole.UserRole) == original_payload
 
 
+def test_page_opens_each_source_under_the_same_citation_id() -> None:
+    _app()
+    page = RagPage()
+    first = SourceRef(
+        source_generation=4, stable_chunk_id="chunk-a", document_id=9,
+        file_id=12, root_id=3, file_path="C:/资料/A.pdf", filename="A.pdf",
+        extension=".pdf", block_ids=(17,), location_text="第 2 页", page_number=2,
+    )
+    second = replace(
+        first, stable_chunk_id="chunk-b", file_id=13, file_path="C:/资料/B.pdf",
+        filename="B.pdf", location_text="第 8 页", page_number=8,
+    )
+    page.show_answer(RagAnswer(
+        answer_text="按检查点恢复 [S1]。", sources=(first, second),
+        insufficient_evidence=False, source_ids=("S1", "S1"),
+    ))
+    opened = []
+    page.source_open_requested.connect(lambda path, location: opened.append((path, location)))
+
+    for index in range(2):
+        assert page.sources.item(index).text().startswith("[S1]")
+        page._open_source(page.sources.item(index))
+    assert [item[0] for item in opened] == [first.file_path, second.file_path]
+    assert [item[1]["page_number"] for item in opened] == [2, 8]
+    page.close()
+
+
+def test_diagnostic_dispositions_and_nested_source_export_are_safe() -> None:
+    _app()
+    page = RagPage()
+    page.start_diagnostics("dedup-test", "检查点怎么恢复？")
+    candidate = {
+        "chunk_id": "chunk-a", "filename": "A.pdf", "file_path": "C:/资料/A.pdf",
+        "location": "第 2 页", "text": "秘密正文", "source_count": 2,
+        "member_chunk_ids": ["chunk-a", "chunk-b"],
+        "sources": [
+            {"filename": "A.pdf", "location": "第 2 页", "file_path": "C:/资料/A.pdf"},
+            {"filename": "B.pdf", "location": "第 8 页", "file_path": "C:/资料/B.pdf",
+             "text": "秘密正文"},
+        ],
+        "dedup_status": "kept", "representative_chunk_id": "chunk-a",
+        "reason": "保留为代表候选，合并 2 个来源，进入重排候选池",
+    }
+    page.show_progress({
+        "stage": "deduplicating", "fused_candidates": [candidate],
+        "deduplicated_candidates": [candidate],
+        "candidate_dispositions": [
+            {"chunk_id": "chunk-a", "status": "kept", "reason": candidate["reason"]},
+            {"chunk_id": "chunk-c", "status": "fusion_top_k_cutoff",
+             "reason": "正文不重复，但去重后候选已达到 fusion_top_k=1，因此未进入重排候选池"},
+        ],
+        "context_entries": [{"included_text": "秘密正文", "sources": candidate["sources"]}],
+        "context_sources": [{"file_path": "C:/资料/B.pdf", "included_text": "秘密正文"}],
+        "api_key": "test-api-secret",
+    })
+    dialog = page.diagnostics_dialog
+    assert "fusion_top_k_cutoff" in dialog.dedup_text.toPlainText()
+    assert "正文不重复" in dialog.dedup_text.toPlainText()
+    assert "B.pdf" in dialog.deduplicated.details.toPlainText()
+    exported = json.dumps(dialog.diagnostic_json(), ensure_ascii=False)
+    assert "秘密正文" not in exported
+    assert "C:/资料/" not in exported
+    assert "test-api-secret" not in exported
+    assert '"source_count": 2' in exported
+    page.close()
+
+
 def test_page_shows_warning_when_answer_uses_older_ai_index() -> None:
     _app()
     page = RagPage()
@@ -96,6 +164,51 @@ def test_page_shows_reused_local_models_and_chroma_state() -> None:
     assert "已复用本地 BGE 模型" in page.status_label.text()
     assert "12 个 Chroma 向量" in page.status_label.text()
     assert "继续使用旧 AI 索引" in page.status_label.text()
+
+
+def test_model_mismatch_is_visible_and_disables_question_until_rebuild() -> None:
+    _app()
+    page = RagPage()
+    page.set_rag_enabled(True)
+    page.set_embedding_model(
+        "BAAI/bge-large-zh-v1.5", "BGE Large 中文（质量优先）", 1024,
+    )
+    page.show_local_state({
+        "models_ready": True,
+        "index_ready": False,
+        "index_error": "已发布 AI 索引使用的向量模型与当前设置不一致",
+        "configured_embedding_model": "BAAI/bge-large-zh-v1.5",
+        "index_embedding_model": "BAAI/bge-small-zh-v1.5",
+    })
+
+    assert "bge-large-zh-v1.5" in page.embedding_model_label.text()
+    assert "当前索引：BAAI/bge-small-zh-v1.5" in page.status_label.text()
+    assert page.ask_button.isEnabled() is False
+    assert page.build_button.isEnabled() is True
+
+
+def test_index_progress_shows_real_total_percent_eta_and_resumed_count() -> None:
+    _app()
+    page = RagPage()
+    page.set_busy(True, "正在构建")
+
+    page.show_progress({
+        "stage": "embedding",
+        "message": "正在分块并生成向量",
+        "chunk_count": 3072,
+        "total_chunk_count": 11769,
+        "percent": 26.102,
+        "eta_seconds": 7320,
+        "resumed_chunk_count": 1024,
+    })
+
+    assert "3,072 / 11,769" in page.status_label.text()
+    assert "26.1%" in page.status_label.text()
+    assert "2 小时 2 分钟" in page.status_label.text()
+    assert "已恢复 1,024 个" in page.status_label.text()
+    assert page.progress.maximum() == 1000
+    assert page.progress.value() == 261
+    page.close()
 
 
 def test_diagnostic_dialog_shows_candidates_context_and_key_free_request(

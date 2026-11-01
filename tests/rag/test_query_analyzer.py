@@ -34,6 +34,17 @@ def test_query_analyzer_removes_question_shell_and_expands_stable_status() -> No
     assert " OR " in analysis.fts_expression
 
 
+def test_model_identifier_never_suppresses_unseen_business_terms() -> None:
+    analysis = QueryAnalyzer().analyze(
+        "以教材中的CL-8000i示例，清洗液缓冲容器何时开始、停止吸液？一瓶空了会怎样？"
+    )
+
+    assert "cl-8000i" in analysis.terms
+    assert any("清洗液" in term for term in analysis.terms)
+    assert any("缓冲容器" in term for term in analysis.terms)
+    assert any("吸液" in term for term in analysis.terms)
+
+
 def test_bm25_ranks_analyzed_keyword_matches(tmp_path) -> None:
     store = RagIndexStore(tmp_path / "rag")
     candidate, connection = store.create_candidate(

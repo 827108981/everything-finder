@@ -37,6 +37,18 @@ class AnswerReviewRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class TextCompletionRequest:
+    system_prompt: str
+    user_prompt: str
+    model: str
+    api_base_url: str
+    api_style: str
+    api_key: str
+    timeout_seconds: int = 90
+    max_output_tokens: int = 1400
+
+
+@dataclass(frozen=True, slots=True)
 class ModelAnswer:
     text: str
     provider_name: str

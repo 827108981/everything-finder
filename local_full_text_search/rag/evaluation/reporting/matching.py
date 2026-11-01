@@ -122,9 +122,13 @@ def match_quote(
 ) -> EvidenceMatch:
     config = config or MatchConfig()
     quote = str(evidence.get("quote") or "")
-    chunk_file = _basename(str(chunk.get("filename") or chunk.get("file_path") or ""))
     evidence_file = _basename(str(evidence.get("file") or ""))
-    file_match = bool(chunk_file and evidence_file and chunk_file == evidence_file)
+    locations = [chunk, *(source for source in chunk.get("sources", []) if isinstance(source, dict))]
+    matching_locations = [
+        location for location in locations
+        if evidence_file and _basename(str(location.get("filename") or location.get("file_path") or "")) == evidence_file
+    ]
+    file_match = bool(matching_locations)
     if not file_match:
         return EvidenceMatch(
             kind, evidence_id, "unmatched", "unknown", 0.0, False, False, None,
@@ -132,17 +136,21 @@ def match_quote(
         )
 
     expected_page = _page_number(evidence)
-    actual_page = _page_number(chunk)
-    page_delta = abs(actual_page - expected_page) if actual_page is not None and expected_page is not None else None
+    deltas = [
+        abs(actual - expected_page)
+        for location in matching_locations
+        if expected_page is not None and (actual := _page_number(location)) is not None
+    ]
+    page_delta = min(deltas) if deltas else None
     page_match: bool | None = None
-    if expected_page is not None and actual_page is not None:
+    if expected_page is not None and deltas:
         page_match = page_delta <= config.page_tolerance
         if not page_match:
             return EvidenceMatch(
                 kind, evidence_id, "unmatched", "unknown", 0.0, True, False, page_delta,
                 quote, f"页码相差 {page_delta}，超过容差 {config.page_tolerance}",
             )
-    elif expected_page is not None or actual_page is not None:
+    elif expected_page is not None:
         page_match = None
 
     quote_norm = normalize_with_offsets(quote)

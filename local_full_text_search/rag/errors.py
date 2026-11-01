@@ -22,6 +22,18 @@ class RagIndexCorruptError(RagError):
     pass
 
 
+class LexicalIndexNotReadyError(RagError):
+    """关键词 V2 索引缺失、损坏或与当前 AI bundle 不一致。"""
+
+    pass
+
+
+class VectorIndexNotReadyError(RagError):
+    """向量单元 V2 索引缺失、损坏或与当前 AI bundle 不一致。"""
+
+    pass
+
+
 class RagSourceChangedError(RagError):
     pass
 

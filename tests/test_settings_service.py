@@ -35,8 +35,8 @@ def test_legacy_settings_are_persisted_at_current_version(tmp_path: Path) -> Non
     settings = SettingsService(path).load()
     persisted = json.loads(path.read_text(encoding="utf-8"))
 
-    assert settings.settings_version == 13
-    assert persisted["settings_version"] == 13
+    assert settings.settings_version == 15
+    assert persisted["settings_version"] == 15
     assert persisted["ocr_scanned_pdf"] is False
     assert "process_parser_workers" in persisted
     assert "pdf_parser_workers" in persisted
@@ -80,7 +80,7 @@ def test_ocr_microbatch_limits_are_migrated_and_persisted(tmp_path: Path) -> Non
     settings = SettingsService(path).load()
     persisted = json.loads(path.read_text(encoding="utf-8"))
 
-    assert settings.settings_version == 13
+    assert settings.settings_version == 15
     assert settings.ocr_microbatch_parent_jobs == 4
     assert settings.ocr_microbatch_max_requests == 64
     assert settings.ocr_microbatch_max_pixels == 8_000_000
@@ -101,7 +101,9 @@ def test_rag_write_batch_setting_migrates_and_preserves_embedding_batch(
     migrated = SettingsService(default_path).load()
     assert migrated.rag_embedding_batch_size == 16
     assert migrated.rag_index_write_batch_size == 128
-    assert migrated.settings_version == 13
+    assert migrated.rag_embedding_length_bucketing is True
+    assert migrated.rag_resume_partial_build is True
+    assert migrated.settings_version == 15
     assert migrated.rag_answer_review_enabled is False
 
     custom_path = tmp_path / "custom-rag-batches.json"

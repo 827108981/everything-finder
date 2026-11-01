@@ -5,6 +5,7 @@ from typing import Any
 
 from local_full_text_search.rag.evaluation.evidence_matcher import GoldEvidenceMatch
 from local_full_text_search.rag.evaluation.gold_loader import GoldCase
+from local_full_text_search.rag.evaluation.stage_scoring import score_stage
 
 
 STAGE_ORDER = ("lexical", "vector", "fusion", "deduplicated", "rerank", "constraints", "evidence", "context")
@@ -20,9 +21,9 @@ STAGE_LABELS = {
 }
 
 METRIC_DEFINITIONS = {
-    "gold_hit_rate": "Gold 命中率：该阶段至少找到一条已定位的正确证据的题目比例。",
-    "mean_evidence_recall": "平均证据召回率：找回的已定位正确证据数 ÷ 本题已定位正确证据数，再对题目取平均；受 Gold 映射覆盖率限制。",
-    "mean_reciprocal_rank": "MRR：每题取首条正确证据排名的倒数 1/rank，再对有已定位正确证据的题目取平均；越靠前越高。",
+    "gold_hit_rate": "Gold 命中率：非拒答且声明 Gold 的计分题中，该阶段完整找到至少一条正确证据的比例。",
+    "mean_evidence_recall": "平均证据覆盖率：本题完整找到的 Gold 条数 ÷ 本题声明 Gold 条数，再对有效题取平均；索引未定位的 Gold 仍在分母。",
+    "mean_reciprocal_rank": "MRR：每题首条完整 Gold 的完成名次取倒数；未命中贡献 0，再对有效题取平均。",
     "mean_first_gold_rank": "首位正确证据平均排名：每题第一条 Gold 证据的名次取平均；越小越好。",
     "hard_negative_candidate_count": "指定反例候选数：该阶段出现的已标注反例总次数，不是准确率；越多表示误召回风险越高。",
 }
@@ -40,32 +41,9 @@ def score_case(
     stage_results: dict[str, Any] = {}
     first_hit: dict[str, str] = {}
     for stage_name in STAGE_ORDER:
-        candidates = stages.get(stage_name, [])
-        # “证据筛选”阶段的输入列表也包含被拒候选；只把真正通过门禁的证据
-        # 计入该阶段的 Recall/MRR，拒绝项仍保留在候选明细供排查。
-        if stage_name == "evidence" and any("selected" in item for item in candidates):
-            candidates = [item for item in candidates if item.get("selected") is True]
-        ids = [str(item.get("chunk_id") or "") for item in candidates]
-        id_set = set(ids)
-        hit_evidence = [item for item in positives if id_set.intersection(item.chunk_ids)]
-        gold_ranks = [
-            index for index, chunk_id in enumerate(ids, 1)
-            if any(chunk_id in evidence.chunk_ids for evidence in positives)
-        ]
-        for item in hit_evidence:
-            first_hit.setdefault(item.evidence_id, stage_name)
-        negative_hits = [item for item in negatives if id_set.intersection(item.chunk_ids)]
-        stage_results[stage_name] = {
-            "candidate_count": len(candidates),
-            "gold_evidence_found": len(hit_evidence),
-            "gold_evidence_total_located": len(positives),
-            "gold_evidence_recall": (len(hit_evidence) / len(positives)) if positives else None,
-            "gold_hit": bool(hit_evidence),
-            "first_gold_rank": min(gold_ranks) if gold_ranks else None,
-            "reciprocal_rank": (1.0 / min(gold_ranks)) if gold_ranks else 0.0 if positives else None,
-            "hard_negative_found": len(negative_hits),
-            "hard_negative_ids": [item.evidence_id for item in negative_hits],
-        }
+        stage_results[stage_name] = score_stage(stage_name, stages.get(stage_name, []), mappings)
+        for evidence_id in stage_results[stage_name]["gold_completion_ranks"]:
+            first_hit.setdefault(evidence_id, stage_name)
     behavior = _classify_actual_behavior(answer)
     if answer and answer.get("mode") == "full" and case.expected_behavior == "partial_answer":
         behavior = "answer_needs_fact_review"
@@ -92,6 +70,23 @@ def score_case(
                 "file": item.file,
                 "page": item.page,
                 "chunk_ids": list(item.chunk_ids),
+                "declared_chunk_ids": list(item.declared_chunk_ids),
+                "equivalent_chunk_ids": list(item.equivalent_chunk_ids),
+                "suspected_chunk_ids": list(item.suspected_chunk_ids),
+                "conflict_chunk_ids": list(item.conflict_chunk_ids),
+                "alternatives": [
+                    {"alternative_id": alt.alternative_id, "match_type": alt.match_type,
+                     "confirmed": alt.confirmed,
+                     "parts": [
+                         {"chunk_id": part.chunk_id, "quote_start": part.quote_start,
+                          "quote_end": part.quote_end, "source_start": part.source_start,
+                          "source_end": part.source_end,
+                          "quote_original_start": part.quote_original_start,
+                          "quote_original_end": part.quote_original_end,
+                          "source_original_start": part.source_original_start,
+                          "source_original_end": part.source_original_end} for part in alt.parts
+                     ]} for alt in item.alternatives
+                ],
                 "confidence": item.confidence,
                 "reason": item.reason,
             }
@@ -122,7 +117,11 @@ def aggregate(results: list[dict[str, Any]]) -> dict[str, Any]:
     stage_summary: dict[str, Any] = {}
     for stage in STAGE_ORDER:
         rows = [item.get("stages", {}).get(stage, {}) for item in complete]
-        with_gold = [row for row in rows if row.get("gold_evidence_total_located", 0) > 0]
+        with_gold = [
+            row for result, row in zip(complete, rows)
+            if result.get("expected_behavior") != "refuse"
+            and row.get("gold_evidence_total_declared", row.get("gold_evidence_total_located", 0)) > 0
+        ]
         stage_summary[stage] = {
             "cases_with_gold": len(with_gold),
             "gold_hit_cases": sum(bool(row.get("gold_hit")) for row in with_gold),
@@ -161,7 +160,7 @@ def aggregate(results: list[dict[str, Any]]) -> dict[str, Any]:
         "answer_cases": len(positives),
         "refusal_cases": sum(item.get("expected_behavior") == "refuse" for item in complete),
         "forbidden_claim_case_count": sum(bool(item.get("forbidden_claims_found")) for item in complete),
-        "api_call_count": sum(int(item.get("api_call_count") or 0) for item in complete),
+        "api_call_count": sum(int(item.get("api_call_count") or 0) for item in results),
         "stages": stage_summary,
         "metric_definitions": dict(METRIC_DEFINITIONS),
     }

@@ -14,8 +14,10 @@ from PySide6.QtWidgets import QApplication
 
 from local_full_text_search.config.defaults import AppSettings
 from local_full_text_search.core.database import DatabaseManager
+from local_full_text_search.core.search_index_coordinator import SearchIndexCoordinator
 from local_full_text_search.services.settings_service import SettingsService
 from local_full_text_search.ui.main_window import MainWindow
+from local_full_text_search.ui import main_window as main_window_module
 from local_full_text_search.workers import database_snapshot_worker as snapshot_module
 from local_full_text_search.workers.database_snapshot_worker import (
     DatabaseSnapshotWorker,
@@ -35,25 +37,28 @@ def _qt_module_lifecycle():
     """Do not leak QApplication state into the next pytest module."""
 
     app = _app()
-    yield
-    for widget in list(app.topLevelWidgets()):
+    # 模块清理阶段还会再次关闭窗口；补丁必须覆盖整个清理过程。
+    with pytest.MonkeyPatch.context() as patcher:
+        coordinator = SearchIndexCoordinator()
+        patcher.setattr(main_window_module, "get_search_index_coordinator", lambda: coordinator)
+        yield
+        for widget in list(app.topLevelWidgets()):
+            try:
+                widget.close()
+                widget.deleteLater()
+            except RuntimeError:
+                pass
+        app.processEvents()
+        app.sendPostedEvents(None, 0)
+        app.quit()
+        app.processEvents()
         try:
-            widget.close()
-            widget.deleteLater()
-        except RuntimeError:
-            pass
-    app.processEvents()
-    app.sendPostedEvents(None, 0)
-    app.quit()
-    app.processEvents()
-    try:
-        import shiboken6
+            import shiboken6
 
-        shiboken6.delete(app)
-    except (ImportError, RuntimeError):
-        # Some PySide builds do not expose a deletable wrapper. The normal
-        # event-queue cleanup above is still sufficient for those builds.
-        pass
+            shiboken6.delete(app)
+        except (ImportError, RuntimeError):
+            # 某些 PySide 版本不能显式删除包装对象。
+            pass
 
 
 def _wait_until(

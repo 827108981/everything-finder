@@ -10,6 +10,7 @@ from PySide6.QtWidgets import QApplication
 from local_full_text_search.config.defaults import AppSettings
 from local_full_text_search.ui import main_window
 from local_full_text_search.ui.main_window import MainWindow, SettingsPage
+from local_full_text_search.rag.embedding_model_catalog import EMBEDDING_MODEL_OPTIONS
 
 
 def _app() -> QApplication:
@@ -87,6 +88,80 @@ def test_answer_review_setting_is_saved() -> None:
 
     assert settings.rag_answer_review_enabled is True
     assert saved == [settings]
+
+
+def test_vector_backend_can_be_selected_and_rolled_back() -> None:
+    _app()
+    settings = AppSettings(rag_vector_backend="legacy")
+    page = SettingsPage(settings)
+
+    page.rag_vector_backend.setCurrentIndex(
+        page.rag_vector_backend.findData("unit_v2")
+    )
+    page.apply()
+    assert settings.rag_vector_backend == "unit_v2"
+
+    page.rag_vector_backend.setCurrentIndex(
+        page.rag_vector_backend.findData("legacy")
+    )
+    page.apply()
+    assert settings.rag_vector_backend == "legacy"
+
+
+def test_lexical_backend_can_be_selected_and_rolled_back() -> None:
+    _app()
+    settings = AppSettings(
+        rag_lexical_backend="legacy", rag_lexical_multi_route_enabled=True,
+    )
+    page = SettingsPage(settings)
+
+    page.rag_lexical_backend.setCurrentIndex(
+        page.rag_lexical_backend.findData("word_v2")
+    )
+    page.apply()
+    assert settings.rag_lexical_backend == "word_v2"
+    assert settings.rag_lexical_multi_route_enabled is False
+
+    page.rag_lexical_backend.setCurrentIndex(
+        page.rag_lexical_backend.findData("legacy")
+    )
+    page.apply()
+    assert settings.rag_lexical_backend == "legacy"
+
+
+def test_embedding_model_selection_saves_fixed_repo_and_revision() -> None:
+    _app()
+    settings = AppSettings()
+    page = SettingsPage(settings)
+    large = next(option for option in EMBEDDING_MODEL_OPTIONS if "large" in option.key)
+
+    page.rag_embedding_model.setCurrentIndex(
+        page.rag_embedding_model.findData(large.key)
+    )
+
+    assert page.has_unsaved_rag_embedding_settings() is True
+    assert "1024 维" in page.rag_embedding_model_status.text()
+    assert "重建完整 AI 索引" in page.rag_embedding_model_status.text()
+
+    page.apply()
+
+    assert settings.rag_embedding_repo_id == large.repo_id
+    assert settings.rag_embedding_revision == large.revision
+    assert page.has_unsaved_rag_embedding_settings() is False
+
+
+def test_unknown_existing_embedding_model_is_preserved_as_custom_choice() -> None:
+    _app()
+    settings = AppSettings(
+        rag_embedding_repo_id="example/custom-embedding",
+        rag_embedding_revision="fixed-revision",
+    )
+    page = SettingsPage(settings)
+
+    assert page.selected_embedding_model().repo_id == "example/custom-embedding"
+    page.apply()
+    assert settings.rag_embedding_repo_id == "example/custom-embedding"
+    assert settings.rag_embedding_revision == "fixed-revision"
 
 
 def test_question_is_blocked_when_tested_api_settings_are_not_saved(monkeypatch) -> None:

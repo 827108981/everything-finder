@@ -10,7 +10,9 @@ from local_full_text_search.rag.citation_validator import CitationValidator
 from local_full_text_search.rag.clarification import ClarificationPolicy
 from local_full_text_search.rag.constraint_matcher import ConstraintMatcher
 from local_full_text_search.rag.context_builder import ContextBuilder
-from local_full_text_search.rag.errors import RagIndexStaleError, RagModelMissingError
+from local_full_text_search.rag.errors import (
+    RagIndexStaleError, RagModelMissingError, VectorIndexNotReadyError,
+)
 from local_full_text_search.rag.evidence_policy import EvidencePolicy
 from local_full_text_search.rag.generation.base import AnswerReviewRequest, GenerationRequest
 from local_full_text_search.rag.generation.openai_compatible import (
@@ -32,9 +34,12 @@ from local_full_text_search.rag.retrieval.hybrid import HybridRetriever
 from local_full_text_search.rag.retrieval.lexical import LexicalRetriever
 from local_full_text_search.rag.retrieval.vector import VectorRetriever
 from local_full_text_search.rag.reranking.local_bge import LocalBgeReranker
+from local_full_text_search.rag.reranking.support import compute_answer_support
 from local_full_text_search.rag.secrets import SecretStore
 from local_full_text_search.rag.trace import candidate_snapshot
 from local_full_text_search.rag.vector_store.chroma import ChromaVectorStore
+from local_full_text_search.rag.retrieval.vector_units import VectorUnitPolicy
+from local_full_text_search.rag.vector_index_store import VectorIndexStore
 
 
 class AnswerService:
@@ -102,8 +107,8 @@ class AnswerService:
         trace_id: str | None,
         retrieval_only: bool,
     ) -> RagAnswer | RagRetrievalResult:
-        text = query.text.strip()
-        if not text:
+        text = query.text
+        if not text.strip():
             raise ValueError("问题不能为空")
         trace_id = trace_id or f"rag-{uuid.uuid4().hex}"
         self._report(
@@ -149,10 +154,66 @@ class AnswerService:
                 or bundle.embedding_dimension != self.embedding.dimension
             ):
                 raise RagIndexStaleError("向量模型与 AI 索引不匹配，请重新构建 AI 索引")
-            vector_store = ChromaVectorStore(bundle.chroma_path)
+            vector_backend = str(getattr(self.settings, "rag_vector_backend", "legacy"))
+            unit_index = None
+            if vector_backend == "legacy":
+                if getattr(bundle, "parent_vector_mode", "chroma") != "chroma":
+                    raise RagIndexStaleError(
+                        "当前 AI 索引未包含旧版父块向量；请切换细粒度向量 V2，或重新构建旧版索引"
+                    )
+                vector_path = bundle.chroma_path
+            elif vector_backend == "unit_v2":
+                policy = VectorUnitPolicy.from_settings(self.settings)
+                vector_index_store = VectorIndexStore(self.rag_store.root)
+                if getattr(bundle, "vector_unit_directory", ""):
+                    unit_index = vector_index_store.attached(
+                        bundle.bundle_id,
+                        bundle.vector_unit_directory,
+                        embedding_repo_id=self.embedding.model_id,
+                        embedding_revision=self.embedding.model_revision,
+                        embedding_dimension=self.embedding.dimension,
+                        policy_fingerprint=policy.fingerprint,
+                        index_fingerprint=bundle.vector_unit_index_fingerprint,
+                    )
+                else:
+                    # 兼容升级前由独立 active.json 选择的向量 V2 索引。
+                    unit_index = vector_index_store.active(
+                        bundle.bundle_id,
+                        embedding_repo_id=self.embedding.model_id,
+                        embedding_revision=self.embedding.model_revision,
+                        embedding_dimension=self.embedding.dimension,
+                        policy_fingerprint=policy.fingerprint,
+                    )
+                vector_path = unit_index.chroma_path
+            else:
+                raise ValueError(f"不支持的向量检索后端：{vector_backend}")
+            vector_store = ChromaVectorStore(vector_path)
+            if unit_index is not None and vector_store.count() != unit_index.unit_count:
+                vector_store.close()
+                raise VectorIndexNotReadyError(
+                    "向量 V2 的单元记录与 Chroma 数量不一致，请重新构建附属索引"
+                )
             try:
-                lexical = LexicalRetriever(self.rag_store, bundle.metadata_path)
-                vector = VectorRetriever(self.rag_store, bundle, vector_store, self.embedding)
+                lexical = LexicalRetriever(
+                    self.rag_store, bundle.metadata_path,
+                    multi_route_enabled=bool(getattr(self.settings, "rag_lexical_multi_route_enabled", False)),
+                    backend=str(getattr(self.settings, "rag_lexical_backend", "legacy")),
+                    bundle=bundle,
+                    title_weight=float(getattr(self.settings, "rag_lexical_title_weight", 0.2)),
+                    complete_match_enabled=bool(getattr(
+                        self.settings, "rag_lexical_complete_match_enabled", True
+                    )),
+                    k1=float(getattr(self.settings, "rag_lexical_k1", 1.2)),
+                    b=float(getattr(self.settings, "rag_lexical_b", 0.75)),
+                )
+                vector = VectorRetriever(
+                    self.rag_store, bundle, vector_store, self.embedding,
+                    focused_enabled=bool(getattr(self.settings, "rag_vector_focused_query_enabled", False)),
+                    backend=vector_backend, unit_index=unit_index,
+                    oversample_factor=int(getattr(
+                        self.settings, "rag_vector_unit_oversample_factor", 8
+                    )),
+                )
                 hybrid = HybridRetriever(
                     lexical,
                     vector,
@@ -165,6 +226,10 @@ class AnswerService:
                     source_generation=bundle.source_generation,
                     active_source_generation=source.generation,
                     rag_bundle_id=bundle.bundle_id,
+                    vector_backend=vector_backend,
+                    vector_index_fingerprint=(
+                        unit_index.index_fingerprint if unit_index else ""
+                    ),
                 )
                 fused = hybrid.retrieve(query, token, plan)
                 token.throw_if_cancelled()
@@ -176,25 +241,44 @@ class AnswerService:
                     fused, limit=max(1, int(query.fusion_top_k))
                 )
                 deduped = list(deduplication.candidates)
-                deduped_ids = {item.chunk.stable_chunk_id for item in deduped}
+                disposition_rows = [
+                    {
+                        "chunk_id": item.chunk_id,
+                        "status": item.status,
+                        "reason": item.reason,
+                        "input_rank": item.input_rank,
+                        "output_rank": item.output_rank,
+                        "representative_chunk_id": item.representative_chunk_id,
+                        "method": item.method,
+                        "similarity": item.similarity,
+                        "source_merged": item.source_merged,
+                    }
+                    for item in deduplication.dispositions
+                ]
                 self._report(
                     "deduplicating",
                     "已在重排前合并重复内容块",
                     input_count=len(fused),
                     output_count=len(deduped),
                     duplicate_count=len(deduplication.duplicates),
+                    grouped_count=len(deduplication.exact_groups),
+                    cutoff_count=len(deduplication.cutoffs),
+                    evidence_count=len(deduped),
+                    source_count=sum(len(item.all_sources) for item in deduped),
                     fused_candidates=[
                         candidate_snapshot(
                             item,
-                            selected=item.chunk.stable_chunk_id in deduped_ids,
+                            selected=disposition.status == "kept",
                             reason=(
-                                "保留并送入去重后候选"
-                                if item.chunk.stable_chunk_id in deduped_ids
-                                else f"重复内容，保留 {item.duplicate_of or '更高排名候选'}"
+                                f"保留为代表候选，合并 {len(item.all_sources)} 个来源，进入重排候选池"
+                                if disposition.status == "kept" else disposition.reason
                             ),
+                            dedup_status=disposition.status,
+                            representative_chunk_id=disposition.representative_chunk_id,
                         )
-                        for item in fused
+                        for item, disposition in zip(fused, deduplication.dispositions)
                     ],
+                    candidate_dispositions=disposition_rows,
                     duplicate_records=[
                         {
                             "removed_chunk_id": item.removed_chunk_id,
@@ -204,18 +288,33 @@ class AnswerService:
                         }
                         for item in deduplication.duplicates
                     ],
-                    deduplicated_candidates=[candidate_snapshot(item) for item in deduped],
+                    deduplicated_candidates=[
+                        candidate_snapshot(
+                            item, dedup_status="kept",
+                            representative_chunk_id=item.chunk.stable_chunk_id,
+                        )
+                        for item in deduped
+                    ],
                 )
 
                 rerank_input = deduped[: max(1, int(query.reranker_top_k))]
+                for item in deduped:
+                    item.answer_support_score, item.answer_support_reasons = compute_answer_support(
+                        plan, item
+                    )
+                rerank_input_ids = {item.chunk.stable_chunk_id for item in rerank_input}
                 self._report(
                     "reranking",
                     "正在使用 Cross-Encoder 精排去重后的候选",
                     candidate_count=len(rerank_input),
                     reranker_top_k=query.reranker_top_k,
-                    fused_candidates=[
-                        candidate_snapshot(item, selected=item in rerank_input)
-                        for item in fused
+                    rerank_input_candidates=[
+                        candidate_snapshot(
+                            item, selected=item.chunk.stable_chunk_id in rerank_input_ids,
+                            reason=("进入重排" if item.chunk.stable_chunk_id in rerank_input_ids
+                                    else "超过重排入口 TopK"),
+                        )
+                        for item in deduped
                     ],
                 )
                 reranked = self.reranker.rerank(
@@ -255,17 +354,24 @@ class AnswerService:
                         candidate_snapshot(
                             item,
                             selected=bool(
-                                item.constraint_decision
-                                and item.constraint_decision.required_conflict_count == 0
+                                not constraint_matching_enabled
+                                or (item.constraint_decision and item.constraint_decision.accepted)
                             ),
-                            reason=(item.constraint_decision.reason if item.constraint_decision else "未判断"),
+                            reason=(
+                                item.constraint_decision.reason if item.constraint_decision
+                                else "条件检查已关闭，候选保留"
+                            ),
                         )
                         for item in constrained
                     ],
-                    required_constraint_count=len(plan.constraints),
+                    required_constraint_count=sum(item.is_hard for item in plan.constraints),
+                    soft_constraint_count=sum(
+                        item.strength.value == "soft" for item in plan.constraints
+                    ),
                     conflict_count=sum(
                         1 for item in constrained
-                        if item.constraint_decision and item.constraint_decision.required_conflict_count
+                        if constraint_matching_enabled and item.constraint_decision
+                        and item.constraint_decision.required_conflict_count
                     ),
                 )
 
@@ -301,6 +407,7 @@ class AnswerService:
                 self._report(
                     "checking_evidence",
                     "正在筛选可用于回答的最终证据",
+                    decision_reason=decision.reason,
                     reranked_count=len(constrained),
                     accepted_count=len(decision.accepted),
                     min_vector_score=self.evidence_policy.min_vector_score,
@@ -311,7 +418,12 @@ class AnswerService:
                                 item,
                                 selected=item.chunk.stable_chunk_id in accepted_ids,
                                 reason=(
-                                    "通过证据门禁"
+                                    (
+                                        "软条件冲突，降权后通过证据门禁"
+                                        if item.constraint_decision
+                                        and item.constraint_decision.soft_conflict_count
+                                        else "通过证据门禁"
+                                    )
                                     if item.chunk.stable_chunk_id in accepted_ids
                                     else rejected_reasons.get(item.chunk.stable_chunk_id)
                                     or "未进入最终 TopK"
@@ -342,15 +454,20 @@ class AnswerService:
                     self._report(
                         "retrieval_completed",
                         "本地检索与证据整理完成，按检索模式跳过 LLM",
+                        evidence_count=len(context.source_map),
                         source_count=len(context.sources),
                         context_chars=len(context.text),
                         llm_context=context.text,
+                        context_entries=list(context.entries),
+                        context_excluded=list(context.excluded_entries),
                         context_sources=[
                             {
                                 "source_id": entry.get("source_id"),
                                 "chunk_id": entry.get("chunk_id"),
                                 "filename": entry.get("filename"),
                                 "location": entry.get("location"),
+                                "source_count": entry.get("source_count"),
+                                "sources": entry.get("sources"),
                                 "included_text": entry.get("included_text"),
                                 "truncated": entry.get("truncated", False),
                                 "reason": entry.get("reason", ""),
@@ -367,6 +484,7 @@ class AnswerService:
                 self._report(
                     "credential_read",
                     "正在读取已保存的 API Key",
+                    evidence_count=len(context.source_map),
                     source_count=len(context.sources),
                     context_chars=len(context.text),
                     llm_context=context.text,
@@ -378,9 +496,11 @@ class AnswerService:
                             "location": source.location_text,
                             "file_path": source.file_path,
                         }
-                        for source_id, source in context.source_map.items()
+                        for source_id, refs in context.source_map.items()
+                        for source in refs
                     ],
                     context_entries=list(context.entries),
+                    context_excluded=list(context.excluded_entries),
                 )
                 api_key = self.secret_store.retrieve(self.settings.rag_api_secret_ref)
                 if not api_key:
@@ -402,6 +522,7 @@ class AnswerService:
                 self._report(
                     "generating",
                     "正在根据证据生成答案初稿",
+                    evidence_count=len(context.source_map),
                     source_count=len(context.sources),
                     context_chars=len(context.text),
                     model=request.model,
@@ -516,10 +637,15 @@ class AnswerService:
                     review_enabled=bool(getattr(self.settings, "rag_answer_review_enabled", False)),
                 )
                 cited_ids = self.citation_validator.validate(final_text, context.source_map)
-                cited_sources = tuple(context.source_map[item] for item in cited_ids)
+                cited_sources = tuple(source for item in cited_ids for source in context.source_map[item])
+                cited_source_ids = tuple(
+                    item for item in cited_ids for _source in context.source_map[item]
+                )
                 self._report(
                     "completed", "答案与引用已验证",
                     citation_count=len(cited_ids),
+                    evidence_count=len(cited_ids),
+                    source_count=len(cited_sources),
                     review_verdict=review_result.verdict if review_result else "disabled",
                 )
                 return RagAnswer(
@@ -527,7 +653,7 @@ class AnswerService:
                     sources=cited_sources,
                     insufficient_evidence=False,
                     warnings=tuple(warnings),
-                    source_ids=cited_ids,
+                    source_ids=cited_source_ids,
                     trace_id=trace_id,
                     provider_name=(review_result.provider_name if review_result else model_answer.provider_name),
                     model_name=model_answer.model_name,
@@ -559,6 +685,7 @@ class AnswerService:
     @staticmethod
     def _plan_snapshot(plan) -> dict[str, object]:
         return {
+            "original_text": plan.original_text,
             "intent": plan.intent,
             "entities": list(plan.entities),
             "constraints": [
@@ -567,12 +694,42 @@ class AnswerService:
                     "value": item.value,
                     "required": item.required,
                     "source_text": item.source_text,
+                    "polarity": item.polarity.value,
+                    "strength": item.strength.value,
+                    "confidence": item.confidence,
+                    "source": item.source,
+                    "reason": item.reason,
                 }
                 for item in plan.constraints
             ],
             "lexical_terms": list(plan.lexical_terms),
             "lexical_expression": plan.lexical_expression,
             "semantic_query": plan.semantic_query,
+            "spans": [
+                {"text": item.text, "start": item.start, "end": item.end, "features": list(item.features)}
+                for item in plan.spans
+            ],
+            "transformations": [
+                {"operation": item.operation, "source_text": item.source_text, "result_text": item.result_text, "reason": item.reason}
+                for item in plan.transformations
+            ],
+            "lexical_variants": [
+                {"route_id": item.route_id, "expression": item.expression, "signal_texts": list(item.signal_texts)}
+                for item in plan.lexical_variants
+            ],
+            "semantic_variants": [
+                {"route_id": item.route_id, "query_text": item.query_text}
+                for item in plan.semantic_variants
+            ],
+            "negated_constraints": [
+                {"kind": item.kind.value, "value": item.value, "source_text": item.source_text}
+                for item in plan.constraints if item.polarity.value == "negated"
+            ],
+            "unresolved_ambiguities": [
+                {"kind": item.kind.value, "value": item.value, "reason": item.reason}
+                for item in plan.constraints if item.strength.value == "ambiguous"
+                and item.polarity.value != "negated"
+            ],
             "missing_fields": list(plan.missing_fields),
             "analyzer_version": plan.analyzer_version,
         }

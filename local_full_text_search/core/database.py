@@ -614,12 +614,16 @@ class DatabaseManager:
                 return
         previous_version = self._database_user_version()
         backup_path: Path | None = None
-        # Versioned migrations that can rewrite existing user data keep a full
-        # rollback copy.  Same-version layout repairs are additive/index-only
-        # work and run in SQLite transactions; copying a multi-gigabyte corpus
-        # before them is needless peak disk usage and caused repeated backups
-        # on every interrupted short-token upgrade.
-        if previous_version is not None and previous_version < SCHEMA_VERSION:
+        # 版本升级及结构缺损修复都保留回滚副本：SQLite executescript 可能在异常前
+        # 提交部分 DDL。单纯清理旧短词派生表不备份，避免大索引反复占用双份磁盘。
+        needs_backup = previous_version is not None and (
+            previous_version < SCHEMA_VERSION
+            or (
+                previous_version == SCHEMA_VERSION
+                and not self._schema_layout_complete(allow_legacy_short_tokens=True)
+            )
+        )
+        if needs_backup:
             report_migration(
                 "database_migration_backup",
                 "正在安全备份索引数据库",
@@ -993,7 +997,7 @@ class DatabaseManager:
                 self._active_connections.discard(con)
             con.close()
 
-    def _schema_layout_complete(self) -> bool:
+    def _schema_layout_complete(self, *, allow_legacy_short_tokens: bool = False) -> bool:
         if not self.db_path.is_file():
             return False
         con = sqlite3.connect(
@@ -1019,7 +1023,8 @@ class DatabaseManager:
                 "index_counters",
             }.issubset(tables):
                 return False
-            if {"short_tokens", "short_tokens_candidate"}.intersection(tables):
+            if (not allow_legacy_short_tokens
+                    and {"short_tokens", "short_tokens_candidate"}.intersection(tables)):
                 return False
             parse_task_columns = {
                 str(row[1])

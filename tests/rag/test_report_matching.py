@@ -62,3 +62,20 @@ def test_same_chunk_can_highlight_gold_and_negative() -> None:
     assert gold.status == "exact"
     assert negative.status == "exact"
     assert {kind for segment in segments for kind in segment["kinds"]} == {"positive", "hard_negative"}
+
+
+def test_grouped_pptx_representative_keeps_pdf_gold_source() -> None:
+    representative = {
+        "filename": "guide.pptx", "location": "第 19 张幻灯片", "text": "正确流量 12",
+        "sources": [
+            {"filename": "guide.pptx", "location": "第 19 张幻灯片"},
+            {"filename": "guide.pdf", "location": "第 19 页"},
+        ],
+    }
+    match = match_quote(
+        representative, {"file": "guide.pdf", "page": 19, "quote": "正确流量 12"},
+        kind="positive", evidence_id="pdf-gold",
+    )
+
+    assert match.status == "exact"
+    assert match.file_match is True

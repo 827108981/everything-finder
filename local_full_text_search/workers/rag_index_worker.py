@@ -14,6 +14,7 @@ from local_full_text_search.core.task_manager import CancelToken
 from local_full_text_search.rag.embeddings.local_bge import LocalBgeEmbeddingProvider
 from local_full_text_search.rag.index_builder import RagIndexBuilder
 from local_full_text_search.rag.index_store import RagIndexStore
+from local_full_text_search.rag.lexical_index_builder import LexicalIndexBuilder
 from local_full_text_search.rag.model_manager import LocalModelManager, ModelSpec
 from local_full_text_search.services.logging_service import log_event
 
@@ -96,9 +97,31 @@ class RagIndexWorker(QObject):
             builder = RagIndexBuilder(source_store, rag_store, embedding, self.settings)
             stage = "index_build"
             self._log("rag.index.stage_started", stage=stage)
-            self.finished.emit(
-                builder.build(self.token, self.progress.emit, run_id=self.run_id)
-            )
+            summary = builder.build(self.token, self.progress.emit, run_id=self.run_id)
+            if str(getattr(self.settings, "rag_lexical_backend", "legacy")) == "word_v2":
+                stage = "lexical_index"
+                stage_started = time.perf_counter()
+                self.progress.emit({
+                    "stage": stage, "message": "正在准备中文词项关键词索引",
+                })
+                source_bundle = rag_store.active()
+                if source_bundle.bundle_id != summary.bundle_id:
+                    raise RuntimeError("AI 索引在关键词索引准备期间已切换，请重试")
+                lexical, reused = LexicalIndexBuilder(rag_store).prepare(
+                    source_bundle, self.token,
+                )
+                self._log(
+                    "rag.index.lexical_ready", stage=stage,
+                    source_bundle_id=lexical.source_bundle_id,
+                    index_fingerprint=lexical.index_fingerprint,
+                    chunk_count=lexical.chunk_count, reused=reused,
+                    duration_ms=int((time.perf_counter() - stage_started) * 1000),
+                )
+                self.progress.emit({
+                    "stage": stage,
+                    "message": "中文词项关键词索引已复用" if reused else "中文词项关键词索引已建立",
+                })
+            self.finished.emit(summary)
         except CancelledError:
             self._log(
                 "rag.index.cancelled",

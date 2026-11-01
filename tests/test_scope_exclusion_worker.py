@@ -4,6 +4,8 @@ import os
 import time
 from pathlib import Path
 
+import pytest
+
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication, QMessageBox
@@ -11,11 +13,13 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 from local_full_text_search.config.defaults import AppSettings
 from local_full_text_search.core.database import DatabaseManager
 from local_full_text_search.core.index_generation_store import IndexGenerationStore
+from local_full_text_search.core.search_index_coordinator import SearchIndexCoordinator
 from local_full_text_search.core.search_engine import SearchEngine
 from local_full_text_search.models.content_block import ContentBlock
 from local_full_text_search.models.search_query import SearchQuery
 from local_full_text_search.services.settings_service import SettingsService
 from local_full_text_search.ui.main_window import FailedPage, MainWindow, PAGE_INDEX
+from local_full_text_search.ui import main_window as main_window_module
 from local_full_text_search.workers.scope_exclusion_worker import (
     ScopeExclusionWorker,
 )
@@ -24,6 +28,13 @@ from local_full_text_search.workers.scan_worker import ScanWorker
 
 def _app() -> QApplication:
     return QApplication.instance() or QApplication([])
+
+
+@pytest.fixture(autouse=True)
+def _isolated_app_coordinator(monkeypatch: pytest.MonkeyPatch) -> None:
+    # 主窗口关闭会将协调器永久置为 STOPPING；每个 UI 测试隔离应用生命周期。
+    coordinator = SearchIndexCoordinator()
+    monkeypatch.setattr(main_window_module, "get_search_index_coordinator", lambda: coordinator)
 
 
 def test_scan_worker_emits_failure_for_keyboard_interrupt(monkeypatch, tmp_path: Path) -> None:

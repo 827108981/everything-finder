@@ -1,0 +1,1626 @@
+{
+  "bundle_id": "g000008-9f01fc283b",
+  "metadata_db": "E:\\everythingfinder-db\\rag\\rag.g000008-9f01fc283b\\metadata.db",
+  "files": [
+    {
+      "file_path": "E:\\免疫资料\\(场景化）CL-1000i系列仪器场景化维护指南_V1.0_CH .doc",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\5.CL-8000i装箱清单.xlsx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\6000i\\CL-6000i&6200i_工程师培训PPT现场培训版_V3.0_CH.ppt",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\9000i\\CL-9000i系列全自动化学发光免疫分析仪装机指南_V1.1.pdf",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\9000i\\fca6a3a17d3c6432cd654ab08e9b0444.jpg",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\9000i\\微信图片_20260421082832_32_45.jpg",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\9000i\\微信图片_20260421082834_33_45.jpg",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\9000i\\重点拆卸清单.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\BM80A_国内Mindray服务手册_招标版.zh-CN_V22.0.pdf",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\BS-1000M生化产品 装机指南（2025年7月11日更新）.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\CL-2600i 系列仪器场景化校准指南_V0.5_CH.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\CL-2600i 系列仪器场景化维护指南_V1.0_CH.doc",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\CL-2600i&CL-2800i 重要工作提示-20251022-CH.pptx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\CL-2600i系列仪器场景化装机指南_V1.0_CH.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\CL-6000i_液路原理图_V2.0_CH.pdf",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\CL-6000i系列_硬件框图_V3.0_CH.pdf",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\CL-6000i系列仪器场景化装机指南_V1.0_CH.pdf",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\CL-8000i 客户端超声针位置偏移调试指南.pdf",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\CL-8000i制冷模块拆装流程.pdf",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\CL-8000i故障指引.zip > CL-8000i故障指引/CL8000i-300580400-试剂针释放真空失败.pdf",
+      "availability": "archive_member_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\CL-8000i故障指引.zip > CL-8000i故障指引/CL8000i-301022200-反应杯自动装载机构传感器故障-分杯盘反应杯检测传感器或满检测传感器故障.pdf",
+      "availability": "archive_member_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\CL-8000i故障指引.zip > CL-8000i故障指引/CL8000i-301022300-反应杯自动装载机构传感器故障-反应杯余量检测传感器故障 (1).pdf",
+      "availability": "archive_member_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\CL-8000i故障指引.zip > CL-8000i故障指引/CL8000i-301022400-反应杯自动装载机构传感器故障-反应杯料仓空.pdf",
+      "availability": "archive_member_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\CL-8000i故障指引.zip > CL-8000i故障指引/CL8000i-301022500-反应杯自动装载机构传感器故障-反应杯拾取机构效率低.pdf",
+      "availability": "archive_member_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\CL-8000i故障指引.zip > CL-8000i故障指引/CL8000i-301110900-第一抓杯手垂直碰撞-加样位 (1).pdf",
+      "availability": "archive_member_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\CL-8000i故障指引.zip > CL-8000i故障指引/CL8000i-301110900-第一抓杯手垂直碰撞-反应盘.pdf",
+      "availability": "archive_member_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\CL-8000i故障指引.zip > CL-8000i故障指引/CL8000i-301120100-第一抓杯手水平运动错误-X轴方向找零失败.pdf",
+      "availability": "archive_member_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\CL-8000i故障指引.zip > CL-8000i故障指引/CL8000i-301120700-第一抓杯手水平运动错误-X轴运动码齿失步.pdf",
+      "availability": "archive_member_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\CL-8000i故障指引.zip > CL-8000i故障指引/CL8000i-301140100~301140400-第一抓杯手手指运动错误-手指寻找零位失败或零位失步及状态错误 (1).pdf",
+      "availability": "archive_member_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\CL-8000i故障指引.zip > CL-8000i故障指引/CL8000i-301141200~301141300-第一抓杯手报警抓空掉杯粘杯 (1).pdf",
+      "availability": "archive_member_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\CL-8000i故障指引.zip > CL-8000i故障指引/CL8000i-301210100-301210400第二抓杯手垂直运动错误-Z轴运动找零失败或零位失步 (1).pdf",
+      "availability": "archive_member_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\CL-8000i故障指引.zip > CL-8000i故障指引/CL8000i-301210900-第二抓杯手垂直碰撞-反应盘 (1).pdf",
+      "availability": "archive_member_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\CL-8000i故障指引.zip > CL-8000i故障指引/CL8000i-301220100-第二抓杯手水平运动错误-水平方向找零失败 (1).pdf",
+      "availability": "archive_member_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\CL-8000i故障指引.zip > CL-8000i故障指引/CL8000i-301241200~301241500-第二抓杯手报警抓空掉杯粘杯.pdf",
+      "availability": "archive_member_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\CL-8000i故障指引.zip > CL-8000i故障指引/CL8000i-307280100-IO串行链路通信异常或仪器异常关机.pdf",
+      "availability": "archive_member_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\CL-8000i故障指引\\CL-8000i基础性能本底不过-前几个值偏高或偏低.pdf",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\CL-8000i故障指引\\CL-8000i基础性能本底不过-单点跳值SD超标.pdf",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\CL-8000i故障指引\\CL-8000i超声针外壁清洗压力异常302370800.pdf",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\CL-8000i故障指引\\CL-8000i超声频率异常302340300.pdf",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\CL-8000i故障指引\\CL8000i-300180100-样本针主真空容器满 (1).pdf",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\CL-8000i故障指引\\CL8000i-300580200-试剂针建立真空失败.pdf",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\CL-8000i故障指引\\CL8000i-300580400-试剂针释放真空失败.pdf",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\CL-8000i故障指引\\CL8000i-301022200-反应杯自动装载机构传感器故障-分杯盘反应杯检测传感器或满检测传感器故障.pdf",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\CL-8000i故障指引\\CL8000i-301022400-反应杯自动装载机构传感器故障-反应杯料仓空.pdf",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\CL-8000i故障指引\\CL8000i-301022500-反应杯自动装载机构传感器故障-反应杯拾取机构效率低.pdf",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\CL-8000i故障指引\\CL8000i-301110900-第一抓杯手垂直碰撞-反应盘.pdf",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\CL-8000i故障指引\\CL8000i-301120100-第一抓杯手水平运动错误-X轴方向找零失败.pdf",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\CL-8000i故障指引\\CL8000i-301120700-第一抓杯手水平运动错误-X轴运动码齿失步.pdf",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\CL-8000i故障指引\\CL8000i-301241200~301241500-第二抓杯手报警抓空掉杯粘杯.pdf",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\CL-8000i故障指引\\CL8000i-307280100-IO串行链路通信异常或仪器异常关机.pdf",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\CL-8000i硬件连接图.pdf",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\CL-8000i磁分离盘拆装流程.pdf",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\CL-8000i系列仪器场景化校准指南_V1.0_CH (1).docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\CL-8000i系列仪器场景化维护指南_V1.0_CH.doc",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\CL-8000i系列仪器场景化装机指南_V1.0_CH.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\CL-8000i系列仪器装机指南_V3.0_CH.pdf",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\CL-8000i超声空化电压高302340400.pdf",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\CL8000i-307280100-IO串行链路通信异常或仪器异常关机.pdf",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\CL8000i_工程师培训PPT_V1.0_CH.pptx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\CL8000i光度计拆装流程.pdf",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\CL8000i光耦链路板卡位置图.pdf",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\CL8000i反应盘拆装流程.pdf",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\CL8000i第一抓杯手组件拆卸流程.pdf",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\CL8000i配置清单.jpg",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\EMV005相机部分更新指南（去盖机型）1017.pdf",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\LA22视觉部分更新指南（去盖机型）240326.pdf",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\中低速免疫\\1-课程大纲与学时\\CL-1000i安装维护校准知识点清单.xlsx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\中低速免疫\\1-课程大纲与学时\\CL-2000i维护校准知识点清单.xlsx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\中低速免疫\\1-课程大纲与学时\\CL-2600i&CL-2800i 安装维护校准知识点清单-20250706.xlsx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\中低速免疫\\1-课程大纲与学时\\CL-900i安装维护校准知识点清单.xlsx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\中低速免疫\\1-课程大纲与学时\\中低速免疫场景化培训面授知识点清单.xlsx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\中低速免疫\\10-学习参考资料包\\中低端免疫场景化培训教材-机械V1.1.pptx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\中低速免疫\\10-学习参考资料包\\中低端免疫场景化培训教材-硬件V1.0.pptx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\中低速免疫\\10-学习参考资料包\\中低端免疫场景化培训教材-软件V1.1.pptx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\中低速免疫\\10-学习参考资料包\\中低速免疫场景化培训教材-光学V1.0.pptx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\中低速免疫\\10-学习参考资料包\\中低速免疫场景化培训教材-条码V1.1.pptx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\中低速免疫\\10-学习参考资料包\\中低速免疫场景化培训教材-液路V1.0.pptx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\中低速免疫\\10-学习参考资料包\\中低速免疫场景化培训教材-热工V1.1.pptx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\中低速免疫\\2-课件PPT-线上\\专业课程\\CL-1000i\\安装—待审核\\CL-1000i系列用服临床交接单_V1.0_CH.xlsx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\中低速免疫\\2-课件PPT-线上\\专业课程\\CL-1000i\\校准—待审核\\CL-1000i系列仪器校准数据填写表格_标准版(仅把仪器实测数据更新到黄底数据)V1.0_CH.xlsx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\中低速免疫\\2-课件PPT-线上\\专业课程\\CL-1000i\\维护—待审核\\(场景化）CL-1000i系列仪器场景化维护指南_V1.0_CH .doc",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\中低速免疫\\2-课件PPT-线上\\专业课程\\CL-1000i\\维护—待审核\\CL-1000i&1200i半年主动维护报告单_V3.0_CH.doc",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\中低速免疫\\2-课件PPT-线上\\专业课程\\CL-1000i\\维护—待审核\\CL-1000i&1200i年度主动维护报告单_V3.0_CH.doc",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\中低速免疫\\2-课件PPT-线上\\专业课程\\CL-2000i\\校准—待审核\\OSH-21029-CL-2000i系列仪器校准数据填写表格_标准版(仅把仪器实测数据更新到黄底数据)V1.0_CH.xlsx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\中低速免疫\\2-课件PPT-线上\\专业课程\\CL-2000i\\维护—待审核\\CL-2000i&2200i_半年主动维护报告_V3.0_CH.doc",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\中低速免疫\\2-课件PPT-线上\\专业课程\\CL-2000i\\维护—待审核\\CL-2000i&2200i_年度主动维护报告_V3.0_CH.doc",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\中低速免疫\\2-课件PPT-线上\\专业课程\\CL-2000i\\维护—待审核\\（场景化）CL-2000i系列仪器场景化维护指南_V1.0_CH .doc",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\中低速免疫\\2-课件PPT-线上\\专业课程\\CL-2600i\\CL-2600i 系列仪器场景化校准指南_V0.5_CH.pdf",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\中低速免疫\\2-课件PPT-线上\\专业课程\\CL-2600i\\CL-2600i 系列仪器场景化维护指南_V1.0_CH.pdf",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\中低速免疫\\2-课件PPT-线上\\专业课程\\CL-2600i\\CL-2600i&CL-2800i 重要工作提示-20250321-CH.pdf",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\中低速免疫\\2-课件PPT-线上\\专业课程\\CL-2600i\\CL-2600i&CL-2800i 重要工作提示-20250321-CH.pptx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\中低速免疫\\2-课件PPT-线上\\专业课程\\CL-2600i\\CL-2600i系列仪器场景化装机指南_V1.0_CH.pdf",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\中低速免疫\\2-课件PPT-线上\\专业课程\\CL-900i\\仪器安装\\CL-900i(EJK024)系列用服临床交接单_V1.0_CH.xlsx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\中低速免疫\\2-课件PPT-线上\\专业课程\\CL-900i\\仪器校准\\（场景化）CL-900i系列仪器校准数据填写表格_标准版(仅把仪器实测数据更新到黄底数据)V2.0_CH.xlsx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\中低速免疫\\2-课件PPT-线上\\专业课程\\CL-900i\\仪器维护\\场景化-CL-900i系列仪器场景化维护指南_V0.5_CH .doc",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\中低速免疫\\2-课件PPT-线上\\专业课程\\场景化培训中低速免疫分析仪结构基础V1.0 .pptx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\中低速免疫\\2-课件PPT-线上\\公共\\IVD安全防护培训教材_工程师.pptx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\中低速免疫\\2-课件PPT-线上\\公共\\IVD工程师基础技能-常用工具-有声V1.1.pptx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\中低速免疫\\2-课件PPT-线上\\公共\\IVD工程师基础技能-液路及气路-有声V1.1 .pptx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\中低速免疫\\2-课件PPT-线上\\公共\\IVD工程师基础技能-热工-有声V1.1.pptx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\中低速免疫\\2-课件PPT-线上\\公共\\IVD工程师基础技能-电脑-有声V1.1.pptx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\中低速免疫\\2-课件PPT-线上\\公共\\IVD工程师基础技能-硬件-有声V1.1.pptx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\中低速免疫\\2-课件PPT-线上\\公共\\LIS信息转运流程讲解.pptx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\中低速免疫\\2-课件PPT-线上\\公共\\免疫技术发展路径.pptx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\中低速免疫\\2-课件PPT-线上\\公共\\场景化培训线上课程-免疫学基础知识.pptx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\中低速免疫\\2-课件PPT-线上\\公共\\检验科样本检测流程讲解.pptx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\中低速免疫\\3-题库\\中低速免疫场景化培训结构基础.xlsx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\中低速免疫\\3-题库\\常见故障练习库\\中低速免疫常见故障练习库.xlsx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\中低速免疫\\3-题库\\常规交付线上题库\\免疫场景化培训题库.xlsx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\中低速免疫\\3-题库\\面授实操题库\\中低速免疫实操题库V1.0.xlsx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\中低速免疫\\6-培训课表\\中低速免疫场景化培训课程表2025.7.12.xlsx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\中低速免疫\\7-讲师手册\\7-讲师手册-免疫场景化培训.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\免疫产品_跳值问题用服工程师排查反馈表_V1.0_CN(1).xlsx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\免疫场景化培训教材-光学V1.1.pdf",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\免疫场景化培训教材-机械V1.1.pdf",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\免疫场景化培训教材-条码V1.1.pdf",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\免疫场景化培训教材-液路V1.1.pdf",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\免疫场景化培训教材-热工V1.1.pdf",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\免疫场景化培训教材-硬件V1.1.pdf",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\免疫场景化培训教材-软件V1.1.pdf",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\免疫常见故障库.xlsx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\全线免疫\\1-课程大纲与学时\\CL-8000i&CL-6000i安装维护校准知识点清单.xlsx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\全线免疫\\1-课程大纲与学时\\全线免疫场景化培训面授知识点清单.xlsx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\全线免疫\\10-学习参考资料包\\免疫场景化培训教材-光学V1.1.pptx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\全线免疫\\10-学习参考资料包\\免疫场景化培训教材-机械V1.1.pptx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\全线免疫\\10-学习参考资料包\\免疫场景化培训教材-条码V1.1.pptx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\全线免疫\\10-学习参考资料包\\免疫场景化培训教材-液路V1.1.pptx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\全线免疫\\10-学习参考资料包\\免疫场景化培训教材-热工V1.1.pptx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\全线免疫\\10-学习参考资料包\\免疫场景化培训教材-硬件V1.1.pptx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\全线免疫\\10-学习参考资料包\\免疫场景化培训教材-软件V1.1.pptx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\全线免疫\\6-培训课表\\全线免疫场景化培训课程表2025.9.28.xlsx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\全线免疫\\场景化培训全线免疫分析仪结构基础V1.0.pptx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\全线免疫\\题库\\全线免疫实操题库V1.0.xlsx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\全线免疫\\题库\\线上题库\\免疫场景化培训题库.xlsx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\副本副本面授知识点清单.xlsx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\副本面授知识点清单.xlsx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\发光临床结果处理与思路初级培训版1.pptx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\各机型诊断路径.jpg",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-1000i\\CL1200i-A51007加样针水平运动碰撞.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-1000i\\CL1200i-A51024-样本量不足或存在气泡.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-1000i\\CL1200i-A51036-加样针在清洗液位未检测到液面.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-1000i\\CL1200i-A51038-加样针在清洗液位空吸.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-1000i\\CL1200i-A51039-试剂量不足或存在气泡.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-1000i\\CL1200i-A55001~A55004-抓杯手抓空、无杯、粘杯、掉杯.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-1000i\\CL1200i-A55008-抓杯手垂直运动碰撞.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-1000i\\CL1200i-A56005-底物通道1&2吸入气泡.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-1000i\\CL1200i-A59006-废液泵真空能力不足.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-1000i\\CL1200i-A59007-针清洗真空异常 .docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-1000i\\CL1200i-A59008-释放真空异常.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-1000i\\CL1200i-A59009-针清洗真空不足 .docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-1000i\\CL1200i-A59011-清洗池溢流.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-1000i\\CL1200i-A61001-试剂制冷温度超出范围.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-1000i\\CL1200i-C01001-仪器无法连接.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-1000i\\CL1200i-C05002-试剂条码数据错误.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-1000i\\CL1200i-C05003-试剂条码解析错误.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-2000i\\CL-2000i-A38002-自动装载托盘抽屉未合上.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-2000i\\CL-2000i-A39014-真空度不足.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-2000i\\CL-2000i-A39019-主真空容器积液.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-2000i\\CL-2000i-A40005-排主真空废液失败.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-2000i\\CL-2000i-A40006-仪器建立真空失败.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-2000i\\CL-2000i-A40041-清洗液缓冲容器填充缓慢（二期更改）.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-2000i\\CL-2000i-A40041-清洗液缓冲容器填充缓慢（原机型）.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-2000i\\CL-2000i-A40046-清洗液缓冲容器空（二期更改）.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-2000i\\CL-2000i-A40046-清洗液缓冲容器空（原机型）.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-2000i\\CL-2000i-C01001-仪器无法连接（二期更改）.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-2000i\\CL-2000i-C01001-仪器无法连接（原机型）.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-2600i\\CL-2600i&CL-2800i 重要工作提示-20250228-CH.pdf",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-2600i\\CL-2600i&CL-2800i 重要工作提示-20250228-CH.pptx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-6000i\\CL-6000i-C01001仪器无法连机.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-6000i\\CL-6000i仪器偶发跳低值排查指南.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-6000i\\CL-6000i基础性能本底不过-SD正常均值偏低.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-6000i\\CL-6000i基础性能本底不过-SD超标先下降再上升&先上升后下降.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-6000i\\CL-6000i基础性能本底不过-SD超标均值偏低.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-6000i\\CL-6000i基础性能本底不过-前几个值偏高或偏低.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-6000i\\CL-6000i基础性能本底不过-单点跳值SD超标.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-6000i\\CL-6000i基础性能本底不过-结果为暗计数值.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-6000i\\CL-6000i效应检测失败.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-6000i\\CL-6000i样本&质控&校准重复性不好排查.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-6000i\\CL-6000i样本针加样性能不通过.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-6000i\\CL-6000i试剂针加样性能不通过.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-6000i\\CL6000i-A01018-样本针连续空吸，停止加样.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-6000i\\CL6000i-A01024-样本针堵针检测板通讯异常.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-6000i\\CL6000i-A01025-样本针堵针检测板模拟电路异常.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-6000i\\CL6000i-A01040-样本针排样异常.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-6000i\\CL6000i-A12005-第一抓杯手垂直碰撞-加样位.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-6000i\\CL6000i-A12005-第一抓杯手垂直碰撞-反应盘.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-6000i\\CL6000i-A12006-第一抓杯手水平运动错误-X轴方向找零失败.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-6000i\\CL6000i-A12007-第一抓杯手水平运动错误-X方向码齿失步.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-6000i\\CL6000i-A12014~A12016-第一抓杯手手指运动错误-手指寻找零位失败或零位失步及状态错误.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-6000i\\CL6000i-A12017~A12019-第一抓杯手报警抓空掉杯粘杯.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-6000i\\CL6000i-A13001~A13002-第二抓杯手垂直运动错误-Z轴运动找零失败或零位失步.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-6000i\\CL6000i-A13005-第二抓杯手垂直碰撞-反应盘.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-6000i\\CL6000i-A13006-第二抓杯手水平运动错误-水平方向找零失败.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-6000i\\CL6000i-A13010~A13012-第二抓杯手手指运动错误-手指寻找零位失败或零位失步及状态错误.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-6000i\\CL6000i-A13013~A13017-第二抓杯手报警抓空掉杯粘杯.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-6000i\\CL6000i-A14001-分杯盘运动码齿失步.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-6000i\\CL6000i-A14004-反应杯自动装载机构传感器故障-分杯盘反应杯检测传感器或满检测传感器故障.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-6000i\\CL6000i-A14005-反应杯自动装载机构传感器故障-反应杯料仓空.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-6000i\\CL6000i-A14006-反应杯自动装载机构传感器故障-反应杯余量检测传感器故障.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-6000i\\CL6000i-A14009-反应杯自动装载机构传感器故障-反应杯拾取机构效率低.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-6000i\\CL6000i-A22101-样本针建立真空失败.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-6000i\\CL6000i-A22102-试剂针建立真空失败.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-6000i\\CL6000i-A22103-样本针释放真空失败.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-6000i\\CL6000i-A22104-试剂针释放真空失败.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-6000i\\CL6000i-A22109-样本针主真空容器满.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-6000i\\CL6000i-A22110-试剂针主真空容器满.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-8000i\\CL-8000iDCF波动过大305510500.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-8000i\\CL-8000iPMT未打开或打开失败305510300.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-8000i\\CL-8000i反应盘温度采集板通信异常307010500.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-8000i\\CL-8000i基础性能本底不过-SD正常均值偏低.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-8000i\\CL-8000i基础性能本底不过-SD超标先下降再上升&先上升后下降.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-8000i\\CL-8000i基础性能本底不过-SD超标均值偏低.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-8000i\\CL-8000i基础性能本底不过-前几个值偏高或偏低.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-8000i\\CL-8000i基础性能本底不过-单点跳值SD超标.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-8000i\\CL-8000i基础性能本底不过-结果为暗计数值.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-8000i\\CL-8000i样本针外壁清洗压力异常300170800.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-8000i\\CL-8000i超声换能器开启失败302340200.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-8000i\\CL-8000i超声真空建立失败302380200.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-8000i\\CL-8000i超声空化电压高302340400.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-8000i\\CL-8000i超声针外壁清洗压力异常302370800.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-8000i\\CL-8000i超声针真空不足302380300.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-8000i\\CL-8000i超声针真空释放失败302380400.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-8000i\\CL-8000i超声频率异常302340300.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-8000i\\CL8000i-300180100-样本针主真空容器满.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-8000i\\CL8000i-300180200-样本针建立真空失败.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-8000i\\CL8000i-300180400-样本针释放真空失败.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-8000i\\CL8000i-300580100-试剂针主真空容器满.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-8000i\\CL8000i-300580200-试剂针建立真空失败.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-8000i\\CL8000i-300580400-试剂针释放真空失败.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-8000i\\CL8000i-301010500-分杯盘运动错误-分杯盘运动码齿失步.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-8000i\\CL8000i-301022200-反应杯自动装载机构传感器故障-分杯盘反应杯检测传感器或满检测传感器故障.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-8000i\\CL8000i-301022300-反应杯自动装载机构传感器故障-反应杯余量检测传感器故障.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-8000i\\CL8000i-301022400-反应杯自动装载机构传感器故障-反应杯料仓空.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-8000i\\CL8000i-301022500-反应杯自动装载机构传感器故障-反应杯拾取机构效率低.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-8000i\\CL8000i-301110900-第一抓杯手垂直碰撞-加样位.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-8000i\\CL8000i-301110900-第一抓杯手垂直碰撞-反应盘.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-8000i\\CL8000i-301120100-第一抓杯手水平运动错误-X轴方向找零失败.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-8000i\\CL8000i-301120700-第一抓杯手水平运动错误-X轴运动码齿失步.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-8000i\\CL8000i-301140100~301140400-第一抓杯手手指运动错误-手指寻找零位失败或零位失步及状态错误.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-8000i\\CL8000i-301141200~301141300-第一抓杯手报警抓空掉杯粘杯.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-8000i\\CL8000i-301210100-301210400第二抓杯手垂直运动错误-Z轴运动找零失败或零位失步.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-8000i\\CL8000i-301210900-第二抓杯手垂直碰撞-反应盘.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-8000i\\CL8000i-301220100-第二抓杯手水平运动错误-水平方向找零失败.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-8000i\\CL8000i-301240100~301240400-第二抓杯手手指运动错误-手指寻找零位失败或零位失步及状态错误.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-8000i\\CL8000i-301241200~301241500-第二抓杯手报警抓空掉杯粘杯.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-8000i\\CL8000i-307280100-IO串行链路通信异常或仪器异常关机.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-8000i\\CL8000i-309940100-609920602-仪器无法连接或SDM无法连接.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-900i\\CL-900i-A51182样本量不足或存在气泡.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-900i\\CL-900i-A51183试剂量不足或存在气泡 .docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-900i\\CL-900i-A54405 DCF波动过大.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-900i\\CL-900i-A58832或A58833磁分离混匀电机转速过大或过小.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-900i\\CL-900i-A59292 加样针内壁清洗液压异常.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-900i\\CL-900i-A59293 加样针内壁清洗负压异常.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-900i\\CL-900i-A59660 建立真空失败.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-900i\\CL-900i-A59663排冷凝水通道异常.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-900i\\CL-900i-A60700 孵育块温度超限.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-900i\\CL-900i-A61730试剂仓温度超限.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-900i\\CL-900i-A61731试剂制冷温度传感器故障.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-900i\\CL-900i-A62771  A62772  A62773检测到热端风扇堵转.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-900i\\CL-900i-C01001 仪器无法连接.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-900i\\CL-900i-C09001 效应检测失败.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-900i\\CL-900i-加样重复性不通过.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-900i\\CL-900i-底物本底不过--前几个值偏高或偏低.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-900i\\CL-900i-底物本底不过--单点跳值SD超标.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-900i\\CL-900i-底物本底不过--多值SD超标.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-900i\\CL-900i-底物本底不过--结果为暗计数值.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-900i\\CL-900i-底物本底不过-SD正常，均值偏低.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\故障处理指引-免疫\\CL-900i\\CL-900i-底物本底不过-SD超标先下降再上升或先上升后下降.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\条码扫描CCD调试指南1.5.pdf",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\生化产品_远程服务系统安装指导手册_V7.0_CH.pdf",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\第一抓杯手手指组件拆卸方法.pdf",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\高速免疫\\1-课程大纲与学时\\高速免疫场景化培训面授知识点清单.xlsx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\高速免疫\\10-学习参考资料包\\高速免疫场景化培训教材-光学V1.1.pptx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\高速免疫\\10-学习参考资料包\\高速免疫场景化培训教材-机械V1.1.pptx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\高速免疫\\10-学习参考资料包\\高速免疫场景化培训教材-条码V1.1.pptx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\高速免疫\\10-学习参考资料包\\高速免疫场景化培训教材-液路V1.1.pptx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\高速免疫\\10-学习参考资料包\\高速免疫场景化培训教材-热工V1.1.pptx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\高速免疫\\10-学习参考资料包\\高速免疫场景化培训教材-硬件V1.1.pptx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\高速免疫\\10-学习参考资料包\\高速免疫场景化培训教材-软件V1.1.pptx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\高速免疫\\2-线上课程\\专业课程\\CL-8000i系列仪器场景化维护指南_V1.0_CH.doc",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\高速免疫\\2-线上课程\\专业课程\\CL-8000i系列仪器场景化装机指南_V1.0_CH.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\高速免疫\\2-线上课程\\专业课程\\场景化培训高速免疫分析仪结构基础V1.0.pptx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\高速免疫\\3-题库\\场景故障练习库\\免疫常见故障库.xlsx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\高速免疫\\3-题库\\面授实操题库\\发光高速场景化培训考核题库20250712.xlsx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\高速免疫\\4-产品操作视频\\4-产品操作视频.pptx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\高速免疫\\6-培训课表\\高速免疫场景化培训课程表2025.7.12.xlsx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\高速免疫\\8-实验手册\\8-实验手册-免疫场景化培训.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\（场景化）--CL-1000i系列仪器装机指南_V1.0_CH .docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\免疫资料\\（场景化）CL-1000i系列仪器场景化校准指南_V1.0_CH .docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化免疫临床知识\\免疫基础知识及市场潜力分析-麻攀.pptx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化免疫临床知识\\化学发光定标处理思路分析.pptx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化免疫临床知识\\发光临床结果处理与思路初级培训版1.pptx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化免疫临床知识\\生化校准的意义及正确操作.pptx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化免疫临床知识\\生化检验基础培训_V1.0_CN.ppt",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化免疫临床知识\\生化检验室内质量控制-SH-20190110.ppt",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化免疫临床知识\\生化系统基本知识--SH-20190110.ppt",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化免疫临床知识\\生化试剂应用及常见问题-SH-20190110.pptx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化免疫临床知识\\质控的应用及结果的有效解读.pptx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\BA3K液路系统原理图.pdf",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\BA3K系统整机连线图子母板方案V3.0.pdf",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\BS-2600&2800M_装机指南_V7.0_CH.pdf",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\BS-2600M&BS-2800M维修手册（中文）.pdf",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\BS-2800M 服务资质培训_V2.0 (1).pptx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\BS-2800M仪器校准操作指南（新增MT8000）20240718.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\BS-2800M场景化装机指南V1.0-20250718.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\BS-2800M液路相关部件实物对照.pptx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\BS5000\\BS-5000系列_全自动生化分析仪仪器校准指南&报告（标准版）_V1.0_CH\\BS-5000系列_仪器校准操作指南_V1.0_CH .docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\BS5000\\BS-5000系列_全自动生化分析仪仪器校准指南&报告（标准版）_V1.0_CH\\BS-5000系列_全自动生化分析仪仪器校准报告_V1.0_CH.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\BS5000\\BS-5000系列_工程师品培训PPT_V1.0_CH\\A-CMSH-26001-BS-5000系列_工程师品培训PPT_V1.0_CH\\IVD_生化_BS-5000系列_01 基本原理.pptx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\BS5000\\BS-5000系列_工程师品培训PPT_V1.0_CH\\A-CMSH-26001-BS-5000系列_工程师品培训PPT_V1.0_CH\\IVD_生化_BS-5000系列_02 产品介绍.pptx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\BS5000\\BS-5000系列_工程师品培训PPT_V1.0_CH\\A-CMSH-26001-BS-5000系列_工程师品培训PPT_V1.0_CH\\IVD_生化_BS-5000系列_03 整机介绍.pptx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\BS5000\\BS-5000系列_工程师品培训PPT_V1.0_CH\\A-CMSH-26001-BS-5000系列_工程师品培训PPT_V1.0_CH\\IVD_生化_BS-5000系列_04 样本分注子系统.pptx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\BS5000\\BS-5000系列_工程师品培训PPT_V1.0_CH\\A-CMSH-26001-BS-5000系列_工程师品培训PPT_V1.0_CH\\IVD_生化_BS-5000系列_05 试剂子系统.pptx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\BS5000\\BS-5000系列_工程师品培训PPT_V1.0_CH\\A-CMSH-26001-BS-5000系列_工程师品培训PPT_V1.0_CH\\IVD_生化_BS-5000系列_06 光学及反应盘子系统.pptx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\BS5000\\BS-5000系列_工程师品培训PPT_V1.0_CH\\A-CMSH-26001-BS-5000系列_工程师品培训PPT_V1.0_CH\\IVD_生化_BS-5000系列_07 搅拌与自动清洗子系统.pptx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\BS5000\\BS-5000系列_工程师品培训PPT_V1.0_CH\\A-CMSH-26001-BS-5000系列_工程师品培训PPT_V1.0_CH\\IVD_生化_BS-5000系列_10 热工系统.pptx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\BS5000\\BS-5000系列_工程师品培训PPT_V1.0_CH\\A-CMSH-26001-BS-5000系列_工程师品培训PPT_V1.0_CH\\IVD_生化_BS-5000系列_11时序控制.pptx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\BS5000\\BS-5000系列_工程师品培训PPT_V1.0_CH\\A-CMSH-26001-BS-5000系列_工程师品培训PPT_V1.0_CH\\IVD_生化_BS-5000系列_12 软件介绍.pptx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\BS5000\\BS-5000系列_工程师品培训PPT_V1.0_CH\\A-CMSH-26001-BS-5000系列_工程师品培训PPT_V1.0_CH\\IVD_生化_BS-5000系列_13 ISE模块介绍.pptx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\BS5000\\BS-5000系列_工程师品培训PPT_V1.0_CH\\A-CMSH-26001-BS-5000系列_工程师品培训PPT_V1.0_CH\\IVD_生化_BS-5000系列_14 样本管理系统.pptx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\BS5000\\BS-5000系列_工程师品培训PPT_V1.0_CH\\A-CMSH-26001-BS-5000系列_工程师品培训PPT_V1.0_CH\\IVD_生化_BS-5000系列_8 硬件系统.pptx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\BS5000\\BS-5000系列_工程师品培训PPT_V1.0_CH\\A-CMSH-26001-BS-5000系列_工程师品培训PPT_V1.0_CH\\IVD_生化_BS-5000系列_9 液路系统.pptx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\BS5000\\BS-5000系列_生化装机指南_V1.0_CH.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\CL-2000i系列仪器校准及性能检测操作指南（标准版）_V1.0_CH.pdf",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\clipbord_1775121908042.png",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\C盘磁盘满.jpg",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\M1000【LA22】常见问题处理指南V1.6.pptx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\中低速生化\\1-课程大纲与学时\\BS-1000M安装维护校准知识点清单.xlsx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\中低速生化\\1-课程大纲与学时\\BS-430安装维护校准知识点清单.xlsx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\中低速生化\\1-课程大纲与学时\\中低速生化场景化培训面授知识点清单.xlsx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\中低速生化\\10-学习参考资料包\\说明-借用全线生化材料.txt",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\中低速生化\\2-线上课程\\专业课\\BS-1000M生化产品 装机指南.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\中低速生化\\2-线上课程\\专业课\\BS-1000M系列生化校准指南.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\中低速生化\\2-线上课程\\专业课\\BS-1000M系列生化维护指南.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\中低速生化\\2-线上课程\\专业课\\BS-600M生化产品 装机指南（2025年7月29日更新）.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\中低速生化\\2-线上课程\\专业课\\BS-600M系列生化维护指南（2025年7月30日更新）.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\中低速生化\\2-线上课程\\专业课\\BS-830生化产品 装机指南（2025年8月19日更新）.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\中低速生化\\2-线上课程\\专业课\\BS-830系列生化维护指南（2025年8月13日更新）.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\中低速生化\\2-线上课程\\专业课\\场景化培训中低速生化分析仪结构基础V1.1.pptx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\中低速生化\\2-线上课程\\公共课\\说明-参考高速生化.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\中低速生化\\3-题库\\中低速生化场景化培训考核题库V1.1.xlsx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\中低速生化\\3-题库\\生化场景化故障模拟操作建议.xlsx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\中低速生化\\6-培训课表\\中低速生化场景化培训课程表2025.12.10.xlsx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\全线生化\\1-课程大纲与学时\\全线生化场景化培训面授知识点清单.xlsx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\全线生化\\2-线上课程\\场景化培训高速生化分析仪结构基础V1.1.pptx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\全线生化\\2-线上课程\\生化场景化培训教材-临床基础V1.1.ppt",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\全线生化\\3-题库\\全线生化场景化培训考核题库V1.1.xlsx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\全线生化\\3-题库\\生化场景化故障模拟操作建议.xlsx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\全线生化\\3-题库\\生化场景化故障练习题库.xlsx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\全线生化\\6-培训课表\\全线生化场景化培训课程表2025.12.10.xlsx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\全线生化\\8-实验手册\\生化场景化故障模拟操作建议.xlsx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\各生化仪器参数信息.jpg",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\场景化培训BS-2800生化校准V4.1.pdf",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\故障处理指引-生化\\BS-1000M\\BS-1000M-230150601-样本针清洗异常，原因：清洗压力偏低.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\故障处理指引-生化\\BS-1000M\\BS-1000M-233130201-水空白超限、233130901-反应杯清洗注液有气泡或注液不足.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\故障处理指引-生化\\BS-1000M\\BS-1000M-235040303-整机清洗水压力异常，原因：整机清洗水压力过低.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\故障处理指引-生化\\BS-1000M\\BS-1000M-235150702-反应杯清洗水温度超出范围，原因：温度过低.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\故障处理指引-生化\\BS-1000M\\BS-1000M-239940103-仪器无法连接.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\故障处理指引-生化\\BS-2000M\\BS-2000-A01108-样本针清洗失败_V1.1.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\故障处理指引-生化\\BS-2000M\\BS-2000-A02006-试剂注射器运动错误_V1.0.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\故障处理指引-生化\\BS-2000M\\BS-2000-A14102-试剂制冷温度超出范围_V1.1.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\故障处理指引-生化\\BS-2000M\\BS-2000-A22101-光源灯未打开_V1.1.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\故障处理指引-生化\\BS-2000M\\BS-2000-C01001-仪器无法连接（M1)_V1.1.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\故障处理指引-生化\\BS-2000M\\BS-2000-C25109-水空白异常10X_V1.1.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\故障处理指引-生化\\BS-2800M\\BS-2800-210140702样本针清洗异常V0.2.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\故障处理指引-生化\\BS-2800M\\BS-2800-210180103、210280103样本针超声清洗失败 原因：超声清洗池清洗剂注液不足.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\故障处理指引-生化\\BS-2800M\\BS-2800-210180203、210280203样本针超声清洗失败 原因：超声清洗池清洗水注液不足.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\故障处理指引-生化\\BS-2800M\\BS-2800-210180303、210280303样本针超声清洗失败 原因：超声清洗池排液不畅.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\故障处理指引-生化\\BS-2800M\\BS-2800-210180403、210180503样本针超声清洗失败.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\故障处理指引-生化\\BS-2800M\\BS-2800-211170202试剂搅拌杆转速异常V0.2.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\故障处理指引-生化\\BS-2800M\\BS-2800-213120802光源灯不稳定V0.2.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\故障处理指引-生化\\BS-2800M\\BS-2800-215040302 整机清洗水压力异常.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\故障处理指引-生化\\BS-2800M\\BS-2800-215050602主真空积液V0.2.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\故障处理指引-生化\\BS-2800M\\BS-2800-219940102仪器无法连接V0.2.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\故障处理指引-生化\\BS-430\\BS-430-A01006样本针垂直运动错误.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\故障处理指引-生化\\BS-430\\BS-430-A01028-样本针清洗时检测不到液面_V2.0.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\故障处理指引-生化\\BS-430\\BS-430-A01033-样本针排液时在反应盘未能检测到液面.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\故障处理指引-生化\\BS-430\\BS-430-C07003光源发光强度不足.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\故障处理指引-生化\\BS-430\\BS-430-C07009水空白异常（10X）.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\故障处理指引-生化\\BS-430\\BS-430-操作软件与设备无法连接.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\故障处理指引-生化\\BS-430\\BS-430-无法识别试剂条码.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\生化全系列项目.xls",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\生化场景化培训教材-光学V1.1.pptx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\生化场景化培训教材-机械V1.1.pptx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\生化场景化培训教材-条码V1.1.pptx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\生化场景化培训教材-板卡V1.1.pptx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\生化场景化培训教材-液路_1.0.pptx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\生化场景化培训教材-热工V1.1.pptx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\生化场景化培训教材-电解质V1.1.pptx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\生化场景化培训教材-软件V1.1.pptx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\生化封闭转开放现场操作指南V2.2.pdf",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\用服工具使用说明.pdf",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\盖子密封条.pdf",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\维修案例-BS2000M分析部上电失败-程自强.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\高速生化\\1-课程大纲与学时\\BS-2000系列安装维护校准知识点清单.xlsx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\高速生化\\1-课程大纲与学时\\BS-2800M装机维护校准知识点清单V1.0.xlsx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\高速生化\\1-课程大纲与学时\\高速生化场景化培训面授知识点清单.xlsx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\高速生化\\10-学习参考资料包\\说明-借用全线生化材料.txt",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\高速生化\\2-线上课程\\专业课\\BS-2000系列仪器场景化校准指南_V1.1_CH.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\高速生化\\2-线上课程\\专业课\\BS-2800M场景化主动维护指南V1.0-20250721.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\高速生化\\2-线上课程\\专业课\\BS-2800M场景化仪器校准操作指南20250722.docx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\高速生化\\2-线上课程\\专业课\\场景化培训全线生化分析仪结构基础V1.0.pptx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\高速生化\\2-线上课程\\专业课\\生化场景化培训教材-临床基础V1.1.ppt",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\高速生化\\3-题库\\高速生化场景化培训考核题库V1.1.xlsx",
+      "availability": "file_verified"
+    },
+    {
+      "file_path": "E:\\生化资料\\高速生化\\7-讲师手册\\说明.docx",
+      "availability": "file_verified"
+    }
+  ]
+}

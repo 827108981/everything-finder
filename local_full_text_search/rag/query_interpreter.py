@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from local_full_text_search.rag.models import QueryPlan
+from local_full_text_search.rag.models import (
+    ConstraintPolarity, ConstraintStrength, QueryConstraint, QueryPlan,
+)
 from local_full_text_search.rag.query_analyzer import QueryAnalyzer
 
 
@@ -32,18 +34,21 @@ class QueryInterpreter:
             semantic_query=analysis.original_text,
             fallback_terms=analysis.fallback_terms,
             missing_fields=self._missing_fields(analysis.intent, analysis.constraints),
+            analyzer_version="query-plan-v3",
+            spans=analysis.spans,
+            transformations=analysis.transformations,
+            lexical_variants=analysis.lexical_variants,
+            semantic_variants=analysis.semantic_variants,
         )
 
     @staticmethod
     def _missing_fields(intent: str, constraints) -> tuple[str, ...]:
-        if intent != "troubleshooting":
-            return ()
-        has_stage = any(item.kind.value == "stage" for item in constraints)
-        return () if has_stage else ("stage",)
+        # 未识别到固定“阶段”不等于问题真的缺少条件。
+        return ()
 
     @staticmethod
     def _merge_optional_result(analysis, parsed):
-        """明确规则优先；未来 LLM 只补充规则未识别出的信息。"""
+        """兼容旧注入点；同类不同值一律先降级，不能生成冲突硬条件。"""
         if not isinstance(parsed, dict):
             return analysis
         from dataclasses import replace
@@ -51,8 +56,20 @@ class QueryInterpreter:
         known = {(item.kind, item.value) for item in analysis.constraints}
         constraints = list(analysis.constraints)
         for item in parsed.get("constraints", ()):
-            if getattr(item, "kind", None) is not None and (item.kind, item.value) not in known:
-                constraints.append(item)
+            if not isinstance(item, QueryConstraint) or (item.kind, item.value) in known:
+                continue
+            constraints.append(replace(item, source="optional_parser"))
+            known.add((item.kind, item.value))
+        for kind in {item.kind for item in constraints}:
+            affirmed = [i for i, item in enumerate(constraints)
+                        if item.kind is kind and item.polarity is ConstraintPolarity.AFFIRMED]
+            if len({constraints[i].value for i in affirmed}) <= 1:
+                continue
+            for i in affirmed:
+                constraints[i] = replace(
+                    constraints[i], required=False, strength=ConstraintStrength.AMBIGUOUS,
+                    reason="不同解析来源给出同类冲突取值",
+                )
         intent = analysis.intent
         if intent == "general" and parsed.get("intent") in {"troubleshooting", "explanation"}:
             intent = parsed["intent"]

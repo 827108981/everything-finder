@@ -42,7 +42,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from local_full_text_search.config.constants import APP_DISPLAY_NAME, FILE_TYPE_GROUPS, LOG_DIR
+from local_full_text_search.config.constants import (
+    APP_DISPLAY_NAME, FILE_TYPE_GROUPS, LOG_DIR, RAG_MODEL_CACHE_DIR,
+)
 from local_full_text_search.config.defaults import AppSettings
 from local_full_text_search.core.database import DatabaseManager
 from local_full_text_search.core.index_generation_store import IndexGenerationStore
@@ -85,6 +87,12 @@ from local_full_text_search.workers.rag_query_worker import RagQueryWorker
 from local_full_text_search.workers.rag_eval_worker import RagEvalWorker
 from local_full_text_search.workers.rag_connection_test_worker import RagConnectionTestWorker
 from local_full_text_search.rag.models import RagQuery
+from local_full_text_search.rag.embedding_model_catalog import (
+    EMBEDDING_MODEL_OPTIONS,
+    EmbeddingModelOption,
+    embedding_model_is_downloaded,
+    embedding_model_option,
+)
 from local_full_text_search.rag.evaluation.runner import RagEvalConfig
 from local_full_text_search.rag.diagnostics import (
     log_rag_exception,
@@ -217,6 +225,10 @@ class MainWindow(QMainWindow):
         self.generation_base_path = Path(generation_base_path or db.db_path).resolve()
         self.index_generation_store = IndexGenerationStore(self.generation_base_path)
         self.settings = settings
+        self._saved_embedding_identity = (
+            settings.rag_embedding_repo_id,
+            settings.rag_embedding_revision,
+        )
         self.settings_service = settings_service
         self.database_location_service = (
             database_location_service or DatabaseLocationService()
@@ -316,6 +328,7 @@ class MainWindow(QMainWindow):
         self._build_shell()
         self.settings_page.set_database_info(self.generation_base_path)
         self.rag_page.set_rag_enabled(self.settings.rag_enabled)
+        self._sync_rag_embedding_model_ui()
         self._refresh_rag_api_key_saved_state()
         if self.settings.rag_enabled:
             # 窗口显示后在后台只读检查上次落盘的模型与 Chroma 索引；
@@ -524,6 +537,11 @@ class MainWindow(QMainWindow):
         )
 
     def download_rag_models(self) -> None:
+        if self.settings_page.has_unsaved_rag_embedding_settings():
+            self.rag_page.show_failure(
+                "向量模型选择尚未保存，请先到设置页点击“保存设置”"
+            )
+            return
         self._launch_rag_worker(RagModelDownloadWorker(self.settings), "download")
 
     def restore_rag_local_state(self) -> None:
@@ -535,6 +553,11 @@ class MainWindow(QMainWindow):
         )
 
     def build_rag_index(self) -> None:
+        if self.settings_page.has_unsaved_rag_embedding_settings():
+            self.rag_page.show_failure(
+                "向量模型选择尚未保存，请先到设置页点击“保存设置”"
+            )
+            return
         if self.database_migration_thread is not None:
             self.rag_page.show_failure("数据库正在迁移，请等待完成后重试")
             return
@@ -548,6 +571,9 @@ class MainWindow(QMainWindow):
     def ask_rag(self, question: str) -> None:
         request_id = new_rag_request_id("query")
         config_has_unsaved_changes = self.settings_page.has_unsaved_rag_api_settings()
+        embedding_has_unsaved_changes = (
+            self.settings_page.has_unsaved_rag_embedding_settings()
+        )
         _log_ui_lifecycle_event(
             "rag.query.requested",
             request_id=request_id,
@@ -557,7 +583,14 @@ class MainWindow(QMainWindow):
             model=self.settings.rag_api_model,
             api_style=self.settings.rag_api_style,
             config_has_unsaved_changes=config_has_unsaved_changes,
+            embedding_has_unsaved_changes=embedding_has_unsaved_changes,
         )
+        if embedding_has_unsaved_changes:
+            self.rag_page.show_failure(
+                "向量模型选择尚未保存。请到设置页点击“保存设置”后再提问。"
+                f"（诊断编号 {request_id}）"
+            )
+            return
         if config_has_unsaved_changes:
             _log_ui_lifecycle_event(
                 "rag.query.rejected",
@@ -881,7 +914,11 @@ class MainWindow(QMainWindow):
             if isinstance(result, dict):
                 self.rag_eval_page.show_run_result(result)
         elif self.rag_task_kind == "download":
-            self.rag_page.status_label.setText("Embedding 与 Reranker 模型已下载并校验")
+            self.settings_page.refresh_embedding_model_status()
+            self.rag_page.status_label.setText(
+                f"{self.settings.rag_embedding_repo_id} 与 Reranker 模型已下载并校验；"
+                "如向量模型已更换，请继续重新构建完整 AI 索引"
+            )
         elif self.rag_task_kind == "index":
             self.rag_page.show_build_summary(result)
         elif self.rag_task_kind == "query":
@@ -2967,11 +3004,36 @@ class MainWindow(QMainWindow):
                 )
         self.failed_page.set_status(f"已导出全部 {len(rows):,} 条明细：{target}")
 
+    def _sync_rag_embedding_model_ui(self, *, invalidate_index: bool = False) -> None:
+        option = embedding_model_option(
+            self.settings.rag_embedding_repo_id,
+            self.settings.rag_embedding_revision,
+        )
+        label = option.label if option is not None else self.settings.rag_embedding_repo_id
+        dimension = option.dimension if option is not None else 0
+        self.rag_page.set_embedding_model(
+            self.settings.rag_embedding_repo_id,
+            label,
+            dimension,
+            invalidate_index=invalidate_index,
+        )
+
     def save_settings(self, settings: AppSettings) -> None:
+        previous_embedding = self._saved_embedding_identity
         self.settings = settings
         self.settings_service.save(settings)
+        self._saved_embedding_identity = (
+            settings.rag_embedding_repo_id,
+            settings.rag_embedding_revision,
+        )
         self.search_page.apply_settings(settings)
         self.rag_page.set_rag_enabled(settings.rag_enabled)
+        self._sync_rag_embedding_model_ui(
+            invalidate_index=previous_embedding != (
+                settings.rag_embedding_repo_id,
+                settings.rag_embedding_revision,
+            )
+        )
         if settings.rag_enabled:
             QTimer.singleShot(0, self.restore_rag_local_state)
         self.refresh_file_monitor()
@@ -5878,6 +5940,62 @@ class SettingsPage(QWidget):
         self.rag_answer_review_enabled.setToolTip(
             "第一次生成答案，第二次逐条核对引用证据并修订；开启后会增加一次 API 调用和等待时间。"
         )
+        self.rag_embedding_model = QComboBox()
+        self._embedding_model_options: dict[str, EmbeddingModelOption] = {
+            option.key: option for option in EMBEDDING_MODEL_OPTIONS
+        }
+        for option in EMBEDDING_MODEL_OPTIONS:
+            self.rag_embedding_model.addItem(option.label, option.key)
+        configured_embedding = embedding_model_option(
+            settings.rag_embedding_repo_id, settings.rag_embedding_revision,
+        )
+        if configured_embedding is None:
+            custom_key = "custom-current"
+            configured_embedding = EmbeddingModelOption(
+                key=custom_key,
+                label=f"当前自定义模型（{settings.rag_embedding_repo_id}）",
+                repo_id=settings.rag_embedding_repo_id,
+                revision=settings.rag_embedding_revision,
+                dimension=0,
+                description="该模型不在内置推荐列表中；保存时会原样保留。",
+            )
+            self._embedding_model_options[custom_key] = configured_embedding
+            self.rag_embedding_model.addItem(
+                configured_embedding.label, configured_embedding.key
+            )
+        embedding_index = self.rag_embedding_model.findData(configured_embedding.key)
+        self.rag_embedding_model.setCurrentIndex(max(0, embedding_index))
+        self.rag_embedding_model.setToolTip(
+            "切换模型后必须先下载模型并重新构建完整 AI 索引；旧索引不会被当作新模型索引使用。"
+        )
+        self.rag_embedding_model_status = QLabel()
+        self.rag_embedding_model_status.setObjectName("InlineStatus")
+        self.rag_embedding_model_status.setWordWrap(True)
+        self.rag_vector_backend = QComboBox()
+        self.rag_vector_backend.addItem("父块向量（旧版，可回退）", "legacy")
+        self.rag_vector_backend.addItem("细粒度向量 V2", "unit_v2")
+        vector_backend_index = self.rag_vector_backend.findData(
+            getattr(settings, "rag_vector_backend", "legacy")
+        )
+        self.rag_vector_backend.setCurrentIndex(
+            vector_backend_index if vector_backend_index >= 0 else 0
+        )
+        self.rag_vector_backend.setToolTip(
+            "V2 将正文切成较小检索单元，再归并回原证据块；切换后需要重新执行一次 AI 索引。"
+        )
+        self.rag_lexical_backend = QComboBox()
+        self.rag_lexical_backend.addItem("旧版关键词检索", "legacy")
+        self.rag_lexical_backend.addItem("中文词项检索 V2", "word_v2")
+        lexical_backend_index = self.rag_lexical_backend.findData(
+            getattr(settings, "rag_lexical_backend", "legacy")
+        )
+        self.rag_lexical_backend.setCurrentIndex(
+            lexical_backend_index if lexical_backend_index >= 0 else 0
+        )
+        self.rag_lexical_backend.setToolTip(
+            "V2 对中文短词和字母数字标识符建立独立索引。保存后点击“构建 / 更新 AI 索引”，"
+            "程序会为当前 AI 索引准备关键词索引；旧版可随时切回。"
+        )
         self.rag_api_key = QLineEdit()
         self.rag_api_key.setEchoMode(QLineEdit.EchoMode.Password)
         self.rag_api_key.setPlaceholderText("留空时使用已保存的 Key；输入新 Key 可替换")
@@ -5909,6 +6027,10 @@ class SettingsPage(QWidget):
                     ("模型名", self.rag_api_model),
                     ("接口类型", self.rag_api_style),
                     ("请求超时", self.rag_api_timeout),
+                    ("本地向量模型", self.rag_embedding_model),
+                    ("", self.rag_embedding_model_status),
+                    ("向量检索", self.rag_vector_backend),
+                    ("关键词检索", self.rag_lexical_backend),
                     ("", self.rag_answer_review_enabled),
                     ("API Key", rag_api_key_row),
                     ("", self.rag_api_key_status),
@@ -6058,6 +6180,9 @@ class SettingsPage(QWidget):
         self.auto_search.toggled.connect(self.search_delay.setEnabled)
         self.search_delay.setEnabled(self.auto_search.isChecked())
         self.enable_ocr.toggled.connect(self._update_ocr_controls)
+        self.rag_embedding_model.currentIndexChanged.connect(
+            self._refresh_embedding_model_status
+        )
         self.advanced_toggle.toggled.connect(self._toggle_advanced)
         self.database_choose_button.clicked.connect(
             self.choose_database_directory
@@ -6070,6 +6195,7 @@ class SettingsPage(QWidget):
             self.database_migration_cancel_requested.emit
         )
         self._update_ocr_controls(self.enable_ocr.isChecked())
+        self._refresh_embedding_model_status()
         self._refresh_database_actions()
 
     def set_database_info(self, path: Path) -> None:
@@ -6249,6 +6375,49 @@ class SettingsPage(QWidget):
         ):
             widget.setEnabled(enabled)
 
+    def selected_embedding_model(self) -> EmbeddingModelOption:
+        key = str(self.rag_embedding_model.currentData() or "")
+        option = self._embedding_model_options.get(key)
+        if option is None:
+            # 组合框内容只由本类创建；保留防御性回退，避免空数据覆盖设置。
+            option = EmbeddingModelOption(
+                key="saved-fallback",
+                label=self.settings.rag_embedding_repo_id,
+                repo_id=self.settings.rag_embedding_repo_id,
+                revision=self.settings.rag_embedding_revision,
+                dimension=0,
+                description="沿用当前已保存模型。",
+            )
+        return option
+
+    def has_unsaved_rag_embedding_settings(self) -> bool:
+        option = self.selected_embedding_model()
+        return (
+            option.repo_id != self.settings.rag_embedding_repo_id
+            or option.revision != self.settings.rag_embedding_revision
+        )
+
+    def refresh_embedding_model_status(self) -> None:
+        self._refresh_embedding_model_status()
+
+    def _refresh_embedding_model_status(self, _index: int = -1) -> None:
+        option = self.selected_embedding_model()
+        downloaded = embedding_model_is_downloaded(RAG_MODEL_CACHE_DIR, option)
+        state = "已下载并通过文件检查" if downloaded else "尚未下载"
+        dimension = f"{option.dimension} 维" if option.dimension else "维度由模型决定"
+        changed = self.has_unsaved_rag_embedding_settings()
+        suffix = (
+            " 当前选择尚未保存；保存后需下载并重建完整 AI 索引。"
+            if changed
+            else " 当前为已保存设置。"
+        )
+        self.rag_embedding_model_status.setText(
+            f"{dimension} · {state} · {option.description}{suffix}"
+        )
+        self.rag_embedding_model_status.setToolTip(
+            f"模型：{option.repo_id}\n固定版本：{option.revision}"
+        )
+
     def apply(self) -> None:
         self.settings.page_size = int(self.page_size.value())
         self.settings.max_results = int(self.max_results.value())
@@ -6283,7 +6452,16 @@ class SettingsPage(QWidget):
         self.settings.rag_api_style = str(self.rag_api_style.currentData())
         self.settings.rag_api_timeout_seconds = int(self.rag_api_timeout.value())
         self.settings.rag_answer_review_enabled = self.rag_answer_review_enabled.isChecked()
+        embedding_option = self.selected_embedding_model()
+        self.settings.rag_embedding_repo_id = embedding_option.repo_id
+        self.settings.rag_embedding_revision = embedding_option.revision
+        self.settings.rag_vector_backend = str(self.rag_vector_backend.currentData())
+        self.settings.rag_lexical_backend = str(self.rag_lexical_backend.currentData())
+        if self.settings.rag_lexical_backend == "word_v2":
+            # 旧版多路线由另一套解析器产生，不能与 V2 词项检索混用。
+            self.settings.rag_lexical_multi_route_enabled = False
         self.save_requested.emit(self.settings)
+        self._refresh_embedding_model_status()
 
     def save_rag_api_key(self) -> None:
         api_key = self.rag_api_key.text().strip()

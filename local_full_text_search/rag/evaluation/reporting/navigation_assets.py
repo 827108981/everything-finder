@@ -51,6 +51,28 @@ NAVIGATION_CSS = r"""
 .report-stage-content .stage-actions button{font-size:12px}
 .report-stage-content .stage-empty{padding:20px;background:#f8fafc;border-radius:8px;color:#667085}
 .report-stage-content .inline-caption{color:#667085;font-size:12px}
+.report-stage-content .query-panel{padding:12px 14px;margin:10px 0 16px;border:1px solid #b9d0fb;background:#f4f8ff;border-radius:10px}
+.report-stage-content .query-panel h4{margin:0 0 8px}
+.report-stage-content .query-panel code{white-space:pre-wrap;overflow-wrap:anywhere}
+.report-stage-content .query-chip{display:inline-block;padding:3px 8px;margin:3px;border-radius:7px;background:#fff;border:1px solid #b9d0fb}
+.report-stage-content .answer-panel{padding:14px 16px;margin:10px 0 16px;border:1px solid #9fd3b3;background:#f0faf4;border-radius:10px}
+.report-stage-content .answer-panel.failed{border-color:#ef9a9a;background:#fff3f3}
+.report-stage-content .answer-panel h4{margin:0 0 8px}
+.report-stage-content .answer-panel pre{background:#fff;margin:8px 0;max-height:340px;overflow:auto}
+.report-stage-content .answer-reason{color:#9b1c1c;font-weight:700;overflow-wrap:anywhere}
+.report-stage-content .answer-panel.judge-incorrect{border-color:#ef9a9a;background:#fff3f3}
+.report-stage-content .answer-panel.judge-incomplete,.report-stage-content .answer-panel.judge-needs_clarification,.report-stage-content .answer-panel.judge-behavior_mismatch{border-color:#e8d575;background:#fffbea}
+.report-stage-content .answer-panel.judge-safety_gap{border-color:#f0aa60;background:#fff4e8}
+.report-stage-content .judge-rubric{border-top:1px solid #dce5e4;padding:8px 0}
+.report-stage-content .judge-rubric.context{color:#667085}
+.report-stage-content .judge-rubric small{display:block;color:#667085}
+.report-stage-content .exit-note{margin-top:5px;color:#9b3b19;font-size:12px;font-weight:700}
+.report-stage-content .group-sources{margin:8px 0;padding:7px;background:#f4f7fb;border-radius:7px;font-size:12px}
+.report-stage-content .vector-unit{margin:8px 0;padding:9px;border-left:3px solid #6b7fd7;background:#f7f8ff;border-radius:6px}
+.report-stage-content .vector-unit pre{margin:6px 0 0;background:#fff}
+.report-stage-content .stage-funnel{display:grid;grid-template-columns:repeat(8,minmax(0,1fr));gap:5px;margin:12px 0}
+.report-stage-content .stage-funnel button{padding:7px 2px;font-size:11px;min-width:0;white-space:normal}
+.report-stage-content .stage-funnel b{display:block;font-size:15px}
 @media(max-width:900px){.report-viewer,.report-viewer.nav-hidden{grid-template-columns:1fr}.report-nav{max-height:40vh}.nav-ranks{grid-template-columns:repeat(10,minmax(0,1fr))}}
 """
 
@@ -71,6 +93,15 @@ const ReportNav = (() => {
   const ranked = (c, stage) => candidatesOf(c, stage)
     .filter(x => Number.isInteger(x.stage_rank))
     .sort((a, b) => a.stage_rank - b.stage_rank);
+  function groupedRows(c, stage) {
+    const groups = new Map();
+    for (const row of candidatesOf(c, stage)) {
+      const id = row.content_group_id || row.chunk_id;
+      if (!groups.has(id)) groups.set(id, []);
+      groups.get(id).push(row);
+    }
+    return [...groups.values()].sort((a, b) => (a[0].stage_rank ?? Infinity) - (b[0].stage_rank ?? Infinity));
+  }
   const textOrDash = value => value == null ? '—' : String(value);
 
   function captureReadingRank() {
@@ -82,7 +113,7 @@ const ReportNav = (() => {
     const cards = [...$('caseDetails').querySelectorAll('.report-stage-content .candidate[data-rank]')]
       .filter(card => card.dataset.rank !== '');
     if (!cards.length) return;
-    if (focusedRank != null && cards.some(card => Number(card.dataset.rank) === focusedRank)) {
+    if (focusedRank != null && cards.some(card => (card.dataset.memberRanks || '').split(',').map(Number).includes(focusedRank))) {
       lastRanks.set(key(c.id, stageOf(), 'reading'), focusedRank);
       return;
     }
@@ -100,15 +131,22 @@ const ReportNav = (() => {
       const found = e.stages?.[stage] || [];
       return `<span>${esc(STAGES[stage] || stage)} ${found.length ? found.map(n => `<button type="button" data-action="rank-stage" data-stage="${esc(stage)}" data-rank="${n}" title="跳转到${esc(STAGES[stage] || stage)}第 ${n} 名">#${n}</button>`).join('、') : '未出现'}</span>`;
     }).join('　');
-    return `<div class="evidence ${isGold ? 'ok' : 'neg'} ${e.first_rank == null ? 'miss' : ''}"><b>${esc(e.evidence_id)}</b> · ${esc(e.file || '')} · 第 ${esc(e.page ?? '?')} 页<br>${esc(e.quote || '')}${!isGold && e.reason ? `<br><span class="inline-caption">负例原因：${esc(e.reason)}</span>` : ''}<br><span class="inline-caption">各阶段名次：${ranks}</span></div>`;
+    const exit = e.exit || {};
+    const exitLabel = exit.from ? `${STAGES[exit.from] || exit.from} → ${STAGES[exit.to] || exit.to}：${exit.reason || ''}` : exit.reason || '';
+    const suspected = ORDER.map(stage => (e.suspected_stages?.[stage] || []).map(n => `<button type="button" data-action="rank-stage" data-stage="${esc(stage)}" data-rank="${n}" title="疑似来源，不计入正式指标">${esc(STAGES[stage] || stage)} #${n}</button>`).join('、')).filter(Boolean).join(' → ');
+    const mapping = e.mapping || {};
+    const mappingNote = isGold ? `指定来源 ${mapping.declared_chunk_ids?.length || 0} 块 · 自动等价 ${mapping.equivalent_chunk_ids?.length || 0} 块 · 疑似 ${mapping.suspected_chunk_ids?.length || 0} 块` : '';
+    return `<div class="evidence ${isGold ? 'ok' : 'neg'} ${e.first_rank == null ? 'miss' : ''}"><b>${esc(e.evidence_id)}</b> · ${esc(e.file || '')} · 第 ${esc(e.page ?? '?')} 页<br>${esc(e.quote || '')}${!isGold && e.reason ? `<br><span class="inline-caption">负例原因：${esc(e.reason)}</span>` : ''}${mappingNote ? `<br><span class="inline-caption">${esc(mappingNote)}</span>` : ''}<br><span class="inline-caption">各阶段完整证据名次：${ranks}</span>${suspected ? `<div class="inline-caption">疑似金标（不计分）：${suspected}</div>` : ''}${exitLabel ? `<div class="exit-note">去向：${esc(exitLabel)}</div>` : ''}</div>`;
   }
 
-  function candidateHtml(c, stage, caseId) {
+  function candidateHtml(c, stage, caseId, members = [c]) {
     const n = c.stage_rank;
     const bodyKey = key(caseId, stage, n == null ? `rejected:${c.chunk_id}` : n);
     const isOpen = bodyOpen.get(bodyKey) !== false;
     const labels = {gold:'金标证据',negative:'指定负例',mixed:'同块混合',unlabelled:'相似未标注',partial_gold:'部分金标',partial_negative:'部分负例'};
-    const category = c.category || 'unlabelled';
+    const categories = new Set(members.map(row => row.category || 'unlabelled'));
+    const category = categories.has('mixed') || (categories.has('gold') && categories.has('negative'))
+      ? 'mixed' : categories.has('gold') ? 'gold' : categories.has('negative') ? 'negative' : c.category || 'unlabelled';
     const text = String(c.included_text ?? c.text ?? '');
     // 旧结果可能只记录完整块的高亮区间；截断上下文时避免错位高亮。
     const segments = c.included_text != null && c.included_text !== c.text ? [{text, kinds:[]}] : (c.highlight_segments || [{text, kinds:[]}]);
@@ -120,12 +158,71 @@ const ReportNav = (() => {
       return `<span class="hl-${color}">${esc(s.text)}</span>`;
     }).join('');
     const history = (c.rank_history || []).map(h => `<button type="button" data-action="rank-stage" data-stage="${esc(h.stage)}" data-rank="${h.rank}" title="查看同一内容块在${esc(STAGES[h.stage] || h.stage)}的名次">${esc(STAGES[h.stage] || h.stage)} #${h.rank}</button>`).join(' → ');
-    const scores = `关键词 ${textOrDash(c.lexical_score)} · 向量 ${textOrDash(c.vector_score)} · 融合 ${textOrDash(c.fused_score)} · 重排 ${textOrDash(c.rerank_score)} · 约束 ${textOrDash(c.constraint_score)}`;
+    const scores = `关键词 ${textOrDash(c.lexical_score)}${c.lexical_score_kind ? '（' + c.lexical_score_kind + '）' : ''} · 向量 ${textOrDash(c.vector_score)} · 融合 ${textOrDash(c.fused_score)} · 重排 ${textOrDash(c.rerank_score)} · 约束 ${textOrDash(c.constraint_score)}`;
+    const lexicalDetail = (c.lexical_contributions || []).map(x => `<tr><td>${esc(x.term)}</td><td>${esc(x.document_frequency)}</td><td>${esc(x.body_frequency)}</td><td>${esc(x.title_frequency)}</td><td>${esc(Number(x.body_score || 0).toFixed(4))}</td><td>${esc(Number(x.title_score || 0).toFixed(4))}</td><td>${esc((x.match_methods || []).join('、'))}</td></tr>`).join('');
+    const vectorUnits = (c.vector_unit_hits || []).map(x => `<div class="vector-unit"><b>原始单元 #${esc(x.raw_rank)}</b> · ${esc(x.kind || '')} · 分数 ${esc(x.score)} · ${esc(x.token_count)} tokens<br><span class="inline-caption">${esc(x.unit_id || '')}</span><pre>${esc(x.text || '')}</pre></div>`).join('');
     const location = c.location || (c.page_number != null ? `第 ${c.page_number} 页` : '位置未记录');
-    return `<details class="candidate ${esc(category)}" data-rank="${n == null ? '' : n}" data-body-key="${esc(bodyKey)}" ${isOpen ? 'open' : ''}>
-      <summary><strong class="rank">${n == null ? '未入选' : '#' + n}</strong><b>${esc(c.filename || '')}</b><span class="pill">${esc(location)}</span><span class="badge ${esc(category)}">${esc(labels[category] || category)}</span><span class="score">${esc(scores)}</span></summary>
-      <div class="candidate-body"><div class="inline-caption">状态：${esc(c.status || '')}；原因：${esc(c.reason || c.constraint_decision?.reason || '')}${c.truncated ? '；上下文已截断' : ''}</div>
-      <div class="inline-caption">同块排名轨迹：${history || '未进入其他已记录阶段'}</div><pre>${content}</pre></div></details>`;
+    const memberRanks = members.map(row => row.stage_rank).filter(Number.isInteger);
+    const sourceRows = members.flatMap(row => row.sources?.length ? row.sources.map(source => ({...source, rank: row.stage_rank, text: source.chunk_id === row.chunk_id ? row.text : null}))
+      : [{filename:row.filename, location:row.location, rank:row.stage_rank, text:row.text}]);
+    const sourceHtml = `<details class="group-sources"><summary>同一正文的原始来源 ${sourceRows.length} 处 · 原始名次 ${memberRanks.map(x => '#' + x).join('、') || '未入选'}</summary>${sourceRows.map(source => `<div><b>${esc(source.filename || '')}</b> · ${esc(source.location || '')} · ${source.rank == null ? '未入选' : '#' + source.rank}${source.text == null ? ' · 原始块可在关键词/向量/融合阶段按 ID 追溯' : `<details><summary>原始正文</summary><pre>${esc(source.text)}</pre></details>`}</div>`).join('')}</details>`;
+    return `<details class="candidate ${esc(category)}" data-rank="${n == null ? '' : n}" data-member-ranks="${esc(memberRanks.join(','))}" data-body-key="${esc(bodyKey)}" ${isOpen ? 'open' : ''}>
+      <summary><strong class="rank">${n == null ? '未入选' : '#' + n}</strong><b>${esc(c.filename || '')}</b><span class="pill">${esc(location)}</span><span class="badge ${esc(category)}">${esc(category === 'mixed' ? '同块混合' : c.formal_gold_type || labels[category] || category)}</span><span class="score">${esc(scores)}</span></summary>
+      <div class="candidate-body"><div class="inline-caption">状态：${esc(c.status || '')}；${c.formal_gold_type ? `证据判定：${esc(c.formal_gold_type)}；` : ''}原因：${esc(c.reason || c.constraint_decision?.reason || '')}${c.truncated ? '；上下文已截断' : ''}</div>
+      <div class="inline-caption">同块排名轨迹：${history || '未进入其他已记录阶段'}</div>${lexicalDetail ? `<details><summary>关键词逐词得分</summary><table><thead><tr><th>词项</th><th>全库 df</th><th>正文 tf</th><th>标题 tf</th><th>正文贡献</th><th>标题原始贡献</th><th>定位方式</th></tr></thead><tbody>${lexicalDetail}</tbody></table></details>` : ''}${vectorUnits ? `<details><summary>查看命中的细粒度向量单元（父证据取最高分）</summary>${vectorUnits}</details>` : ''}${sourceHtml}<pre>${content}</pre></div></details>`;
+  }
+
+  function queryHtml(c) {
+    const q = c.query || {};
+    const words = q.lexical_terms || [];
+    const spans = (q.spans || []).map(x => `<span class="query-chip" title="原文位置 ${esc(x.start)}–${esc(x.end)}；${esc((x.features || []).join('、'))}">${esc(x.text)} <small>${esc(x.start)}–${esc(x.end)}</small></span>`).join('');
+    const changes = (q.transformations || []).map(x => `<li>${esc(x.operation)}：${esc(x.source_text)} → ${esc(x.result_text)}；${esc(x.reason)}</li>`).join('');
+    const lexicalRoutes = (q.executed_lexical_routes || []).map(x => `<li><b>${esc(x.route_id)}</b> · 后端 ${esc(x.backend || 'legacy')} · 输出 ${esc(x.candidate_count)} 条 · 定位/过滤/计分 ${esc(x.located_candidate_count ?? x.scanned_count ?? '—')}/${esc(x.filtered_candidate_count ?? '—')}/${esc(x.scored_candidate_count ?? '—')} · ${esc(x.duration_ms)} ms${x.candidate_pool_exhausted ? ' · <strong class="warning">扫描到上限，候选池可能尚未穷尽</strong>' : ''}${(x.complete_match_terms || []).length ? ' · 完整词补充：' + esc(x.complete_match_terms.join('、')) : ''} · <code>${esc(x.expression || x.query_text || '')}</code></li>`).join('');
+    const semanticRoutes = (q.executed_vector_routes || []).map(x => `<li><b>${esc(x.route_id)}</b> · 后端 ${esc(x.backend || 'legacy')} · 原始命中 ${esc(x.candidate_count)} 条 · ${esc(x.duration_ms)} ms · ${esc(x.query_text || '')}${x.vector_index_fingerprint ? ' · 索引 ' + esc(x.vector_index_fingerprint.slice(0, 12)) : ''}${x.status === 'degraded_route' ? '（失败后降级）' : ''}</li>`).join('');
+    return `<section class="query-panel"><h4>本题实际检索关键词</h4><div>后端：${esc(q.lexical_backend || 'legacy')}；关键词：${words.length ? words.map(word => `<span class="query-chip">${esc(word)}</span>`).join('') : '未记录或未提取'}</div>
+      <div class="inline-caption">实际全文查询：<code>${esc(q.lexical_expression || '未记录')}</code></div>
+      <div class="inline-caption">向量检索原文：${esc(q.semantic_query || '未记录')}</div>
+      <div class="inline-caption">保留的原文片段：${spans || '旧运行未记录'}</div>
+      ${changes ? `<details><summary>查看问句清理过程</summary><ul>${changes}</ul></details>` : ''}
+      ${lexicalRoutes ? `<details open><summary>实际执行的关键词查询路线</summary><ul>${lexicalRoutes}</ul></details>` : ''}
+      ${semanticRoutes ? `<details><summary>实际执行的向量查询路线</summary><ul>${semanticRoutes}</ul></details>` : ''}
+      <div class="inline-caption">阶段上限：${esc(JSON.stringify(q.limits || {}))} · 解析版本 ${esc(q.analyzer_version || '未记录')}</div></section>`;
+  }
+
+  function answerHtml(c) {
+    const answer = c.answer || {};
+    const generation = c.generation || {};
+    const finalText = String(answer.text || '').trim();
+    const draft = String(generation.draft_answer || '').trim();
+    const failure = c.error?.message || '';
+    const refused = /本服务不支持|无法协助|不能协助|无法提供|不能提供/.test(draft);
+    if (finalText) {
+      const original = draft && draft !== finalText
+        ? `<details><summary>查看生成初稿</summary><pre>${esc(draft)}</pre></details>` : '';
+      return `<section class="answer-panel"><h4>本题最终答案</h4><pre>${esc(finalText)}</pre>${original}</section>`;
+    }
+    if (failure) {
+      const label = refused ? '模型／服务商返回的拒答说明' : '模型返回的原始答复（未通过校验）';
+      const raw = draft ? `<h4>${label}</h4><pre>${esc(draft)}</pre>` : '<h4>本题没有可展示的模型答复</h4>';
+      return `<section class="answer-panel failed">${raw}<div class="answer-reason">评测失败原因：${esc(failure)}</div>${generation.failed_stage ? `<div class="inline-caption">失败阶段：${esc(generation.failed_stage)}</div>` : ''}</section>`;
+    }
+    const note = DATA.run?.mode === 'retrieval-only' ? '本次只评测检索，没有调用 LLM 生成答案。' : '本题尚未执行生成，因而没有答案。';
+    return `<section class="answer-panel"><h4>本题答案</h4><div>${note}</div></section>`;
+  }
+
+  function judgeHtml(c) {
+    const j = c.gold_judgement || {};
+    const labels = {consistent:'符合金标', incomplete:'必答内容缺失', safety_gap:'安全提示缺失', needs_clarification:'需要澄清', behavior_mismatch:'回答方式不符', incorrect:'明确错误', uncertain:'待人工复核', unavailable:'裁判未完成', inconsistent:'旧版：与金标不一致'};
+    const actions = {consistent:'核心要求已覆盖；可选背景未提不扣分。', incomplete:'核对必答项是否确属本题，再补全答案。', safety_gap:'答案涉及维修操作，应补充断电与防静电提示。', needs_clarification:'先请用户确认影响唯一答案的条件。', behavior_mismatch:'核对回答、部分回答或拒答方式是否符合题目要求。', incorrect:'核对矛盾事实或被命中的禁止主张，并检查证据。', uncertain:'需人工核查裁判无法确认的内容。'};
+    const roleLabels = {core:'本题必答', safety:'安全要求', context:'可选背景', forbidden:'禁止主张'};
+    const statusLabels = {covered:'已表达', missing:'未表达', contradicted:'表达相反', uncertain:'无法判清', present:'错误主张出现', absent:'未出现'};
+    if (!j.verdict) return '<section class="answer-panel"><h4>答案与金标</h4><div class="inline-caption">本次未运行金标答案裁判；不能据此认定答案正确。</div></section>';
+    const rows = (j.rubrics || []).map(r => {const role=r.role || (r.kind === 'forbidden_claims' ? 'forbidden' : 'core'); return `<div class="judge-rubric ${esc(role)}"><b>${esc(r.id)} · ${esc(roleLabels[role] || role)} · ${esc(statusLabels[r.status] || r.status)}</b><div>${esc(r.gold_text)}</div><small>${esc(r.reason || '未提供理由')}</small></div>`}).join('');
+    const comparison = j.rejudged_from_saved_answer ? `<div class="inline-caption">沿用原运行已保存的答案重新判分：${esc(labels[j.previous_verdict] || j.previous_verdict || '未运行')} → ${esc(labels[j.verdict] || j.verdict)}；检索与答案生成未重跑。</div>` : '';
+    return `<section class="answer-panel judge-${esc(j.verdict)}"><h4>答案与金标：${esc(labels[j.verdict] || j.verdict)}</h4>
+      <div>行为核查：${esc(j.behavior || '未判定')} · ${esc(j.behavior_reason || j.reason || '')}</div>
+      <div><b>处理方向：</b>${esc(actions[j.verdict] || j.reason || '请结合逐项结果人工复核。')}</div>
+      <div class="inline-caption">独立 LLM 裁判 ${esc(j.model || '')} · 判分版本 ${esc(j.rubric_version || '旧版')}；逐项理由供人工复核，不作为绝对正确性证明。</div>${comparison}${rows}</section>`;
   }
 
   function navHtml(c, stage) {
@@ -145,17 +242,19 @@ const ReportNav = (() => {
 
   function contentHtml(c, stage) {
     const rows = candidatesOf(c, stage);
-    const sorted = [...rows].sort((a, b) => (a.stage_rank ?? Infinity) - (b.stage_rank ?? Infinity));
+    const groups = groupedRows(c, stage);
     const positives = c.gold_evidence || [];
     const negatives = c.hard_negatives || [];
     return `<section class="report-stage-content" aria-label="当前阶段详情"><h3>${esc(c.id)} · ${esc(c.question)}</h3>
       <div class="stage-summary"><b>${esc(STAGES[stage] || stage)}</b> · ${rows.length} 条候选 · <span class="inline-caption">${esc(c.expected_behavior || '')} / ${esc(c.group_id || '')}</span><br>
       金标 ${c.stage_summaries?.[stage]?.gold_found ?? '—'}/${c.stage_summaries?.[stage]?.gold_total ?? '—'} · 首条金标 ${rank(c.stage_summaries?.[stage]?.first_gold_rank)} · 首个负例 ${rank(c.stage_summaries?.[stage]?.hard_negative_first_rank)}
-      <div class="inline-caption">点击下方证据名次或卡片中的排名轨迹，可以直接切换阶段并定位。</div></div>
+      <div class="inline-caption">点击下方证据名次或卡片中的排名轨迹，可以直接切换阶段并定位。</div></div>${answerHtml(c)}${judgeHtml(c)}${caseTimingHtml(c)}${queryHtml(c)}
+      <div class="stage-funnel" aria-label="各阶段金标和负例数量">${ORDER.map(s => `<button type="button" data-action="stage" data-stage="${esc(s)}" title="切换到${esc(STAGES[s] || s)}"><span>${esc(STAGES[s] || s)}</span><b>${c.stage_summaries?.[s]?.gold_found ?? '—'}/${c.stage_summaries?.[s]?.gold_total ?? '—'}</b><small>负例 ${c.stage_summaries?.[s]?.hard_negative_found ?? '—'}</small></button>`).join('')}</div>
       <div class="detail-grid"><div><h3>金标证据</h3>${positives.map(evidenceHtml).join('') || '<div class="inline-caption">本题没有正向金标</div>'}</div><div><h3>指定负例</h3>${negatives.map(evidenceHtml).join('') || '<div class="inline-caption">没有指定负例</div>'}</div></div>
+      ${(c.acceptable_alternative_evidence || []).length ? `<details><summary>人工记录的可接受替代证据（未自动并入 Gold 计分）</summary><pre>${esc(JSON.stringify(c.acceptable_alternative_evidence,null,2))}</pre></details>` : ''}
       <div class="stage-actions"><button type="button" data-action="expand-all">展开本阶段全部正文</button><button type="button" data-action="collapse-all">收起本阶段全部正文</button></div>
-      <h3>${esc(STAGES[stage] || stage)}排名 · ${sorted.length} 条</h3>${sorted.length ? sorted.map(x => candidateHtml(x, stage, c.id)).join('') : '<div class="stage-empty">本阶段没有记录候选。</div>'}
-      <details><summary>约束、缺失条件和生成评测参考</summary><pre>${esc(JSON.stringify({constraints:c.constraints,missing_fields:c.missing_fields,required_facts:c.required_facts,forbidden_claims:c.forbidden_claims},null,2))}</pre></details>
+      <h3>${esc(STAGES[stage] || stage)}排名 · ${rows.length} 条 / ${groups.length} 个内容组</h3>${groups.length ? groups.map(items => candidateHtml(items[0], stage, c.id, items)).join('') : '<div class="stage-empty">本阶段没有记录候选。</div>'}
+      <details><summary>约束、缺失条件和答案判分项</summary><pre>${esc(JSON.stringify({constraints:c.constraints,missing_fields:c.missing_fields,answer_checks:c.answer_checks,required_facts:c.required_facts,forbidden_claims:c.forbidden_claims},null,2))}</pre><div class="inline-caption">新版答案裁判使用 answer_checks 和 forbidden_claims；required_facts 保留供历史对照。</div></details>
     </section>`;
   }
 
@@ -184,7 +283,7 @@ const ReportNav = (() => {
 
   function focusRank(n, smooth = true, expand = true) {
     const card = [...$('caseDetails').querySelectorAll('.report-stage-content .candidate[data-rank]')]
-      .find(x => Number(x.dataset.rank) === n);
+      .find(x => (x.dataset.memberRanks || '').split(',').map(Number).includes(n));
     if (!card) return false;
     if (expand) {
       card.open = true;

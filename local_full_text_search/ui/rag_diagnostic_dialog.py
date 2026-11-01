@@ -36,6 +36,8 @@ def _score_summary(item: dict[str, object]) -> str:
         ("vector_score", "相似度"),
         ("fused_score", "RRF"),
         ("rerank_score", "重排"),
+        ("rerank_score_combined", "综合重排"),
+        ("answer_support_score", "直接回答支持"),
         ("constraint_score", "条件"),
     ):
         value = item.get(key)
@@ -46,13 +48,31 @@ def _score_summary(item: dict[str, object]) -> str:
         details = constraint.get("judgements")
         if isinstance(details, list):
             compact = ",".join(
-                f"{value.get('kind')}:{value.get('status')}"
+                f"{value.get('kind')}[{value.get('polarity', 'affirmed')}/{value.get('strength', 'hard')}]:{value.get('status')}"
                 for value in details
                 if isinstance(value, dict)
             )
             if compact:
                 parts.append(f"条件 {compact}")
     return " · ".join(parts)
+
+
+def _constraint_details(item: dict[str, object]) -> str:
+    decision = item.get("constraint_decision")
+    if not isinstance(decision, dict):
+        return "未执行条件判断"
+    lines = [f"硬拒绝：{'是' if decision.get('hard_rejected') else '否'}；{decision.get('reason') or ''}"]
+    for judgement in decision.get("judgements", []):
+        if not isinstance(judgement, dict):
+            continue
+        lines.append(
+            f"{judgement.get('kind')}={judgement.get('value')} "
+            f"[{judgement.get('polarity')}/{judgement.get('strength')}] "
+            f"{judgement.get('status')}；问题原文：{judgement.get('source_text') or '—'}；"
+            f"候选正文：{judgement.get('matched_text') or '未明确提及'}；"
+            f"{judgement.get('reason') or ''}"
+        )
+    return "\n".join(lines)
 
 
 class _CandidateStage(QWidget):
@@ -155,9 +175,13 @@ class _CandidateStage(QWidget):
             f"路径：{item.get('file_path') or ''}\n"
             f"位置：{item.get('location') or ''}\n"
             f"内容块 ID：{item.get('chunk_id') or ''}\n"
+            f"证据来源：{item.get('source_count') or 1} 处；成员块：{', '.join(item.get('member_chunk_ids') or [])}\n"
+            f"去重状态：{item.get('dedup_status') or '未执行'}；代表：{item.get('representative_chunk_id') or '—'}\n"
+            f"来源明细：{json.dumps(item.get('sources') or [], ensure_ascii=False)}\n"
             f"来源类型：{item.get('source_type') or ''}\n"
             f"排名与分数：{_score_summary(item)}\n"
             f"处理结果：{item.get('reason') or ''}\n\n"
+            f"业务条件判断：\n{_constraint_details(item)}\n\n"
             f"正文：\n{item.get('text') or ''}"
         )
 
@@ -173,9 +197,13 @@ class _CandidateStage(QWidget):
                 f"路径：{item.get('file_path') or ''}\n"
                 f"位置：{item.get('location') or ''}\n"
                 f"内容块 ID：{item.get('chunk_id') or ''}\n"
+                f"证据来源：{item.get('source_count') or 1} 处；成员块：{', '.join(item.get('member_chunk_ids') or [])}\n"
+                f"去重状态：{item.get('dedup_status') or '未执行'}；代表：{item.get('representative_chunk_id') or '—'}\n"
+                f"来源明细：{json.dumps(item.get('sources') or [], ensure_ascii=False)}\n"
                 f"来源类型：{item.get('source_type') or ''}\n"
                 f"排名与分数：{_score_summary(item)}\n"
                 f"处理结果：{item.get('reason') or ''}\n"
+                f"业务条件判断：\n{_constraint_details(item)}\n"
                 f"正文：\n{item.get('text') or ''}"
             )
         return "\n\n".join(sections)
@@ -233,13 +261,14 @@ class RagDiagnosticDialog(QDialog):
         )
         self.deduplicated = self._add_candidates(
             "去重结果",
-            "算法：RRF 后、BGE 重排前，按内容块 ID、正文哈希和同文档三字片段相似度去除重复内容。"
-            "不同文档的相同正文会保留，避免误删版本差异。",
+            "算法：RRF 后、BGE 重排前，依次按内容块 ID、全局正文哈希、同文档三字片段相似度处理。"
+            "规范化后完全相同的正文合并来源，只占一个候选名额；数量截断单独标记。",
         )
         self.rerank = self._add_candidates(
             "重排结果",
             "算法：本地 Cross-Encoder 同时阅读问题和候选正文，按相关性分数排序。"
-            "此处保留完整重排候选，业务条件检查后才按最终 TopK 截断；分数不是严格概率。",
+            "同时参考前置检索名次和通用的直接回答支持度。此处保留完整重排候选，"
+            "业务条件检查后才按最终 TopK 截断；分数不是严格概率。",
         )
         self.constraints = self._add_candidates(
             "条件检查",
@@ -267,7 +296,7 @@ class RagDiagnosticDialog(QDialog):
         )
         self.dedup_text = self._add_text(
             "去重明细",
-            "这里显示每个被移除重复内容块对应的保留块、去重规则和相似度。",
+            "这里逐条显示保留、精确正文合并、近似重复和数量截断的真实处置原因。",
         )
         self.draft_text = self._add_text(
             "答案初稿",
@@ -351,11 +380,7 @@ class RagDiagnosticDialog(QDialog):
         stages = self._diagnostic_payload.setdefault("stages", {})
         if isinstance(stages, dict):
             stage_name = str(payload.get("stage") or "unknown")
-            safe_payload = {
-                key: value
-                for key, value in payload.items()
-                if key not in {"llm_context", "draft_answer", "reviewed_answer", "api_request", "review_request"}
-            }
+            safe_payload = self._sanitize_export(payload)
             for key in (
                 "lexical_candidates", "vector_candidates", "fused_candidates",
                 "deduplicated_candidates", "reranked_candidates",
@@ -400,7 +425,7 @@ class RagDiagnosticDialog(QDialog):
             self.query_plan_text.setPlainText(
                 json.dumps(query_plan, ensure_ascii=False, indent=2)
             )
-        duplicate_records = payload.get("duplicate_records")
+        duplicate_records = payload.get("candidate_dispositions") or payload.get("duplicate_records")
         if isinstance(duplicate_records, list):
             self.dedup_text.setPlainText(
                 json.dumps(duplicate_records, ensure_ascii=False, indent=2)
@@ -508,12 +533,24 @@ class RagDiagnosticDialog(QDialog):
     def _safe_candidate(value: object) -> dict[str, object]:
         if not isinstance(value, dict):
             return {}
-        # 导出时不包含正文和绝对路径；用户可另用完整诊断文本主动附上正文。
-        return {
-            key: item
-            for key, item in value.items()
-            if key not in {"text", "file_path"}
+        return RagDiagnosticDialog._sanitize_export(value)
+
+    @staticmethod
+    def _sanitize_export(value: object) -> object:
+        """递归移除嵌套来源、上下文条目中的正文、路径和密钥。"""
+        hidden = {
+            "text", "raw_text", "included_text", "matched_text", "file_path",
+            "api_key", "llm_context", "draft_answer", "reviewed_answer",
+            "api_request", "review_request",
         }
+        if isinstance(value, dict):
+            return {
+                key: RagDiagnosticDialog._sanitize_export(item)
+                for key, item in value.items() if key not in hidden
+            }
+        if isinstance(value, (list, tuple)):
+            return [RagDiagnosticDialog._sanitize_export(item) for item in value]
+        return value
 
     def diagnostic_json(self) -> dict[str, object]:
         payload = json.loads(json.dumps(self._diagnostic_payload, ensure_ascii=False, default=str))

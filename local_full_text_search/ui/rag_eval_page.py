@@ -7,6 +7,7 @@ from typing import Any
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QCheckBox,
     QComboBox,
     QFileDialog,
     QFrame,
@@ -86,6 +87,11 @@ class RagEvalPage(QWidget):
         self.mode.currentIndexChanged.connect(self._update_mode_note)
         options.addWidget(QLabel("运行模式"))
         options.addWidget(self.mode)
+        self.allow_snapshot_mismatch = QCheckBox("允许快照不一致（仅诊断）")
+        self.allow_snapshot_mismatch.setToolTip(
+            "明确允许使用当前已发布 AI 索引评测旧版本 Gold。报告仍会保留红色版本警告，结果不应直接作为同版本正式指标。"
+        )
+        options.addWidget(self.allow_snapshot_mismatch)
         options.addSpacing(12)
         options.addWidget(QLabel("题号筛选"))
         self.case_filter = QLineEdit()
@@ -249,7 +255,7 @@ class RagEvalPage(QWidget):
         return table
 
     def _load_default_dataset(self) -> None:
-        fixture = Path(__file__).resolve().parents[2] / "tests" / "rag" / "fixtures" / "rag_gold_v1.jsonl"
+        fixture = Path(__file__).resolve().parents[2] / "tests" / "rag" / "fixtures" / "rag_gold_v2_review.json"
         if fixture.is_file():
             self.dataset_path.setText(str(fixture))
             self._refresh_dataset_preview()
@@ -284,7 +290,7 @@ class RagEvalPage(QWidget):
 
     def _update_mode_note(self) -> None:
         if self.mode.currentData() == "full":
-            self.mode_note.setText("完整问答会逐题调用设置中已保存的 LLM 配置；如果启用了答案二次复核，每题还会产生复核请求。不会在界面显示或写出 API Key。")
+            self.mode_note.setText("完整问答每题调用 LLM 生成答案，并额外调用一次 LLM 裁判对照人工金标；启用答案二次复核时还会追加复核请求。临时网络错误最多自动重试 3 次。不会显示或写出 API Key。")
         else:
             self.mode_note.setText("只测本地分析、关键词/向量召回、融合、重排与证据筛选，不读取 API Key，也不调用 LLM。")
 
@@ -296,6 +302,7 @@ class RagEvalPage(QWidget):
             mode=str(self.mode.currentData()),
             case_ids=ids,
             output_root=Path(output) if output else None,
+            allow_snapshot_mismatch=self.allow_snapshot_mismatch.isChecked(),
         )
 
     def _request_preflight(self) -> None:
@@ -311,7 +318,7 @@ class RagEvalPage(QWidget):
             answer = QMessageBox.question(
                 self,
                 "确认运行完整问答评测",
-                "将使用已保存的 LLM 配置逐题生成答案。启用了二次复核时，每题还会追加一次 API 请求。是否继续？",
+                "将逐题调用 LLM 生成答案，并额外调用 LLM 裁判核查金标；启用二次复核时还会追加请求。临时网络错误每个请求最多自动重试 3 次。是否继续？",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
                 QMessageBox.StandardButton.Cancel,
             )
@@ -330,6 +337,7 @@ class RagEvalPage(QWidget):
         self.browse_dataset_button.setEnabled(not busy)
         self.browse_output_button.setEnabled(not busy)
         self.mode.setEnabled(not busy)
+        self.allow_snapshot_mismatch.setEnabled(not busy)
         self.case_filter.setEnabled(not busy)
         self.output_path.setEnabled(not busy)
         self.dataset_path.setEnabled(not busy)
@@ -343,9 +351,16 @@ class RagEvalPage(QWidget):
         event_type = str(payload.get("type") or "")
         if event_type == "preflight_complete":
             coverage = payload.get("coverage") or {}
+            prefix = (
+                "⚠ 已允许快照不一致，本次仅用于诊断当前索引\n"
+                "正式指标仍需让 Gold 的 corpus_snapshot 与 AI 索引一致。\n"
+                if coverage.get("snapshot_override")
+                else "测试集与 AI 索引检查通过\n"
+            )
             self.overview.setPlainText(
-                "測試集與 AI 索引檢查通過\n"
-                f"AI 索引：{payload.get('bundle_id', '')}\n"
+                prefix
+                + f"AI 索引：{payload.get('bundle_id', '')}\n"
+                f"Gold 声明索引：{', '.join(coverage.get('expected_bundle_ids', [])) or '未声明'}\n"
                 f"題數：{coverage.get('case_count', 0)}（已審核 {coverage.get('reviewed_case_count', 0)}）\n"
                 f"Gold 正證據定位：{coverage.get('positive_evidence_located', 0)}/{coverage.get('positive_evidence_total', 0)}\n"
                 f"需要人工確認的證據映射：{coverage.get('evidence_needing_review', 0)}\n"

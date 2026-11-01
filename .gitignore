@@ -49,6 +49,7 @@ tmp-frozen-runtime-check/
 tmp-test-data*/
 tmp-test-temp/
 output/pdf/
+reports/
 *_validation_result.json
 index_status_layout_screenshots/
 repair_validation/

@@ -209,8 +209,9 @@ def test_index_manager_unregisters_when_run_start_fails(
         raise RuntimeError("injected run start failure")
 
     monkeypatch.setattr(database, "start_index_run", fail_start)
-    with pytest.raises(RuntimeError, match="injected run start failure"):
-        manager.index_root(root_id)
+    # 批次遥测是尽力写入；失败不应在文件耗时写入时触发外键错误。
+    summary = manager.index_root(root_id)
+    assert summary.failed == 0
 
     snapshot = get_search_index_coordinator().snapshot()
     assert snapshot.state == IDLE

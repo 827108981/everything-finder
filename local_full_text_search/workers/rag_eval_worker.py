@@ -12,6 +12,7 @@ from local_full_text_search.core.index_generation_store import IndexGenerationSt
 from local_full_text_search.core.task_manager import CancelToken
 from local_full_text_search.rag.answer_service import AnswerService
 from local_full_text_search.rag.evaluation.runner import RagEvalConfig, RagEvalRunner
+from local_full_text_search.rag.evaluation.answer_judge import GoldAnswerJudge
 from local_full_text_search.rag.generation.openai_compatible import OpenAICompatibleGateway
 from local_full_text_search.rag.index_store import RagIndexStore
 from local_full_text_search.rag.model_manager import LocalModelManager, ModelSpec
@@ -96,9 +97,13 @@ class RagEvalWorker(QObject):
                 revision=self.settings.rag_reranker_revision,
                 batch_size=self.settings.rag_reranker_batch_size,
                 max_length=self.settings.rag_reranker_max_length,
+                cross_encoder_weight=getattr(self.settings, "rag_rerank_cross_encoder_weight", 0.65),
+                retrieval_prior_weight=getattr(self.settings, "rag_rerank_retrieval_prior_weight", 0.05),
+                answer_support_weight=getattr(self.settings, "rag_rerank_answer_support_weight", 0.30),
+                max_rank_drop=getattr(self.settings, "rag_rerank_max_rank_drop", 3),
             )
             secret_store = WindowsCredentialSecretStore()
-            gateway = OpenAICompatibleGateway()
+            api_key = ""
 
             if self.config.mode == "full":
                 self.current_stage = "checking_credentials"
@@ -111,6 +116,20 @@ class RagEvalWorker(QObject):
                 runner.redaction_values = tuple(self._secret_values)
 
             def service_factory(callback):
+                llm_stage = ["generation"]
+
+                def record(payload):
+                    stage = str(payload.get("stage") or "")
+                    if stage == "generating":
+                        llm_stage[0] = "generation"
+                    elif stage == "reviewing":
+                        llm_stage[0] = "review"
+                    callback(payload)
+
+                gateway = OpenAICompatibleGateway(
+                    max_transient_retries=3 if self.config.mode == "full" else 0,
+                    retry_callback=lambda payload: record({**payload, "stage": llm_stage[0] + "_retry"}),
+                )
                 return AnswerService(
                     IndexGenerationStore(self.generation_base_path),
                     RagIndexStore(self.generation_base_path.parent / "rag"),
@@ -119,11 +138,22 @@ class RagEvalWorker(QObject):
                     gateway,
                     secret_store,
                     self.settings,
-                    progress_callback=callback,
+                    progress_callback=record,
                 )
 
+            def judge_factory(callback):
+                gateway = OpenAICompatibleGateway(
+                    max_transient_retries=3,
+                    retry_callback=lambda payload: callback({**payload, "stage": "gold_judge_retry"}),
+                )
+                return GoldAnswerJudge(gateway, self.settings, api_key)
+
             self.current_stage = "evaluating_cases"
-            self.partial_result = runner.run(self.config, prepared, service_factory)
+            self.partial_result = runner.run(
+                self.config, prepared, service_factory,
+                judge_factory=judge_factory if self.config.mode == "full" else None,
+                preparation_duration_ms=int((time.monotonic() - started) * 1000),
+            )
             self.finished.emit(self.partial_result)
         except CancelledError:
             self.partial_result = runner.last_report

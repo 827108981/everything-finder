@@ -3,6 +3,7 @@
 --extra-index-url https://download.pytorch.org/whl/cpu
 chromadb>=1.0,<2
 huggingface-hub>=0.30,<2
+jieba==0.42.1
 kubernetes>=28.1,<35
 numpy>=1.26,<3
 openai>=1.80,<3

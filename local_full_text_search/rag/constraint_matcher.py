@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 
 from local_full_text_search.rag.models import (
     CandidateDecision,
     ConstraintJudgement,
     ConstraintKind,
+    ConstraintPolarity,
     ConstraintStatus,
+    ConstraintStrength,
     EvidenceChunk,
     QueryConstraint,
     QueryPlan,
@@ -42,46 +45,118 @@ class ConstraintMatcher:
         self, plan: QueryPlan, candidates: Sequence[EvidenceChunk]
     ) -> tuple[EvidenceChunk, ...]:
         for item in candidates:
+            filenames = "\n".join(source.filename for source in item.all_sources)
+            applicability_text = "\n".join((
+                item.chunk.text,
+                filenames,
+            ))
             judgements = tuple(
-                self._judge(constraint, item.chunk.text)
+                self._judge(constraint, applicability_text, item.chunk.text, filenames,
+                            plan.lexical_terms)
                 for constraint in plan.constraints
             )
-            conflicts = sum(
-                1 for result in judgements
-                if result.constraint.required and result.status is ConstraintStatus.CONFLICT
-            )
-            matches = sum(
-                1 for result in judgements
-                if result.constraint.required and result.status is ConstraintStatus.MATCH
-            )
-            unknown = sum(
-                1 for result in judgements
-                if result.constraint.required and result.status is ConstraintStatus.UNKNOWN
-            )
-            total = max(1, matches + unknown + conflicts)
-            item.constraint_score = (matches - conflicts * 2) / total
+            hard = tuple(result for result in judgements if result.constraint.is_hard)
+            soft = tuple(result for result in judgements
+                         if result.constraint.polarity is ConstraintPolarity.AFFIRMED
+                         and result.constraint.strength is ConstraintStrength.SOFT)
+            conflicts = sum(result.status is ConstraintStatus.CONFLICT for result in hard)
+            matches = sum(result.status is ConstraintStatus.MATCH for result in hard)
+            unknown = sum(result.status is ConstraintStatus.UNKNOWN for result in hard)
+            soft_matches = sum(result.status is ConstraintStatus.MATCH for result in soft)
+            soft_conflicts = sum(result.status is ConstraintStatus.CONFLICT for result in soft)
+            # 软冲突仅做一个确定性的排序扣分；不改变 accepted。
+            item.constraint_score = float(matches * 2 + soft_matches - soft_conflicts)
+            conflict_detail = next((
+                f"{result.constraint.kind.value}={result.constraint.value}：问题“{result.constraint.source_text}”，正文“{result.matched_text}”"
+                for result in hard if result.status is ConstraintStatus.CONFLICT
+            ), "")
             item.constraint_decision = CandidateDecision(
                 stable_chunk_id=item.chunk.stable_chunk_id,
                 accepted=conflicts == 0,
-                reason=("与问题条件冲突" if conflicts else "条件一致" if matches else "正文未明确说明条件"),
+                reason=(
+                    f"硬条件冲突：{conflict_detail}" if conflicts else
+                    "适用性未知，保留为背景但不能单独支撑确定性结论" if unknown else
+                    f"软条件冲突 {soft_conflicts} 项，已降权但保留" if soft_conflicts else
+                    "条件一致" if matches or soft_matches else "正文未明确说明条件"
+                ),
                 judgements=judgements,
                 required_match_count=matches,
                 required_unknown_count=unknown,
                 required_conflict_count=conflicts,
+                soft_match_count=soft_matches,
+                soft_conflict_count=soft_conflicts,
+                support_status="conflict" if conflicts else "unknown" if unknown else "supported",
+                support_spans=tuple(result.matched_text for result in hard
+                                    if result.status is ConstraintStatus.MATCH and result.matched_text),
             )
-        # 场景明确一致的证据优先；在同一等级内保留 Cross-Encoder 排名。
+        # 开放问题没有可验证的适用性排序依据，保留重排原序。
+        if not plan.constraints:
+            return tuple(candidates)
+        if not any(item.is_hard for item in plan.constraints):
+            # 只有软条件时仍按条件分数排序，保持原有的“可能匹配优先”行为。
+            return tuple(
+                sorted(
+                    candidates,
+                    key=lambda item: (
+                        -float(item.constraint_score or 0.0),
+                        -float(item.rerank_score_combined
+                               if item.rerank_score_combined is not None
+                               else item.rerank_score or 0.0),
+                        item.chunk.stable_chunk_id,
+                    ),
+                )
+            )
+        # 场景明确一致的证据优先；条件判断相同时稳定保留综合重排顺序。
         return tuple(
             sorted(
                 candidates,
                 key=lambda item: (
+                    bool(item.constraint_decision and not item.constraint_decision.accepted),
                     bool(item.constraint_decision and item.constraint_decision.required_unknown_count),
-                    -float(item.rerank_score or 0.0),
-                    item.chunk.stable_chunk_id,
+                    -float(item.constraint_score or 0.0),
                 ),
             )
         )
 
-    def _judge(self, constraint: QueryConstraint, text: str) -> ConstraintJudgement:
+    def _judge(self, constraint: QueryConstraint, text: str,
+               body: str = "", filenames: str = "",
+               lexical_terms: tuple[str, ...] = ()) -> ConstraintJudgement:
+        if constraint.kind is ConstraintKind.TOPIC:
+            topic = constraint.value.casefold()
+            title_match = topic in filenames.casefold()
+            anchors = tuple(term for term in lexical_terms
+                            if len(term) >= 3 and topic not in term.casefold()
+                            and term.casefold() in body.casefold())
+            body_match = any(
+                topic in line.casefold() and any(anchor.casefold() in line.casefold() for anchor in anchors)
+                for line in re.split(r"[。；;\n]", body)
+            )
+            supported = body_match or (title_match and bool(anchors))
+            return ConstraintJudgement(
+                constraint,
+                ConstraintStatus.MATCH if supported else ConstraintStatus.UNKNOWN,
+                "正文直接确认问题主题" if body_match else
+                "来源标题确认范围，且同一正文包含问题中的检索对象" if supported else
+                "来源及正文未共同确认问题主题",
+                constraint.value if body_match else
+                f"来源标题:{constraint.value}；正文:{anchors[0]}" if supported else "",
+            )
+        if constraint.kind is ConstraintKind.DEVICE:
+            target = "".join(constraint.value.casefold().split())
+            lines = re.split(r"[。；;\n]", body)
+            supported_line = next((line for line in lines
+                                   if target in "".join(line.casefold().split())
+                                   and sum(line.count(suffix) for suffix in
+                                           ("诊断仪", "分析仪", "检测仪", "治疗仪")) <= 1), "")
+            title_only = target in "".join(filenames.casefold().split())
+            return ConstraintJudgement(
+                constraint,
+                ConstraintStatus.MATCH if supported_line else ConstraintStatus.UNKNOWN,
+                "正文局部确认设备" if supported_line else
+                "仅来源标题提示设备，正文适用性未确认" if title_only else
+                "正文未能局部确认该设备，或同段包含多个设备",
+                constraint.value if supported_line else "",
+            )
         if constraint.kind is ConstraintKind.OBJECT:
             found = constraint.value in text
             return ConstraintJudgement(

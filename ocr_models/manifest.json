@@ -19,8 +19,8 @@
     },
     {
       "path": "PP-OCRv4_mobile_det/inference.yml",
-      "size": 956,
-      "sha256": "7a71be98abcc1038fb0d10fad3efb58407fcd5ac4ac3fb45a5544c143bc4763e"
+      "size": 903,
+      "sha256": "4f5bd0def48e20194d87d4c184a3ae3007a1299de7fed0ef763d3e7e873e77f6"
     },
     {
       "path": "PP-OCRv4_mobile_rec/inference.json",
@@ -34,9 +34,9 @@
     },
     {
       "path": "PP-OCRv4_mobile_rec/inference.yml",
-      "size": 60209,
-      "sha256": "018c94645678dc492754754291705c4999f35c6e5be854a42b4f918fefd06ab4"
+      "size": 53543,
+      "sha256": "1207e8ba3d3dad6b99115f7febf515f5ffc0d87ed77366d7a4b4b3f1709c005d"
     }
   ],
-  "combined_digest": "6398e3014373e452fdfb804fb56c28724dc2c0938d6dd01c46407de8d64cec93"
+  "combined_digest": "d6fbcb4b9a3c228ef0c3af520cb18a58da33d007d80802e7170c1d32a38b033c"
 }

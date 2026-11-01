@@ -29,6 +29,10 @@ class RagPage(QWidget):
     def __init__(self) -> None:
         super().__init__()
         self._rag_enabled = False
+        self._busy = False
+        self._models_ready = False
+        self._index_ready = False
+        self._embedding_repo_id = ""
         self.setObjectName("Page")
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 20, 24, 20)
@@ -45,6 +49,11 @@ class RagPage(QWidget):
         intro.setObjectName("MutedText")
         layout.addWidget(heading)
         layout.addWidget(intro)
+
+        self.embedding_model_label = QLabel("本地向量模型：等待读取设置")
+        self.embedding_model_label.setObjectName("InlineStatus")
+        self.embedding_model_label.setWordWrap(True)
+        layout.addWidget(self.embedding_model_label)
 
         controls = QHBoxLayout()
         self.download_button = QPushButton("下载 / 校验模型")
@@ -107,9 +116,33 @@ class RagPage(QWidget):
 
     def set_rag_enabled(self, enabled: bool) -> None:
         self._rag_enabled = bool(enabled)
-        self.ask_button.setEnabled(self._rag_enabled and not self.stop_button.isEnabled())
+        self._update_action_states()
         if not self._rag_enabled:
             self.status_label.setText("资料智能问答未启用，可在设置页开启")
+
+    def set_embedding_model(
+        self, repo_id: str, label: str, dimension: int = 0, *, invalidate_index: bool = False,
+    ) -> None:
+        changed = bool(self._embedding_repo_id and self._embedding_repo_id != str(repo_id))
+        self._embedding_repo_id = str(repo_id)
+        dimension_text = f" · {int(dimension)} 维" if dimension else ""
+        self.embedding_model_label.setText(
+            f"当前配置：{label}{dimension_text}\n{self._embedding_repo_id}"
+        )
+        if changed and invalidate_index:
+            self._index_ready = False
+            self.status_label.setText(
+                "向量模型设置已改变，请先下载 / 校验模型，再重新构建完整 AI 索引"
+            )
+        self._update_action_states()
+
+    def _update_action_states(self) -> None:
+        self.download_button.setEnabled(not self._busy)
+        self.build_button.setEnabled(not self._busy)
+        self.ask_button.setEnabled(
+            not self._busy and self._rag_enabled and self._index_ready
+        )
+        self.stop_button.setEnabled(self._busy)
 
     def _ask(self) -> None:
         question = self.question.toPlainText().strip()
@@ -126,12 +159,12 @@ class RagPage(QWidget):
             self.source_open_requested.emit(path, payload)
 
     def set_busy(self, busy: bool, label: str = "正在处理") -> None:
-        self.download_button.setEnabled(not busy)
-        self.build_button.setEnabled(not busy)
-        self.ask_button.setEnabled(not busy and self._rag_enabled)
-        self.stop_button.setEnabled(busy)
+        self._busy = bool(busy)
+        self._update_action_states()
         self.progress.setVisible(busy)
         if busy:
+            self.progress.setRange(0, 0)
+            self.progress.setFormat("正在准备…")
             self.status_label.setText(label)
 
     def show_progress(self, payload: object) -> None:
@@ -139,9 +172,54 @@ class RagPage(QWidget):
             self.diagnostics_dialog.update_progress(payload)
             message = str(payload.get("message") or payload.get("model") or payload.get("stage") or "正在处理")
             count = payload.get("chunk_count")
-            if count is not None:
+            total = payload.get("total_chunk_count")
+            if count is not None and total is not None and int(total) > 0:
+                current = max(0, min(int(count), int(total)))
+                total_count = int(total)
+                percent = float(payload.get("percent") or current * 100 / total_count)
+                self.progress.setRange(0, 1000)
+                self.progress.setValue(max(0, min(1000, int(round(percent * 10)))))
+                self.progress.setFormat(f"{current:,} / {total_count:,}（{percent:.1f}%）")
+                message += f" · {current:,} / {total_count:,} 个内容块（{percent:.1f}%）"
+                eta = payload.get("eta_seconds")
+                if eta is not None and int(eta) >= 0:
+                    message += f" · 预计剩余 {self._format_duration(int(eta))}"
+                resumed = int(payload.get("resumed_chunk_count") or 0)
+                if resumed:
+                    message += f" · 已恢复 {resumed:,} 个"
+            elif count is not None:
                 message += f" · 已处理 {int(count):,} 个内容块"
+            else:
+                parent_count = payload.get("processed_parent_chunks")
+                parent_total = payload.get("total_parent_chunks")
+                if parent_count is not None and parent_total is not None and int(parent_total) > 0:
+                    current = max(0, min(int(parent_count), int(parent_total)))
+                    total_count = int(parent_total)
+                    percent = float(payload.get("percent") or current * 100 / total_count)
+                    self.progress.setRange(0, 1000)
+                    self.progress.setValue(max(0, min(1000, int(round(percent * 10)))))
+                    self.progress.setFormat(
+                        f"细粒度索引 {current:,} / {total_count:,}（{percent:.1f}%）"
+                    )
+                    message += (
+                        f" · 父内容块 {current:,} / {total_count:,}（{percent:.1f}%）"
+                        f" · 已生成 {int(payload.get('unit_count') or 0):,} 个细粒度向量单元"
+                    )
+                    eta = payload.get("eta_seconds")
+                    if eta is not None and int(eta) >= 0:
+                        message += f" · 预计剩余 {self._format_duration(int(eta))}"
             self.status_label.setText(message)
+
+    @staticmethod
+    def _format_duration(seconds: int) -> str:
+        seconds = max(0, int(seconds))
+        hours, remainder = divmod(seconds, 3600)
+        minutes, secs = divmod(remainder, 60)
+        if hours:
+            return f"{hours} 小时 {minutes} 分钟"
+        if minutes:
+            return f"{minutes} 分钟 {secs} 秒"
+        return f"{secs} 秒"
 
     def start_diagnostics(self, request_id: str, question: str) -> None:
         self.diagnostics_dialog.start_query(request_id, question)
@@ -152,13 +230,21 @@ class RagPage(QWidget):
     def show_build_summary(self, summary: object) -> None:
         count = int(getattr(summary, "chunk_count", 0) or 0)
         generation = int(getattr(summary, "source_generation", 0) or 0)
+        self._index_ready = True
+        self._models_ready = True
+        self._update_action_states()
+        unit_count = int(getattr(summary, "unit_count", 0) or 0)
+        count_text = (
+            f"{count:,} 个父内容块 · {unit_count:,} 个细粒度向量"
+            if unit_count else f"{count:,} 个内容块"
+        )
         if bool(getattr(summary, "unchanged", False)):
             self.status_label.setText(
-                f"资料未变化，沿用已有 AI 索引 · 来源 generation {generation} · {count:,} 个内容块"
+                f"资料未变化，沿用已有 AI 索引 · 来源 generation {generation} · {count_text}"
             )
             return
         self.status_label.setText(
-            f"AI 索引已就绪 · 来源 generation {generation} · {count:,} 个内容块"
+            f"AI 索引已就绪 · 来源 generation {generation} · {count_text}"
         )
 
     def show_local_state(self, state: object) -> None:
@@ -167,9 +253,16 @@ class RagPage(QWidget):
             return
         models_ready = bool(state.get("models_ready"))
         index_ready = bool(state.get("index_ready"))
+        self._models_ready = models_ready
+        self._index_ready = index_ready
+        self._update_action_states()
+        configured_model = str(
+            state.get("configured_embedding_model") or self._embedding_repo_id or "BGE"
+        )
+        index_model = str(state.get("index_embedding_model") or "")
         if models_ready and index_ready:
             message = (
-                "已复用本地 BGE 模型和已发布 AI 索引"
+                f"已复用本地 {configured_model} 模型和已发布 AI 索引"
                 f" · {int(state.get('chunk_count') or 0):,} 个内容块"
                 f" · {int(state.get('vector_count') or 0):,} 个 Chroma 向量"
             )
@@ -179,9 +272,13 @@ class RagPage(QWidget):
             return
         messages = []
         if not models_ready:
-            messages.append("本地 BGE 模型不完整，请点击“下载 / 校验模型”")
+            messages.append(
+                f"本地 {configured_model} 模型不完整，请点击“下载 / 校验模型”"
+            )
         if not index_ready:
             detail = str(state.get("index_error") or "尚未构建 AI 索引")
+            if index_model and index_model != configured_model:
+                detail += f"（当前索引：{index_model}）"
             messages.append(f"本地 AI 索引不可用：{detail}")
         self.status_label.setText("；".join(messages))
 

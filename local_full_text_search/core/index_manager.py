@@ -4152,15 +4152,16 @@ class IndexManager:
                             len(link[0]) for link in cache_links
                         ),
                     )
-            try:
-                self.db.record_file_metrics(run_id, file_timings)
-            except sqlite3.OperationalError as exc:
-                if not _is_database_busy_error(exc):
-                    raise
-                logger.warning(
-                    "File timing telemetry deferred because SQLite is busy: run_id=%s",
-                    run_id,
-                )
+            if run_recorded:
+                try:
+                    self.db.record_file_metrics(run_id, file_timings)
+                except sqlite3.OperationalError as exc:
+                    if not _is_database_busy_error(exc):
+                        raise
+                    logger.warning(
+                        "File timing telemetry deferred because SQLite is busy: run_id=%s",
+                        run_id,
+                    )
 
             if defer_fts and (all_jobs or resumed_full_batch or requires_full_rebuild):
                 self._emit(

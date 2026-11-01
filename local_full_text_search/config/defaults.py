@@ -7,7 +7,7 @@ from .constants import DEFAULT_EXCLUDED_DIRS, DEFAULT_EXCLUDED_FILE_PATTERNS
 
 @dataclass(slots=True)
 class AppSettings:
-    settings_version: int = 13
+    settings_version: int = 15
     default_search_mode: str = "exact"
     case_sensitive: bool = False
     auto_search: bool = False
@@ -92,6 +92,21 @@ class AppSettings:
     save_search_history: bool = True
     # RAG remains optional: absent RAG packages or models never block ordinary search.
     rag_enabled: bool = False
+    rag_lexical_multi_route_enabled: bool = False
+    # V2 在完成真实评测前保持显式选择，避免升级后悄悄改变用户结果。
+    rag_lexical_backend: str = "legacy"
+    rag_lexical_title_weight: float = 0.2
+    rag_lexical_complete_match_enabled: bool = True
+    rag_lexical_k1: float = 1.2
+    rag_lexical_b: float = 0.75
+    rag_vector_focused_query_enabled: bool = False
+    # legacy 使用父 chunk 单向量；unit_v2 使用独立细粒度索引并归并回父 chunk。
+    rag_vector_backend: str = "legacy"
+    rag_vector_unit_target_tokens: int = 128
+    rag_vector_unit_max_tokens: int = 192
+    rag_vector_unit_overlap_tokens: int = 32
+    rag_vector_unit_include_source_context: bool = True
+    rag_vector_unit_oversample_factor: int = 8
     rag_embedding_repo_id: str = "BAAI/bge-small-zh-v1.5"
     rag_embedding_revision: str = "7999e1d3359715c523056ef9478215996d62a620"
     rag_reranker_repo_id: str = "BAAI/bge-reranker-base"
@@ -99,7 +114,10 @@ class AppSettings:
     rag_chunk_target_chars: int = 900
     rag_chunk_max_chars: int = 1200
     rag_chunk_overlap_chars: int = 120
+    # 本机 BGE Large 实测 16 比 32 更快；运行时遇到内存不足仍会自动减半重试。
     rag_embedding_batch_size: int = 16
+    rag_embedding_length_bucketing: bool = True
+    rag_resume_partial_build: bool = True
     rag_index_write_batch_size: int = 128
     rag_hnsw_m: int = 16
     rag_hnsw_construction_ef: int = 200
@@ -107,6 +125,11 @@ class AppSettings:
     rag_max_chunks: int = 200_000
     rag_reranker_batch_size: int = 4
     rag_reranker_max_length: int = 512
+    # 重排同时参考 Cross-Encoder、前置检索名次和通用答案支持度。
+    rag_rerank_cross_encoder_weight: float = 0.65
+    rag_rerank_retrieval_prior_weight: float = 0.05
+    rag_rerank_answer_support_weight: float = 0.30
+    rag_rerank_max_rank_drop: int = 3
     rag_lexical_top_k: int = 50
     rag_vector_top_k: int = 50
     rag_fusion_top_k: int = 30
@@ -157,7 +180,7 @@ class AppSettings:
         if previous_version < 13 and "rag_answer_review_enabled" not in data:
             # 避免升级后静默增加每次问答的 LLM 调用次数；用户可在设置页主动开启。
             values["rag_answer_review_enabled"] = False
-        values["settings_version"] = 13
+        values["settings_version"] = 15
         return cls(**values)
 
 

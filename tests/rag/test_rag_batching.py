@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+import sqlite3
 
 import pytest
 
@@ -16,6 +17,7 @@ from local_full_text_search.rag.index_builder import RagIndexBuilder
 from local_full_text_search.rag.index_store import RagIndexStore
 from local_full_text_search.rag.models import RagChunk, SourceRef
 from local_full_text_search.rag.vector_store.chroma import ChromaVectorStore
+from local_full_text_search.rag.vector_index_store import VectorIndexStore
 
 
 @dataclass(frozen=True)
@@ -79,6 +81,7 @@ class _Embedding:
     model_id = "test/embedding"
     model_revision = "a" * 40
     dimension = 3
+    count_tokens = staticmethod(lambda text: len(str(text)) + 2)
 
     def __init__(self) -> None:
         self.call_sizes: list[int] = []
@@ -267,3 +270,264 @@ def test_cancelled_incremental_build_preserves_published_bundle(tmp_path: Path) 
     assert rag_store.active().bundle_id == first.bundle_id
     # Windows 上 Chroma 可能暂时持有候选文件句柄；关键是不切换发布清单。
     assert rag_store.active().path == Path(first.bundle_path)
+
+
+def test_cancelled_build_resumes_committed_batches(tmp_path: Path) -> None:
+    settings = AppSettings(
+        rag_embedding_batch_size=2,
+        rag_index_write_batch_size=2,
+        rag_resume_partial_build=True,
+    )
+    source_store = _SourceStore(tmp_path / "published-source.db")
+    rag_store = RagIndexStore(tmp_path / "rag")
+    chunks = _ChunkBuilder(5)
+    token = CancelToken()
+
+    def cancel_after_first_committed_batch(payload) -> None:
+        if payload.get("stage") == "embedding" and payload.get("chunk_count") == 2:
+            token.cancel()
+
+    with pytest.raises(CancelledError):
+        RagIndexBuilder(
+            source_store, rag_store, _Embedding(), settings,
+            block_reader=_BlockReader(), chunk_builder=chunks,
+        ).build(token, cancel_after_first_committed_batch)
+
+    candidates = list((tmp_path / "rag").glob("rag.g*"))
+    assert len(candidates) == 1
+    connection = sqlite3.connect(candidates[0] / "metadata.db")
+    try:
+        assert connection.execute("SELECT state FROM rag_meta").fetchone()[0] == "building"
+        assert connection.execute("SELECT COUNT(*) FROM rag_chunks").fetchone()[0] == 2
+    finally:
+        connection.close()
+
+    resumed_embedding = _Embedding()
+    progress = []
+    summary = RagIndexBuilder(
+        source_store, rag_store, resumed_embedding, settings,
+        block_reader=_BlockReader(), chunk_builder=chunks,
+    ).build(CancelToken(), progress.append)
+
+    assert resumed_embedding.call_sizes == [2, 1]
+    assert summary.chunk_count == 5
+    assert any(item.get("resumed_chunk_count") == 2 for item in progress)
+    assert rag_store.active().bundle_id == summary.bundle_id
+
+
+def test_partial_build_is_not_resumed_when_chunk_settings_change(tmp_path: Path) -> None:
+    first_settings = AppSettings(
+        rag_embedding_batch_size=2,
+        rag_index_write_batch_size=2,
+        rag_chunk_target_chars=900,
+        rag_resume_partial_build=True,
+    )
+    source_store = _SourceStore(tmp_path / "published-source.db")
+    rag_store = RagIndexStore(tmp_path / "rag")
+    chunks = _ChunkBuilder(5)
+    token = CancelToken()
+
+    def cancel_after_first_batch(payload) -> None:
+        if payload.get("stage") == "embedding" and payload.get("chunk_count") == 2:
+            token.cancel()
+
+    with pytest.raises(CancelledError):
+        RagIndexBuilder(
+            source_store, rag_store, _Embedding(), first_settings,
+            block_reader=_BlockReader(), chunk_builder=chunks,
+        ).build(token, cancel_after_first_batch)
+
+    changed_settings = AppSettings(
+        rag_embedding_batch_size=2,
+        rag_index_write_batch_size=2,
+        rag_chunk_target_chars=700,
+        rag_resume_partial_build=True,
+    )
+    embedding = _Embedding()
+    progress = []
+    RagIndexBuilder(
+        source_store, rag_store, embedding, changed_settings,
+        block_reader=_BlockReader(), chunk_builder=chunks,
+    ).build(CancelToken(), progress.append)
+
+    # 分块参数改变时不能续建候选，但完全相同的正文向量仍可由模型隔离缓存复用。
+    assert embedding.call_sizes == [2, 1]
+    assert not any(item.get("resumed_chunk_count") for item in progress)
+
+
+def test_embedding_batches_are_length_bucketed_and_reduce_on_memory_error(
+    tmp_path: Path,
+) -> None:
+    class _AdaptiveEmbedding(_Embedding):
+        def __init__(self) -> None:
+            super().__init__()
+            self.call_texts: list[list[str]] = []
+
+        def embed_documents(self, texts):
+            values = list(texts)
+            self.call_sizes.append(len(values))
+            self.call_texts.append(values)
+            if len(values) > 2:
+                raise RuntimeError("DefaultCPUAllocator: not enough memory")
+            return [[1.0, 0.0, 0.0] for _ in values]
+
+    settings = AppSettings(
+        rag_embedding_batch_size=4,
+        rag_index_write_batch_size=4,
+        rag_embedding_length_bucketing=True,
+    )
+    chunks = _ChunkBuilder(4)
+    chunks.text_overrides = {
+        0: "长" * 40,
+        1: "短",
+        2: "中" * 20,
+        3: "较短" * 3,
+    }
+    embedding = _AdaptiveEmbedding()
+    summary = RagIndexBuilder(
+        _SourceStore(tmp_path / "published-source.db"),
+        RagIndexStore(tmp_path / "rag"),
+        embedding,
+        settings,
+        block_reader=_BlockReader(),
+        chunk_builder=chunks,
+    ).build(CancelToken())
+
+    assert embedding.call_sizes == [4, 2, 2]
+    assert [len(text) for text in embedding.call_texts[1]] == [1, 6]
+    assert [len(text) for text in embedding.call_texts[2]] == [20, 40]
+    assert summary.chunk_count == 4
+
+
+def test_build_progress_reports_total_percent_and_eta(tmp_path: Path) -> None:
+    progress = []
+    summary = RagIndexBuilder(
+        _SourceStore(tmp_path / "published-source.db"),
+        RagIndexStore(tmp_path / "rag"),
+        _Embedding(),
+        AppSettings(rag_embedding_batch_size=2, rag_index_write_batch_size=2),
+        block_reader=_BlockReader(),
+        chunk_builder=_ChunkBuilder(3),
+    ).build(CancelToken(), progress.append)
+
+    embedding_updates = [item for item in progress if item.get("stage") == "embedding"]
+    assert summary.chunk_count == 3
+    assert embedding_updates[-1]["chunk_count"] == 3
+    assert embedding_updates[-1]["total_chunk_count"] == 3
+    assert embedding_updates[-1]["percent"] == pytest.approx(100.0)
+    assert "eta_seconds" in embedding_updates[-1]
+
+
+def test_unit_v2_skips_parent_vectors_and_atomically_attaches_unit_index(
+    tmp_path: Path,
+) -> None:
+    settings = AppSettings(
+        rag_vector_backend="unit_v2",
+        rag_embedding_batch_size=2,
+        rag_index_write_batch_size=2,
+        rag_vector_unit_target_tokens=16,
+        rag_vector_unit_max_tokens=32,
+        rag_vector_unit_overlap_tokens=4,
+    )
+    embedding = _Embedding()
+    rag_store = RagIndexStore(tmp_path / "rag")
+    summary = RagIndexBuilder(
+        _SourceStore(tmp_path / "published-source.db"),
+        rag_store,
+        embedding,
+        settings,
+        block_reader=_BlockReader(),
+        chunk_builder=_ChunkBuilder(3),
+    ).build(CancelToken())
+
+    active = rag_store.active()
+    assert summary.chunk_count == 3
+    assert summary.vector_count == 0
+    assert active.parent_vector_mode == "metadata_only"
+    assert active.vector_count == 0
+    assert active.vector_unit_directory
+    attached = VectorIndexStore(rag_store.root).attached(
+        active.bundle_id,
+        active.vector_unit_directory,
+        embedding_repo_id=embedding.model_id,
+        embedding_revision=embedding.model_revision,
+        embedding_dimension=embedding.dimension,
+        policy_fingerprint=active.vector_unit_policy_fingerprint,
+        index_fingerprint=active.vector_unit_index_fingerprint,
+    )
+    vectors = ChromaVectorStore(attached.chroma_path)
+    try:
+        assert attached.parent_chunk_count == 3
+        assert vectors.count() == attached.unit_count
+        assert sum(embedding.call_sizes) == attached.unit_count
+    finally:
+        vectors.close()
+    connection = sqlite3.connect(active.metadata_path)
+    try:
+        assert connection.execute("SELECT COUNT(*) FROM rag_vector_refs").fetchone()[0] == 0
+    finally:
+        connection.close()
+
+
+def test_unit_v2_failure_does_not_switch_parent_manifest(tmp_path: Path) -> None:
+    source_store = _SourceStore(tmp_path / "published-source.db")
+    rag_store = RagIndexStore(tmp_path / "rag")
+    chunks = _ChunkBuilder(2)
+    legacy = RagIndexBuilder(
+        source_store,
+        rag_store,
+        _Embedding(),
+        AppSettings(rag_vector_backend="legacy", rag_embedding_batch_size=2),
+        block_reader=_BlockReader(),
+        chunk_builder=chunks,
+    ).build(CancelToken())
+
+    class _FailingUnitEmbedding(_Embedding):
+        model_revision = "failing-revision"
+
+        def embed_documents(self, _texts):
+            raise RuntimeError("unit embedding failed")
+
+    with pytest.raises(RuntimeError, match="unit embedding failed"):
+        RagIndexBuilder(
+            source_store,
+            rag_store,
+            _FailingUnitEmbedding(),
+            AppSettings(
+                rag_vector_backend="unit_v2",
+                rag_embedding_batch_size=2,
+                rag_vector_unit_target_tokens=16,
+                rag_vector_unit_max_tokens=32,
+                rag_vector_unit_overlap_tokens=4,
+            ),
+            block_reader=_BlockReader(),
+            chunk_builder=chunks,
+        ).build(CancelToken())
+
+    assert rag_store.active().bundle_id == legacy.bundle_id
+
+
+def test_unit_v2_global_cache_embeds_repeated_text_once_across_write_batches(
+    tmp_path: Path,
+) -> None:
+    chunks = _ChunkBuilder(5)
+    chunks.text_overrides = {index: "完全相同的重复正文" for index in range(5)}
+    embedding = _Embedding()
+    RagIndexBuilder(
+        _SourceStore(tmp_path / "published-source.db"),
+        RagIndexStore(tmp_path / "rag"),
+        embedding,
+        AppSettings(
+            rag_vector_backend="unit_v2",
+            rag_embedding_batch_size=2,
+            rag_index_write_batch_size=2,
+            rag_vector_unit_target_tokens=64,
+            rag_vector_unit_max_tokens=96,
+            rag_vector_unit_overlap_tokens=8,
+            rag_vector_unit_include_source_context=False,
+        ),
+        block_reader=_BlockReader(),
+        chunk_builder=chunks,
+    ).build(CancelToken())
+
+    assert embedding.call_sizes == [1]

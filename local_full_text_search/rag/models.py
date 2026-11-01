@@ -82,13 +82,36 @@ class EvidenceChunk:
     chunk: RagChunk
     lexical_rank: int | None = None
     lexical_score: float | None = None
+    lexical_score_kind: str = ""
+    lexical_contributions: tuple[dict[str, object], ...] = ()
     vector_rank: int | None = None
     vector_score: float | None = None
+    # 融合后的原始名次；用于重排时保留前置检索证据，避免单一模型把候选完全推走。
+    fused_rank: int | None = None
     fused_score: float = 0.0
     rerank_score: float | None = None
+    rerank_score_combined: float | None = None
+    answer_support_score: float | None = None
+    answer_support_reasons: tuple[str, ...] = ()
     constraint_score: float | None = None
     constraint_decision: CandidateDecision | None = None
     duplicate_of: str | None = None
+    # 仅在去重阶段填充；旧的单来源调用方仍可读取 chunk.source。
+    member_chunk_ids: tuple[str, ...] = ()
+    sources: tuple[SourceRef, ...] = ()
+    lexical_route_hits: tuple[RetrievalRouteHit, ...] = ()
+    vector_route_hits: tuple[RetrievalRouteHit, ...] = ()
+    lexical_route_rrf_score: float | None = None
+    vector_route_rrf_score: float | None = None
+    vector_unit_hits: tuple[VectorUnitHit, ...] = ()
+
+    @property
+    def all_sources(self) -> tuple[SourceRef, ...]:
+        return self.sources or (self.chunk.source,)
+
+    @property
+    def all_member_chunk_ids(self) -> tuple[str, ...]:
+        return self.member_chunk_ids or (self.chunk.stable_chunk_id,)
 
 
 class ConstraintKind(StrEnum):
@@ -99,6 +122,8 @@ class ConstraintKind(StrEnum):
     OBJECT = "object"
     DIRECTION = "direction"
     MODEL = "model"
+    DEVICE = "device"
+    TOPIC = "topic"
 
 
 class ConstraintStatus(StrEnum):
@@ -107,13 +132,85 @@ class ConstraintStatus(StrEnum):
     UNKNOWN = "unknown"
 
 
+class ConstraintPolarity(StrEnum):
+    AFFIRMED = "affirmed"
+    NEGATED = "negated"
+    UNKNOWN = "unknown"
+
+
+class ConstraintStrength(StrEnum):
+    HARD = "hard"
+    SOFT = "soft"
+    AMBIGUOUS = "ambiguous"
+
+
 @dataclass(frozen=True, slots=True)
 class QueryConstraint:
     kind: ConstraintKind
     value: str
     required: bool = True
     source_text: str = ""
-    confidence: float = 1.0
+    confidence: float | None = None
+    polarity: ConstraintPolarity = ConstraintPolarity.AFFIRMED
+    strength: ConstraintStrength = ConstraintStrength.HARD
+    source: str = "rule"
+    reason: str = ""
+
+    @property
+    def is_hard(self) -> bool:
+        # 旧调用方仍可传 required，但它本身不能授权删除候选。
+        return (
+            self.required
+            and self.polarity is ConstraintPolarity.AFFIRMED
+            and self.strength is ConstraintStrength.HARD
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class QuerySpan:
+    text: str
+    start: int
+    end: int
+    features: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class QueryTransformation:
+    operation: str
+    source_text: str
+    result_text: str
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class RetrievalQueryVariant:
+    route_id: str
+    query_text: str
+    expression: str = ""
+    signal_texts: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class RetrievalRouteHit:
+    route_id: str
+    rank: int
+    score: float | None = None
+    score_kind: str = "unknown"
+
+
+@dataclass(frozen=True, slots=True)
+class VectorUnitHit:
+    """向量检索命中的细粒度单元；最终证据仍归并到父 chunk。"""
+
+    unit_id: str
+    route_id: str
+    raw_rank: int
+    score: float
+    text: str = ""
+    kind: str = "window"
+    start_char: int = 0
+    end_char: int = 0
+    token_count: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,7 +225,11 @@ class QueryPlan:
     semantic_query: str
     fallback_terms: tuple[str, ...] = ()
     missing_fields: tuple[str, ...] = ()
-    analyzer_version: str = "query-plan-v1"
+    analyzer_version: str = "query-plan-v2"
+    spans: tuple[QuerySpan, ...] = ()
+    transformations: tuple[QueryTransformation, ...] = ()
+    lexical_variants: tuple[RetrievalQueryVariant, ...] = ()
+    semantic_variants: tuple[RetrievalQueryVariant, ...] = ()
 
     # 兼容 RagIndexStore.lexical_search 当前使用的分析结果字段。
     @property
@@ -157,6 +258,10 @@ class CandidateDecision:
     required_match_count: int = 0
     required_unknown_count: int = 0
     required_conflict_count: int = 0
+    soft_match_count: int = 0
+    soft_conflict_count: int = 0
+    support_status: str = "unknown"
+    support_spans: tuple[str, ...] = ()
 
 
 class RagAnswerStatus(StrEnum):

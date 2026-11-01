@@ -24,6 +24,9 @@ def test_rag_eval_page_offers_modes_and_stage_views() -> None:
     assert page.tabs.tabText(4) == "历史对比"
     assert page.mode.itemData(0) == "retrieval-only"
     assert page.mode.itemData(1) == "full"
+    assert page.allow_snapshot_mismatch.isChecked() is False
+    page.allow_snapshot_mismatch.setChecked(True)
+    assert page._config().allow_snapshot_mismatch is True
     assert page.stop_button.isEnabled() is False
     page.deleteLater()
     app.processEvents()

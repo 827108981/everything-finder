@@ -22,12 +22,17 @@ from local_full_text_search.rag.evaluation.metrics import (
     score_case,
 )
 from local_full_text_search.rag.index_store import RagIndexStore
+from local_full_text_search.rag.lexical_index_store import LexicalIndexStore
 from local_full_text_search.rag.models import RagAnswer, RagQuery, RagRetrievalResult
+from local_full_text_search.rag.retrieval.lexical_analyzer import get_lexical_analyzer
+from local_full_text_search.rag.retrieval.vector_units import VectorUnitPolicy
+from local_full_text_search.rag.vector_index_store import VectorIndexStore
 from local_full_text_search.rag.evaluation.reporting.service import (
     ReportConfig,
     build_report_detail,
     write_report_files,
 )
+from local_full_text_search.rag.evaluation.transitions import build_candidate_transitions
 
 
 class RagEvalError(RuntimeError):
@@ -40,6 +45,9 @@ class RagEvalConfig:
     mode: str = "retrieval-only"
     case_ids: tuple[str, ...] = ()
     output_root: Path | None = None
+    # 仅用于在资料内容未变、但 AI 索引已经重建或更换模型时做诊断。
+    # 默认关闭，避免把不同语料快照的结果误当成正式指标。
+    allow_snapshot_mismatch: bool = False
 
     def __post_init__(self) -> None:
         if self.mode not in {"retrieval-only", "full"}:
@@ -93,11 +101,12 @@ class RagEvalRunner:
         if "" in snapshots:
             raise RagEvalError("测试集缺少 corpus_snapshot，无法确认评测所用 AI 索引版本")
         mismatched = sorted(snapshot for snapshot in snapshots if snapshot and snapshot != bundle.bundle_id)
-        if mismatched:
+        snapshot_mismatch = bool(mismatched)
+        if snapshot_mismatch and not config.allow_snapshot_mismatch:
             raise RagEvalError(
                 "测试集 corpus_snapshot 与当前已发布 AI 索引不一致。\n"
                 f"测试集：{', '.join(mismatched)}\n当前：{bundle.bundle_id}\n"
-                "请切换到对应索引或审核并更新测试集版本后再评测。"
+                "请切换到对应索引、更新测试集版本，或明确勾选“允许快照不一致（仅诊断）”后再评测。"
             )
         connection = rag_store.connect_read_only(bundle.metadata_path)
         try:
@@ -130,6 +139,10 @@ class RagEvalRunner:
                 behavior: sum(case.expected_behavior == behavior for case in selected)
                 for behavior in ("answer", "partial_answer", "clarify", "refuse")
             },
+            "snapshot_mismatch": snapshot_mismatch,
+            "snapshot_override": bool(config.allow_snapshot_mismatch and snapshot_mismatch),
+            "expected_bundle_ids": sorted(snapshots),
+            "current_bundle_id": bundle.bundle_id,
         }
         return PreparedEval(dataset, bundle.bundle_id, selected, evidence, coverage)
 
@@ -138,15 +151,63 @@ class RagEvalRunner:
         config: RagEvalConfig,
         prepared: PreparedEval,
         service_factory: Callable[[Callable[[dict[str, Any]], None]], Any],
+        judge_factory: Callable[[Callable[[dict[str, Any]], None]], Any] | None = None,
+        preparation_duration_ms: int | None = None,
     ) -> dict[str, Any]:
         run_id = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:6]
         output_root = Path(config.output_root or (APP_DATA_DIR / "rag_eval_runs")).expanduser().resolve()
         run_dir = output_root / run_id
         run_dir.mkdir(parents=True, exist_ok=False)
         started = datetime.now(timezone.utc).isoformat()
+        lexical_index: dict[str, Any] = {}
+        if str(getattr(self.settings, "rag_lexical_backend", "legacy")) == "word_v2":
+            analyzer = get_lexical_analyzer()
+            attached = LexicalIndexStore(self.generation_base_path.parent / "rag").active(
+                prepared.bundle_id, analyzer.fingerprint,
+            )
+            lexical_index = {
+                "source_bundle_id": attached.source_bundle_id,
+                "index_fingerprint": attached.index_fingerprint,
+                "analyzer_fingerprint": attached.analyzer_fingerprint,
+                "chunk_count": attached.chunk_count,
+                "database_path": str(attached.database_path),
+            }
+        vector_index: dict[str, Any] = {}
+        if str(getattr(self.settings, "rag_vector_backend", "legacy")) == "unit_v2":
+            policy = VectorUnitPolicy.from_settings(self.settings)
+            vector_rag_store = RagIndexStore(self.generation_base_path.parent / "rag")
+            active_bundle = vector_rag_store.active()
+            vector_store = VectorIndexStore(vector_rag_store.root)
+            if getattr(active_bundle, "vector_unit_directory", ""):
+                attached_vector = vector_store.attached(
+                    prepared.bundle_id,
+                    active_bundle.vector_unit_directory,
+                    embedding_repo_id=str(getattr(self.settings, "rag_embedding_repo_id", "")),
+                    embedding_revision=str(getattr(self.settings, "rag_embedding_revision", "")),
+                    embedding_dimension=active_bundle.embedding_dimension,
+                    policy_fingerprint=policy.fingerprint,
+                    index_fingerprint=active_bundle.vector_unit_index_fingerprint,
+                )
+            else:
+                attached_vector = vector_store.active(
+                    prepared.bundle_id,
+                    embedding_repo_id=str(getattr(self.settings, "rag_embedding_repo_id", "")),
+                    embedding_revision=str(getattr(self.settings, "rag_embedding_revision", "")),
+                    embedding_dimension=active_bundle.embedding_dimension,
+                    policy_fingerprint=policy.fingerprint,
+                )
+            vector_index = {
+                "source_bundle_id": attached_vector.source_bundle_id,
+                "index_fingerprint": attached_vector.index_fingerprint,
+                "policy_fingerprint": attached_vector.policy_fingerprint,
+                "parent_chunk_count": attached_vector.parent_chunk_count,
+                "unit_count": attached_vector.unit_count,
+                "database_path": str(attached_vector.database_path),
+            }
         metadata = {
             "run_id": run_id,
             "started_at": started,
+            "preparation_duration_ms": preparation_duration_ms,
             "mode": config.mode,
             "dataset_path": str(prepared.dataset.path),
             "dataset_sha256": prepared.dataset.sha256,
@@ -156,9 +217,39 @@ class RagEvalRunner:
                 "embedding_revision": getattr(self.settings, "rag_embedding_revision", ""),
                 "reranker_model": getattr(self.settings, "rag_reranker_repo_id", ""),
                 "reranker_revision": getattr(self.settings, "rag_reranker_revision", ""),
+                "rerank_weights": {
+                    "cross_encoder": float(getattr(self.settings, "rag_rerank_cross_encoder_weight", 0.65)),
+                    "retrieval_prior": float(getattr(self.settings, "rag_rerank_retrieval_prior_weight", 0.05)),
+                    "answer_support": float(getattr(self.settings, "rag_rerank_answer_support_weight", 0.30)),
+                    "max_rank_drop": int(getattr(self.settings, "rag_rerank_max_rank_drop", 3)),
+                },
                 "llm_model": getattr(self.settings, "rag_api_model", "") if config.mode == "full" else "未调用",
                 "api_style": getattr(self.settings, "rag_api_style", "") if config.mode == "full" else "未调用",
                 "answer_review_enabled": bool(getattr(self.settings, "rag_answer_review_enabled", False)) if config.mode == "full" else False,
+                "lexical_multi_route_enabled": bool(getattr(self.settings, "rag_lexical_multi_route_enabled", False)),
+                "lexical_backend": str(getattr(self.settings, "rag_lexical_backend", "legacy")),
+                "lexical_title_weight": float(getattr(self.settings, "rag_lexical_title_weight", 0.2)),
+                "lexical_complete_match_enabled": bool(getattr(
+                    self.settings, "rag_lexical_complete_match_enabled", True
+                )),
+                "lexical_k1": float(getattr(self.settings, "rag_lexical_k1", 1.2)),
+                "lexical_b": float(getattr(self.settings, "rag_lexical_b", 0.75)),
+                "lexical_index": lexical_index,
+                "vector_focused_query_enabled": bool(getattr(self.settings, "rag_vector_focused_query_enabled", False)),
+                "vector_backend": str(getattr(self.settings, "rag_vector_backend", "legacy")),
+                "vector_index": vector_index,
+                "vector_unit_policy": {
+                    "target_tokens": int(getattr(self.settings, "rag_vector_unit_target_tokens", 128)),
+                    "max_tokens": int(getattr(self.settings, "rag_vector_unit_max_tokens", 192)),
+                    "overlap_tokens": int(getattr(self.settings, "rag_vector_unit_overlap_tokens", 32)),
+                    "include_source_context": bool(getattr(
+                        self.settings, "rag_vector_unit_include_source_context", True
+                    )),
+                    "oversample_factor": int(getattr(
+                        self.settings, "rag_vector_unit_oversample_factor", 8
+                    )),
+                },
+                "route_rrf_k": 60,
                 "limits": {
                     "lexical_top_k": int(self.settings.rag_lexical_top_k),
                     "vector_top_k": int(self.settings.rag_vector_top_k),
@@ -227,38 +318,63 @@ class RagEvalRunner:
                     if config.mode == "retrieval-only":
                         retrieval = service.retrieve(case_query, self.token, trace_id=trace_id)
                         answer_record = _retrieval_record(retrieval)
-                        if retrieval.sources:
-                            context_ids = [source.stable_chunk_id for source in retrieval.sources]
-                            candidate_index = {
-                                str(item.get("chunk_id") or ""): item
-                                for items in stages.values() for item in items
-                            }
-                            stages["context"] = [candidate_index[item] for item in context_ids if item in candidate_index]
                     else:
                         answer = service.answer(case_query, self.token, trace_id=trace_id)
                         answer_record = _answer_record(answer)
-                        context_event = next((item for item in reversed(events) if item.get("context_sources")), None)
-                        if context_event:
-                            context_ids = [
-                                str(item.get("chunk_id") or "")
-                                for item in context_event.get("context_sources", [])
-                                if isinstance(item, dict)
-                            ]
-                            candidate_index = {
-                                str(item.get("chunk_id") or ""): item
-                                for items in stages.values() for item in items
-                            }
-                            stages["context"] = [candidate_index[item] for item in context_ids if item in candidate_index]
+                    gold_judgement = None
+                    if config.mode == "full" and judge_factory is not None and str(answer_record.get("text") or "").strip():
+                        on_progress({"stage": "gold_judging", "message": "正在将最终答案与人工金标逐项比较"})
+                        try:
+                            gold_judgement = judge_factory(on_progress).evaluate(case, answer_record, self.token)
+                        except Exception as judge_exc:
+                            if self.token.cancelled:
+                                raise
+                            gold_judgement = {"verdict": "unavailable", "method": "llm_gold_judge",
+                                              "reason": self._redact(str(judge_exc))}
+                        on_progress({"stage": "gold_judged", "verdict": gold_judgement["verdict"],
+                                     "message": "金标答案裁判完成"})
+                    elif config.mode == "full" and judge_factory is not None:
+                        gold_judgement = {"verdict": "unavailable", "method": "llm_gold_judge",
+                                          "reason": "本题没有可核查的生成答案"}
+                    # 上下文事件按代表正文记录顺序；retrieval.sources 是扁平化来源列表，
+                    # 其中同一正文的 PDF/PPTX 来源不能各占一个上下文名次。
+                    context_event = next(
+                        (item for item in reversed(events) if item.get("context_entries") or item.get("context_sources")),
+                        None,
+                    )
+                    if context_event:
+                        entries = context_event.get("context_entries") or context_event.get("context_sources") or []
+                        selected = {
+                            str(item.get("chunk_id") or ""): item
+                            for item in stages.get("evidence", []) if item.get("selected") is True
+                        }
+                        context_rows: list[dict[str, Any]] = []
+                        for entry in entries:
+                            if not isinstance(entry, dict):
+                                continue
+                            chunk_id = str(entry.get("chunk_id") or "")
+                            if chunk_id not in selected:
+                                continue
+                            context_rows.append({
+                                **selected[chunk_id],
+                                "included_text": entry.get("included_text"),
+                                "truncated": bool(entry.get("truncated")),
+                                "context_reason": entry.get("reason", ""),
+                                "context_rank": len(context_rows) + 1,
+                            })
+                        stages["context"] = context_rows
                     scored = score_case(case, stages, list(prepared.evidence[case.case_id]), answer=answer_record)
+                    transitions = build_candidate_transitions(
+                        stages, events, reranker_top_k=int(self.settings.rag_reranker_top_k),
+                    )
                     case_result = {
                         **scored,
                         "case_index": index,
                         "duration_ms": int((time.monotonic() - case_started) * 1000),
-                        "api_call_count": sum(
-                            str(event.get("stage") or "") in {"generating", "reviewing"}
-                            for event in events
-                        ),
+                        "api_call_count": _api_attempt_count(events),
+                        "gold_judgement": gold_judgement,
                         "candidate_stages": stages,
+                        "candidate_transitions": transitions,
                         "events": events,
                         "required_facts": list(case.required_facts),
                         "forbidden_claims": list(case.forbidden_claims),
@@ -276,6 +392,7 @@ class RagEvalRunner:
                         "error": {"type": type(exc).__name__, "message": self._redact(str(exc))},
                         "failed_stage": str(events[-1].get("stage") if events else "model_loading"),
                         "duration_ms": int((time.monotonic() - case_started) * 1000),
+                        "api_call_count": _api_attempt_count(events),
                         "candidate_stages": stages,
                         "events": events,
                     }
@@ -336,7 +453,16 @@ class RagEvalRunner:
         """生成新版诊断产物；报告失败不能覆盖已经落盘的原始评测结果。"""
 
         try:
-            detail = build_report_detail(dataset, metadata, results, ReportConfig())
+            detail = build_report_detail(
+                dataset,
+                metadata,
+                results,
+                ReportConfig(
+                    allow_snapshot_mismatch=bool(
+                        metadata.get("preflight", {}).get("snapshot_override", False)
+                    )
+                ),
+            )
             write_report_files(detail, run_dir)
         except Exception:
             # 评测结果已经由上层原子写入。诊断报告属于派生物，失败时保留
@@ -470,6 +596,14 @@ class RagEvalRunner:
             lines.append("</details>")
         lines.append("<p class=\"muted\">未标注的候选仍为未判定；事实文字命中仅供定位，不代表语义正确。</p></body></html>")
         path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def _api_attempt_count(events: list[dict[str, Any]]) -> int:
+    """包含失败题、自动重试及独立金标裁判的真实请求尝试次数。"""
+    return sum(str(event.get("stage") or "") in {
+        "generating", "generation_retry", "reviewing", "review_retry",
+        "gold_judging", "gold_judge_retry",
+    } for event in events)
 
 
 def _answer_record(answer: RagAnswer) -> dict[str, Any]:

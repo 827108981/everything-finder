@@ -130,6 +130,25 @@ def test_evidence_stage_recall_counts_only_candidates_that_passed_the_gate() -> 
     assert result["stages"]["evidence"]["gold_evidence_recall"] == 0.0
 
 
+def test_grouped_equivalent_source_keeps_gold_rank_without_double_counting() -> None:
+    mapping = GoldEvidenceMatch(
+        evidence_id="gold-pdf", kind="positive", file="guide.pdf", page="4",
+        quote="确认交换机已上电并检查端口灯", chunk_ids=("pdf-chunk",),
+        confidence="exact",
+    )
+    result = score_case(
+        _case(),
+        {"rerank": [
+            {"chunk_id": "other"},
+            {"chunk_id": "pptx-representative", "member_chunk_ids": ["pptx-representative", "pdf-chunk"]},
+        ]},
+        [mapping],
+    )
+
+    assert result["stages"]["rerank"]["first_gold_rank"] == 2
+    assert result["stages"]["rerank"]["gold_evidence_found"] == 1
+
+
 def test_rank_history_uses_final_selected_order_and_omits_rejected_evidence() -> None:
     history = build_rank_history({
         "fusion": [{"chunk_id": "a"}, {"chunk_id": "b"}],
@@ -144,6 +163,43 @@ def test_rank_history_uses_final_selected_order_and_omits_rejected_evidence() ->
     assert history["b"] == [("fusion", 2), ("rerank", 1), ("evidence", 1)]
     assert history["a"][-1] == ("evidence", 2)
     assert "rejected" not in history
+
+
+def test_runner_requires_snapshot_match_unless_explicitly_overridden(tmp_path: Path, monkeypatch) -> None:
+    from local_full_text_search.rag.evaluation import runner as runner_module
+
+    case = _case(corpus_snapshot="old-bundle")
+    dataset_file = tmp_path / "gold.jsonl"
+    dataset_file.write_text(json.dumps({
+        "id": case.case_id, "question": case.question,
+        "expected_behavior": case.expected_behavior,
+        "required_facts": list(case.required_facts), "forbidden_claims": [],
+        "constraints": {}, "missing_fields": [], "gold_evidence": list(case.gold_evidence),
+        "hard_negatives": [], "group_id": case.group_id,
+        "corpus_snapshot": case.corpus_snapshot, "review_status": "reviewed",
+    }, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    class FakeStore:
+        def __init__(self, _root):
+            pass
+
+        def active(self):
+            return SimpleNamespace(bundle_id="current-bundle", metadata_path=tmp_path / "metadata.db")
+
+        def connect_read_only(self, _path):
+            return SimpleNamespace(close=lambda: None)
+
+    monkeypatch.setattr(runner_module, "RagIndexStore", FakeStore)
+    monkeypatch.setattr(runner_module, "load_chunk_rows", lambda _connection: [])
+    runner = RagEvalRunner(tmp_path / "search_index.db", SimpleNamespace(), CancelToken())
+
+    with pytest.raises(Exception, match="corpus_snapshot"):
+        runner.prepare(RagEvalConfig(dataset_file))
+
+    prepared = runner.prepare(RagEvalConfig(dataset_file, allow_snapshot_mismatch=True))
+    assert prepared.bundle_id == "current-bundle"
+    assert prepared.coverage["snapshot_mismatch"] is True
+    assert prepared.coverage["snapshot_override"] is True
 
 
 def test_runner_preflights_and_writes_per_case_report(tmp_path: Path, monkeypatch) -> None:
@@ -210,6 +266,10 @@ def test_runner_preflights_and_writes_per_case_report(tmp_path: Path, monkeypatc
             self.callback({"stage": "reranked", "reranked_candidates": [candidate]})
             self.callback({"stage": "checking_constraints", "constraint_candidates": [candidate]})
             self.callback({"stage": "checking_evidence", "evidence_candidates": [{**candidate, "selected": True}]})
+            self.callback({"stage": "retrieval_completed", "context_entries": [{
+                "chunk_id": "gold-chunk", "included_text": candidate["text"],
+                "truncated": False, "reason": "已纳入上下文",
+            }]})
             return RagRetrievalResult(
                 trace_id, RagAnswerStatus.ANSWERED,
                 sources=(SourceRef(
@@ -233,3 +293,27 @@ def test_runner_preflights_and_writes_per_case_report(tmp_path: Path, monkeypatc
     assert "跨阶段排名轨迹" in html
     assert "MRR" in html
     assert report["summary"]["metric_definitions"]["mean_reciprocal_rank"]
+
+    class FakeFullService(FakeService):
+        def answer(self, _query, _token, *, trace_id):
+            self.callback({"stage": "generating"})
+            return SimpleNamespace(
+                status=RagAnswerStatus.ANSWERED, answer_text="检查交换机电源与端口灯 [S1]。",
+                insufficient_evidence=False, trace_id=trace_id, provider_name="mock", model_name="model",
+                source_ids=("S1",), sources=(), warnings=(), audit=None,
+            )
+
+    class FakeJudge:
+        def evaluate(self, _case, _answer, _token):
+            return {"verdict": "consistent", "behavior": "match", "rubrics": [],
+                    "method": "llm_gold_judge", "model": "mock"}
+
+    full_config = RagEvalConfig(dataset_file, mode="full", output_root=tmp_path / "runs")
+    full = runner.run(full_config, prepared, lambda callback: FakeFullService(callback),
+                      judge_factory=lambda _callback: FakeJudge(), preparation_duration_ms=25)
+    full_row = full["results"][0]
+    assert full_row["gold_judgement"]["verdict"] == "consistent"
+    assert full_row["api_call_count"] == 2
+    report_detail = json.loads((Path(full["run_dir"]) / "report_detail.json").read_text(encoding="utf-8"))
+    assert report_detail["cases"][0]["gold_judgement"]["verdict"] == "consistent"
+    assert report_detail["summary"]["timing"]["preparation_ms"] == 25

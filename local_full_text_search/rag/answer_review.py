@@ -83,29 +83,37 @@ class AnswerReviewParser:
             claims.append(ClaimReview(claim.strip(), citation_ids, status, reason.strip()))
 
         if verdict == "insufficient":
-            if final_answer.strip() != _INSUFFICIENT_TEXT:
-                raise RagGenerationError("证据不足审查结果必须使用固定答案")
+            # 已判定证据不足时忽略模型的自由表述，统一收敛为安全固定句。
+            # 这样既不发布未获支持的细节，也不会因一句近义拒答中断整批评测。
+            final_answer = _INSUFFICIENT_TEXT
         else:
-            compact_final = re.sub(r"\s+", "", final_answer)
-            for claim in claims:
-                if claim.status != "supported" and re.sub(r"\s+", "", claim.claim) in compact_final:
-                    raise RagGenerationError("未获支持的结论仍出现在最终答案中")
-
             final_ids = {f"S{value}" for value in _CITATION.findall(final_answer)}
             if not final_ids:
-                raise RagGenerationError("审查后的答案没有引用来源")
-            if final_ids.difference(allowed):
-                raise RagGenerationError("审查后的答案包含无效引用编号")
-            supported_ids = {
-                citation
-                for claim in claims
-                if claim.status == "supported"
-                for citation in claim.citations
-            }
-            if final_ids.difference(supported_ids):
-                raise RagGenerationError("最终答案引用未关联到任何 supported 结论")
-            if verdict == "pass" and any(claim.status != "supported" for claim in claims):
-                raise RagGenerationError("verdict=pass 但仍存在未获支持的结论")
+                # 审查模型偶尔返回有结论却漏掉最终引用。不能替它推断引用；
+                # 收敛成资料不足，让批量评测记录这次安全拒答。
+                verdict = "insufficient"
+                summary = "审查后的答案没有引用来源，已收敛为资料不足。"
+                final_answer = _INSUFFICIENT_TEXT
+            else:
+                compact_final = re.sub(r"\s+", "", final_answer)
+                for claim in claims:
+                    if claim.status != "supported" and re.sub(r"\s+", "", claim.claim) in compact_final:
+                        raise RagGenerationError("未获支持的结论仍出现在最终答案中")
+                if final_ids.difference(allowed):
+                    raise RagGenerationError("审查后的答案包含无效引用编号")
+                supported_ids = {
+                    citation
+                    for claim in claims
+                    if claim.status == "supported"
+                    for citation in claim.citations
+                }
+                if verdict == "pass" and any(claim.status != "supported" for claim in claims):
+                    raise RagGenerationError("verdict=pass 但仍存在未获支持的结论")
+                if final_ids.difference(supported_ids):
+                    # 引用虽存在，但未对应到审查认可的结论；不能凭引用编号发布。
+                    verdict = "insufficient"
+                    summary = "最终答案引用未关联到 supported 结论，已收敛为资料不足。"
+                    final_answer = _INSUFFICIENT_TEXT
 
         result = AnswerReviewResult(
             verdict=verdict,
@@ -119,11 +127,28 @@ class AnswerReviewParser:
 
     @staticmethod
     def _extract_json(value: str) -> str:
-        text = value.strip()
+        text = value.lstrip("\ufeff").strip()
         if text.startswith("```json") and text.endswith("```"):
             text = text[len("```json") : -3].strip()
-        elif text.startswith("```") or text.endswith("```"):
-            raise RagGenerationError("答案审查只允许单层 JSON 代码围栏")
-        if not text.startswith("{") or not text.endswith("}"):
-            raise RagGenerationError("答案审查响应包含 JSON 以外的文本")
-        return text
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, dict):
+            return text
+        decoder = json.JSONDecoder()
+        objects: list[str] = []
+        for index, char in enumerate(text):
+            if char != "{":
+                continue
+            try:
+                candidate, end = decoder.raw_decode(text, index)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(candidate, dict) and set(candidate) == {
+                "verdict", "summary", "claims", "final_answer"
+            }:
+                objects.append(text[index:end])
+        if len(objects) != 1:
+            raise RagGenerationError("答案审查未返回唯一、完整的 JSON 对象")
+        return objects[0]

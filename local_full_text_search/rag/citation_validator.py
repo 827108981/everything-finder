@@ -21,7 +21,7 @@ class CitationCheck:
 
 class CitationValidator:
     def inspect(
-        self, answer_text: str, source_map: dict[str, SourceRef]
+        self, answer_text: str, source_map: dict[str, tuple[SourceRef, ...]]
     ) -> CitationCheck:
         citations = tuple(dict.fromkeys(f"S{value}" for value in _CITATION.findall(answer_text or "")))
         unknown = tuple(sorted(set(citations).difference(source_map)))
@@ -42,7 +42,7 @@ class CitationValidator:
         )
 
     def validate(
-        self, answer_text: str, source_map: dict[str, SourceRef]
+        self, answer_text: str, source_map: dict[str, tuple[SourceRef, ...]]
     ) -> tuple[str, ...]:
         check = self.inspect(answer_text, source_map)
         if check.unknown_ids:

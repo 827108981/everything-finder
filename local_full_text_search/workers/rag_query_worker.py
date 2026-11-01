@@ -161,6 +161,10 @@ class RagQueryWorker(QObject):
                 revision=self.settings.rag_reranker_revision,
                 batch_size=self.settings.rag_reranker_batch_size,
                 max_length=self.settings.rag_reranker_max_length,
+                cross_encoder_weight=getattr(self.settings, "rag_rerank_cross_encoder_weight", 0.65),
+                retrieval_prior_weight=getattr(self.settings, "rag_rerank_retrieval_prior_weight", 0.05),
+                answer_support_weight=getattr(self.settings, "rag_rerank_answer_support_weight", 0.30),
+                max_rank_drop=getattr(self.settings, "rag_rerank_max_rank_drop", 3),
             )
             secret_store = WindowsCredentialSecretStore()
             service = AnswerService(

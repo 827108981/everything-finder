@@ -63,9 +63,11 @@ class _DifferentRevisionEmbedding(_Embedding):
 class _Reranker:
     def __init__(self, score: float) -> None:
         self.score = score
+        self.input_ids = []
 
     def rerank(self, question, candidates, top_n, token):
         token.throw_if_cancelled()
+        self.input_ids.append(tuple(item.chunk.stable_chunk_id for item in candidates))
         output = list(candidates[:top_n])
         for item in output:
             item.rerank_score = self.score
@@ -251,11 +253,67 @@ def test_full_build_retrieve_rerank_cite_and_generate(indexed_rag) -> None:
     assert isinstance(lexical_step["lexical_candidates"], list)
     assert "检查点" in vector_step["vector_candidates"][0]["text"]
     assert vector_step["vector_candidates"][0]["vector_score"] is not None
-    assert fusion_step["fused_candidates"][0]["fused_score"] > 0
+    assert fusion_step["rerank_input_candidates"][0]["fused_score"] > 0
     assert evidence_step["evidence_candidates"][0]["selected"] is True
     assert request_step["api_request"]["model"] == "test-model"
     assert "检查点" in str(request_step["api_request"])
     assert "test-secret" not in str(progress)
+
+
+def test_cross_document_exact_text_has_one_evidence_and_two_cited_sources(tmp_path) -> None:
+    snapshot = tmp_path / "generation-3.db"
+    _create_snapshot(snapshot)
+    with sqlite3.connect(snapshot) as connection:
+        connection.execute(
+            "INSERT INTO files VALUES(12, 2, ?, ?, '.pdf', 'second-doc-hash')",
+            ("C:/资料/第二份恢复手册.pdf", "第二份恢复手册.pdf"),
+        )
+        connection.execute(
+            "INSERT INTO blocks SELECT 22, 12, 6, 0, raw_text, '第 8 页', 8, "
+            "slide_number, sheet_name, cell_start, cell_end, line_start, line_end, "
+            "source_type, ocr_confidence FROM blocks WHERE id=21"
+        )
+    source_store = _SourceGenerationStore(snapshot)
+    rag_store = RagIndexStore(tmp_path / "rag")
+    settings = AppSettings(
+        rag_enabled=True, rag_api_model="test-model", rag_min_vector_score=0.1,
+        rag_min_rerank_score=0.5, rag_embedding_batch_size=2,
+        rag_answer_review_enabled=False,
+    )
+    summary = RagIndexBuilder(source_store, rag_store, _Embedding(), settings).build(CancelToken())
+    assert summary.chunk_count == summary.vector_count == 2
+    secrets = MemorySecretStore()
+    secrets.save(settings.rag_api_secret_ref, "test-secret")
+    reranker = _Reranker(0.97)
+    gateway = _Gateway()
+    progress = []
+    service = AnswerService(
+        source_store, rag_store, _Embedding(), reranker, gateway, secrets, settings,
+        progress_callback=progress.append,
+    )
+
+    answer = service.answer(RagQuery(text="索引任务中断后如何恢复？"), CancelToken())
+
+    assert answer.source_ids == ("S1", "S1")
+    assert {source.filename for source in answer.sources} == {
+        "索引恢复手册.pdf", "第二份恢复手册.pdf",
+    }
+    assert {source.page_number for source in answer.sources} == {4, 8}
+    assert len(reranker.input_ids) == 1
+    assert len(reranker.input_ids[0]) == 1
+    assert gateway.calls == 1
+    assert gateway.last_request.context.count("索引任务中断后") == 1
+    assert "索引恢复手册.pdf" in gateway.last_request.context
+    assert "第二份恢复手册.pdf" in gateway.last_request.context
+    dedup = next(item for item in progress if item["stage"] == "deduplicating")
+    assert dedup["evidence_count"] == 1
+    assert dedup["source_count"] == 2
+    assert [item["status"] for item in dedup["candidate_dispositions"]] == [
+        "kept", "grouped_exact_text_hash",
+    ]
+    completed = next(item for item in progress if item["stage"] == "completed")
+    assert completed["evidence_count"] == 1
+    assert completed["source_count"] == 2
 
 
 def test_retrieval_mode_uses_the_same_pipeline_without_reading_key_or_calling_llm(indexed_rag) -> None:
@@ -508,3 +566,29 @@ def test_gold_single_project_case_filters_higher_rerank_all_project_evidence(tmp
         item["filename"] != "全部项目故障.pdf" or item["selected"] is False
         for item in evidence["evidence_candidates"]
     )
+
+
+def test_constraint_switch_off_keeps_basic_retrieval_without_model_call(indexed_rag) -> None:
+    source_store, rag_store, settings = indexed_rag
+    settings.rag_constraint_matching_enabled = False
+    gateway = _Gateway()
+    progress = []
+    service = AnswerService(
+        source_store, rag_store, _Embedding(), _Reranker(0.97), gateway,
+        MemorySecretStore(), settings, progress_callback=progress.append,
+    )
+
+    result = service.retrieve(
+        RagQuery(text="只有一个项目的索引任务中断后如何恢复"), CancelToken(),
+    )
+
+    assert result.status is RagAnswerStatus.ANSWERED
+    assert result.sources[0].filename == "索引恢复手册.pdf"
+    assert gateway.calls == 0
+    stages = {entry["stage"] for entry in progress}
+    assert {
+        "lexical_retrieval", "vector_retrieval", "fusion", "deduplicating",
+        "reranking", "checking_evidence",
+    } <= stages
+    checks = next(entry for entry in progress if entry["stage"] == "checking_constraints")
+    assert checks["constraint_candidates"][0].get("constraint_decision") is None

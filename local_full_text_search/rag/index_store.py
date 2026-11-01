@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import os
 import sqlite3
 import uuid
@@ -31,6 +32,13 @@ class RagBundle:
     embedding_revision: str = ""
     embedding_dimension: int = 0
     verified_source_generation: int = 0
+    build_signature: str = ""
+    total_chunk_count: int = 0
+    parent_vector_mode: str = "chroma"
+    vector_unit_directory: str = ""
+    vector_unit_index_fingerprint: str = ""
+    vector_unit_policy_fingerprint: str = ""
+    vector_unit_count: int = 0
 
 
 class RagIndexStore:
@@ -52,6 +60,9 @@ class RagIndexStore:
         hnsw_m: int = 16,
         construction_ef: int = 200,
         search_ef: int = 100,
+        build_signature: str = "",
+        total_chunk_count: int = 0,
+        parent_vector_mode: str = "chroma",
     ) -> tuple[RagBundle, sqlite3.Connection]:
         self.root.mkdir(parents=True, exist_ok=True)
         created_at = datetime.now(timezone.utc).isoformat()
@@ -84,6 +95,8 @@ class RagIndexStore:
                 hnsw_search_ef INTEGER NOT NULL,
                 reranker_repo_id TEXT NOT NULL,
                 reranker_revision TEXT NOT NULL,
+                build_signature TEXT NOT NULL DEFAULT '',
+                total_chunk_count INTEGER NOT NULL DEFAULT 0,
                 chunk_count INTEGER NOT NULL DEFAULT 0,
                 vector_count INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL,
@@ -123,8 +136,9 @@ class RagIndexStore:
                 id,schema_version,state,source_generation,bundle_id,
                 embedding_repo_id,embedding_revision,embedding_dimension,
                 vector_backend,vector_metric,hnsw_m,hnsw_construction_ef,
-                hnsw_search_ef,reranker_repo_id,reranker_revision,created_at
-            ) VALUES(1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                hnsw_search_ef,reranker_repo_id,reranker_revision,
+                build_signature,total_chunk_count,created_at
+            ) VALUES(1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 RAG_SCHEMA_VERSION,
                 "building",
@@ -133,13 +147,15 @@ class RagIndexStore:
                 embedding_repo_id,
                 embedding_revision,
                 int(embedding_dimension),
-                "chroma",
+                str(parent_vector_mode),
                 "cosine",
                 int(hnsw_m),
                 int(construction_ef),
                 int(search_ef),
                 reranker_repo_id,
                 reranker_revision,
+                str(build_signature),
+                max(0, int(total_chunk_count)),
                 created_at,
             ),
         )
@@ -158,9 +174,106 @@ class RagIndexStore:
                 embedding_repo_id=embedding_repo_id,
                 embedding_revision=embedding_revision,
                 embedding_dimension=int(embedding_dimension),
+                build_signature=str(build_signature),
+                total_chunk_count=max(0, int(total_chunk_count)),
+                parent_vector_mode=str(parent_vector_mode),
             ),
             connection,
         )
+
+    def find_resumable_candidate(
+        self,
+        source_generation: int,
+        *,
+        embedding_repo_id: str,
+        embedding_revision: str,
+        embedding_dimension: int,
+        build_signature: str,
+    ) -> tuple[RagBundle, sqlite3.Connection] | None:
+        """返回与本次构建完全相同的未完成候选。
+
+        只读取 ``state=building`` 的候选，正式索引仍完全由 manifest 决定。
+        缺文件、旧结构或参数不一致的目录不会被复用。
+        """
+        if not self.root.is_dir() or not build_signature:
+            return None
+        candidates = sorted(
+            (path for path in self.root.glob(f"rag.g{int(source_generation):06d}-*") if path.is_dir()),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+        for path in candidates:
+            metadata_path = path / "metadata.db"
+            chroma_path = path / "chroma"
+            if not metadata_path.is_file() or not chroma_path.is_dir():
+                continue
+            connection: sqlite3.Connection | None = None
+            try:
+                connection = sqlite3.connect(metadata_path, timeout=30)
+                connection.row_factory = sqlite3.Row
+                connection.execute("PRAGMA foreign_keys = ON")
+                connection.execute("PRAGMA journal_mode = DELETE")
+                connection.execute("PRAGMA synchronous = FULL")
+                columns = {
+                    str(row[1]) for row in connection.execute("PRAGMA table_info(rag_meta)")
+                }
+                if not {"build_signature", "total_chunk_count"}.issubset(columns):
+                    connection.close()
+                    continue
+                meta = connection.execute("SELECT * FROM rag_meta WHERE id=1").fetchone()
+                if (
+                    meta is None
+                    or str(meta["state"]) != "building"
+                    or int(meta["schema_version"]) != RAG_SCHEMA_VERSION
+                    or int(meta["source_generation"]) != int(source_generation)
+                    or str(meta["embedding_repo_id"]) != str(embedding_repo_id)
+                    or str(meta["embedding_revision"]) != str(embedding_revision)
+                    or int(meta["embedding_dimension"]) != int(embedding_dimension)
+                    or str(meta["build_signature"]) != str(build_signature)
+                ):
+                    connection.close()
+                    continue
+                chunk_count = int(
+                    connection.execute("SELECT COUNT(*) FROM rag_chunks").fetchone()[0]
+                )
+                ref_count = int(
+                    connection.execute("SELECT COUNT(*) FROM rag_vector_refs").fetchone()[0]
+                )
+                parent_vector_mode = str(meta["vector_backend"])
+                if (
+                    parent_vector_mode == "metadata_only" and ref_count != 0
+                ) or (
+                    parent_vector_mode != "metadata_only" and chunk_count != ref_count
+                ):
+                    connection.close()
+                    continue
+                return (
+                    RagBundle(
+                        generation=int(source_generation),
+                        source_generation=int(source_generation),
+                        bundle_id=str(meta["bundle_id"]),
+                        path=path,
+                        metadata_path=metadata_path,
+                        chroma_path=chroma_path,
+                        chunk_count=chunk_count,
+                        vector_count=ref_count,
+                        created_at=str(meta["created_at"]),
+                        embedding_repo_id=str(meta["embedding_repo_id"]),
+                        embedding_revision=str(meta["embedding_revision"]),
+                        embedding_dimension=int(meta["embedding_dimension"]),
+                        build_signature=str(meta["build_signature"]),
+                        total_chunk_count=int(meta["total_chunk_count"]),
+                        parent_vector_mode=parent_vector_mode,
+                    ),
+                    connection,
+                )
+            except (OSError, sqlite3.Error, KeyError, TypeError, ValueError):
+                if connection is not None:
+                    try:
+                        connection.close()
+                    except sqlite3.Error:
+                        pass
+        return None
 
     def add_chunk(self, connection: sqlite3.Connection, chunk: RagChunk) -> None:
         source_json = json.dumps(
@@ -230,13 +343,28 @@ class RagIndexStore:
         connection: sqlite3.Connection,
         *,
         vector_count: int,
+        attached_vector_index=None,
     ) -> RagBundle:
         quick_check = connection.execute("PRAGMA quick_check").fetchone()[0]
         if str(quick_check).lower() != "ok":
             raise RagIndexCorruptError(f"RAG SQLite 完整性检查失败：{quick_check}")
         chunk_count = int(connection.execute("SELECT COUNT(*) FROM rag_chunks").fetchone()[0])
         ref_count = int(connection.execute("SELECT COUNT(*) FROM rag_vector_refs").fetchone()[0])
-        if chunk_count != ref_count or chunk_count != int(vector_count):
+        if bundle.parent_vector_mode == "metadata_only":
+            if ref_count != 0 or int(vector_count) != 0:
+                raise RagIndexCorruptError(
+                    "仅元数据父索引不应包含父块向量引用："
+                    f"refs={ref_count}, vectors={vector_count}"
+                )
+            if attached_vector_index is None:
+                raise RagIndexCorruptError("细粒度向量索引尚未完成，不能发布父索引")
+            if (
+                str(attached_vector_index.source_bundle_id) != bundle.bundle_id
+                or int(attached_vector_index.parent_chunk_count) != chunk_count
+                or int(attached_vector_index.unit_count) <= 0
+            ):
+                raise RagIndexCorruptError("细粒度向量索引与父索引候选不一致")
+        elif chunk_count != ref_count or chunk_count != int(vector_count):
             raise RagIndexCorruptError(
                 f"chunk/vector 数量不一致：chunks={chunk_count}, refs={ref_count}, vectors={vector_count}"
             )
@@ -258,7 +386,21 @@ class RagIndexStore:
             "vector_count": int(vector_count),
             "created_at": bundle.created_at,
             "published_at": published_at,
+            "parent_vector_mode": bundle.parent_vector_mode,
         }
+        if attached_vector_index is not None:
+            payload["vector_unit_index"] = {
+                "directory": str(attached_vector_index.path.name),
+                "source_content_digest": str(attached_vector_index.source_content_digest),
+                "embedding_repo_id": str(attached_vector_index.embedding_repo_id),
+                "embedding_revision": str(attached_vector_index.embedding_revision),
+                "embedding_dimension": int(attached_vector_index.embedding_dimension),
+                "policy_fingerprint": str(attached_vector_index.policy_fingerprint),
+                "index_fingerprint": str(attached_vector_index.index_fingerprint),
+                "parent_chunk_count": int(attached_vector_index.parent_chunk_count),
+                "unit_count": int(attached_vector_index.unit_count),
+                "created_at": str(attached_vector_index.created_at),
+            }
         payload["verified_source_generation"] = bundle.source_generation
         self._replace_manifest(payload)
         return RagBundle(
@@ -275,6 +417,23 @@ class RagIndexStore:
             embedding_revision=bundle.embedding_revision,
             embedding_dimension=bundle.embedding_dimension,
             verified_source_generation=bundle.source_generation,
+            build_signature=bundle.build_signature,
+            total_chunk_count=bundle.total_chunk_count,
+            parent_vector_mode=bundle.parent_vector_mode,
+            vector_unit_directory=(
+                str(attached_vector_index.path.name) if attached_vector_index is not None else ""
+            ),
+            vector_unit_index_fingerprint=(
+                str(attached_vector_index.index_fingerprint)
+                if attached_vector_index is not None else ""
+            ),
+            vector_unit_policy_fingerprint=(
+                str(attached_vector_index.policy_fingerprint)
+                if attached_vector_index is not None else ""
+            ),
+            vector_unit_count=(
+                int(attached_vector_index.unit_count) if attached_vector_index is not None else 0
+            ),
         )
 
     def mark_source_compatible(self, bundle: RagBundle, source_generation: int) -> RagBundle:
@@ -340,8 +499,12 @@ class RagIndexStore:
                 embedding_repo_id = str(meta["embedding_repo_id"])
                 embedding_revision = str(meta["embedding_revision"])
                 embedding_dimension = int(meta["embedding_dimension"])
+                parent_vector_mode = str(meta["vector_backend"])
             finally:
                 connection.close()
+            vector_unit = manifest.get("vector_unit_index")
+            if not isinstance(vector_unit, dict):
+                vector_unit = {}
             return RagBundle(
                 generation=int(manifest["source_generation"]),
                 source_generation=int(manifest["source_generation"]),
@@ -358,6 +521,17 @@ class RagIndexStore:
                 verified_source_generation=int(
                     manifest.get("verified_source_generation", manifest["source_generation"])
                 ),
+                parent_vector_mode=str(
+                    manifest.get("parent_vector_mode") or parent_vector_mode or "chroma"
+                ),
+                vector_unit_directory=str(vector_unit.get("directory") or ""),
+                vector_unit_index_fingerprint=str(
+                    vector_unit.get("index_fingerprint") or ""
+                ),
+                vector_unit_policy_fingerprint=str(
+                    vector_unit.get("policy_fingerprint") or ""
+                ),
+                vector_unit_count=int(vector_unit.get("unit_count") or 0),
             )
         except FileNotFoundError as exc:
             raise RagIndexMissingError("尚未构建 AI 索引") from exc
@@ -405,52 +579,85 @@ class RagIndexStore:
         include_ocr: bool = True,
         min_ocr_confidence: float = 0.60,
         analysis: QueryAnalysis | QueryPlan | None = None,
+        diagnostics: dict[str, object] | None = None,
     ) -> list[EvidenceChunk]:
         text = str(query or "").strip()
         if not text:
             return []
         analysis = analysis or QueryAnalyzer().analyze(text)
+        short_identifier = None
+        if not analysis.fts_expression and len(analysis.fallback_terms) == 1:
+            possible = str(analysis.fallback_terms[0])
+            if len(possible) < 3 and any(char.isalpha() for char in possible) and any(
+                char.isdigit() for char in possible
+            ):
+                short_identifier = possible
         if analysis.fts_expression:
             sql = """
                 SELECT stable_chunk_id, bm25(rag_chunks_fts) AS rank
                 FROM rag_chunks_fts WHERE rag_chunks_fts MATCH ?
-                ORDER BY rank LIMIT ?
+                ORDER BY rank, stable_chunk_id LIMIT ? OFFSET ?
             """
-            rows = connection.execute(
-                sql,
-                (analysis.fts_expression, max(1, int(top_k) * 4)),
-            ).fetchall()
+            parameters: list[object] = [analysis.fts_expression]
+            scan_limit = max(1, int(top_k) * 4)
         else:
             like_terms = analysis.fallback_terms or (analysis.normalized_text,)
             clauses = []
             parameters: list[object] = []
             for term in like_terms:
                 escaped = term.replace("%", "\\%").replace("_", "\\_")
-                clauses.append("normalized_text LIKE ? ESCAPE '\\'")
+                clauses.append("(normalized_text LIKE ? ESCAPE '\\' OR source_json LIKE ? ESCAPE '\\')" if short_identifier else "normalized_text LIKE ? ESCAPE '\\'")
                 parameters.append(f"%{escaped}%")
-            parameters.append(max(1, int(top_k) * 4))
-            rows = connection.execute(
+                if short_identifier:
+                    parameters.append(f"%{escaped}%")
+            sql = (
                 "SELECT stable_chunk_id, 0.0 AS rank FROM rag_chunks WHERE "
                 + " OR ".join(clauses)
-                + " LIMIT ?",
-                tuple(parameters),
-            ).fetchall()
-        results: list[EvidenceChunk] = []
-        for row in rows:
-            chunk = self.load_chunk(connection, str(row["stable_chunk_id"]))
-            if chunk is None or not self._matches_filters(
-                chunk, root_ids, extensions, include_ocr, min_ocr_confidence
-            ):
-                continue
-            results.append(
-                EvidenceChunk(
-                    chunk=chunk,
-                    lexical_rank=len(results) + 1,
-                    lexical_score=float(row["rank"]),
-                )
+                + " ORDER BY stable_chunk_id LIMIT ? OFFSET ?"
             )
-            if len(results) >= max(1, int(top_k)):
+            # 短编号的 LIKE 会先找到大量 J80/AJ8 等伪命中，必须分页复核边界。
+            scan_limit = max(10_000, int(top_k) * 200) if short_identifier else max(1, int(top_k) * 4)
+        results: list[EvidenceChunk] = []
+        scanned = 0
+        exhausted = False
+        page_size = min(200, scan_limit)
+        identifier_pattern = (re.compile(
+            rf"(?<![A-Za-z0-9]){re.escape(short_identifier)}(?![A-Za-z0-9])", re.I
+        ) if short_identifier else None)
+        while scanned < scan_limit and len(results) < max(1, int(top_k)):
+            rows = connection.execute(
+                sql, (*parameters, min(page_size, scan_limit - scanned), scanned)
+            ).fetchall()
+            if not rows:
+                exhausted = True
                 break
+            scanned += len(rows)
+            for row in rows:
+                chunk = self.load_chunk(connection, str(row["stable_chunk_id"]))
+                if chunk is None or not self._matches_filters(
+                    chunk, root_ids, extensions, include_ocr, min_ocr_confidence
+                ):
+                    continue
+                if identifier_pattern and not identifier_pattern.search(chunk.text + " " + chunk.source.filename):
+                    continue
+                results.append(
+                    EvidenceChunk(
+                        chunk=chunk,
+                        lexical_rank=len(results) + 1,
+                        lexical_score=float(row["rank"]),
+                    )
+                )
+                if len(results) >= max(1, int(top_k)):
+                    break
+            if len(rows) < page_size:
+                exhausted = True
+                break
+        if diagnostics is not None:
+            diagnostics.update({
+                "scanned_count": scanned,
+                "scan_limit": scan_limit,
+                "candidate_pool_exhausted": not exhausted and scanned >= scan_limit and len(results) < max(1, int(top_k)),
+            })
         return results
 
     @staticmethod

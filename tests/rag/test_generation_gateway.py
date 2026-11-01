@@ -155,3 +155,69 @@ def test_gateway_supports_answer_review_for_both_api_styles(api_style) -> None:
         assert request_call["store"] is False
     else:
         assert request_call["messages"][0]["content"] == REVIEW_SYSTEM_PROMPT
+
+
+def test_batch_gateway_retries_three_transient_failures_then_succeeds(monkeypatch) -> None:
+    class _Timeout(Exception):
+        pass
+
+    attempts = []
+    events = []
+
+    class _FakeClient:
+        def __init__(self, **kwargs):
+            self.responses = SimpleNamespace(create=self.create)
+
+        def create(self, **kwargs):
+            attempts.append(kwargs)
+            if len(attempts) <= 3:
+                raise _Timeout("temporary timeout")
+            return SimpleNamespace(output_text="已恢复 [S1]")
+
+    monkeypatch.setattr(OpenAICompatibleGateway, "_wait_before_retry", staticmethod(lambda delay, token: None))
+    gateway = OpenAICompatibleGateway(_FakeClient, max_transient_retries=3, retry_callback=events.append)
+    answer = gateway.generate(_request("responses"), CancelToken())
+    assert answer.text == "已恢复 [S1]"
+    assert len(attempts) == 4
+    assert [event["next_attempt"] for event in events] == [2, 3, 4]
+
+
+def test_batch_gateway_does_not_retry_client_error(monkeypatch) -> None:
+    class _BadRequest(Exception):
+        status_code = 400
+
+    calls = []
+
+    class _FakeClient:
+        def __init__(self, **kwargs):
+            self.responses = SimpleNamespace(create=self.create)
+
+        def create(self, **kwargs):
+            calls.append(kwargs)
+            raise _BadRequest("invalid")
+
+    gateway = OpenAICompatibleGateway(_FakeClient, max_transient_retries=3)
+    with pytest.raises(RagGenerationError, match="HTTP 400"):
+        gateway.generate(_request("responses"), CancelToken())
+    assert len(calls) == 1
+
+
+def test_batch_gateway_stops_after_four_total_attempts(monkeypatch) -> None:
+    class _Limited(Exception):
+        status_code = 429
+
+    calls = []
+
+    class _FakeClient:
+        def __init__(self, **kwargs):
+            self.responses = SimpleNamespace(create=self.create)
+
+        def create(self, **kwargs):
+            calls.append(kwargs)
+            raise _Limited("rate limited")
+
+    monkeypatch.setattr(OpenAICompatibleGateway, "_wait_before_retry", staticmethod(lambda delay, token: None))
+    with pytest.raises(RagGenerationError, match="限流"):
+        OpenAICompatibleGateway(_FakeClient, max_transient_retries=3).generate(
+            _request("responses"), CancelToken())
+    assert len(calls) == 4

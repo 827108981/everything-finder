@@ -8,6 +8,7 @@ from typing import Any
 
 
 EXPECTED_BEHAVIORS = {"answer", "partial_answer", "clarify", "refuse"}
+ANSWER_CHECK_ROLES = {"core", "safety", "context"}
 
 
 class GoldDatasetError(ValueError):
@@ -29,6 +30,7 @@ class GoldCase:
     corpus_snapshot: str
     review_status: str
     raw: dict[str, Any]
+    answer_checks: tuple[dict[str, str], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,6 +112,22 @@ def load_gold_dataset(path: Path, *, reviewed_only: bool = True) -> GoldDataset:
         for field in list_fields:
             if not isinstance(row.get(field, []), list):
                 errors.append(f"{case_id}：{field} 必须是数组")
+        checks = row.get("answer_checks")
+        if "answer_checks" in row:
+            if not isinstance(checks, list):
+                errors.append(f"{case_id}：answer_checks 必须是数组")
+            else:
+                seen_check_ids: set[str] = set()
+                for index, item in enumerate(checks, 1):
+                    if not isinstance(item, dict):
+                        errors.append(f"{case_id}：answer_checks 第 {index} 条必须是对象")
+                        continue
+                    check_id = str(item.get("id") or "").strip()
+                    check_text = str(item.get("text") or "").strip()
+                    role = str(item.get("role") or "").strip()
+                    if not check_id or check_id in seen_check_ids or not check_text or role not in ANSWER_CHECK_ROLES:
+                        errors.append(f"{case_id}：answer_checks 第 {index} 条需有唯一 id、非空 text 和有效 role")
+                    seen_check_ids.add(check_id)
         evidence = row.get("gold_evidence", [])
         for index, item in enumerate(evidence if isinstance(evidence, list) else [], 1):
             if not isinstance(item, dict) or not item.get("file") or not item.get("quote"):
@@ -139,6 +157,8 @@ def load_gold_dataset(path: Path, *, reviewed_only: bool = True) -> GoldDataset:
                 corpus_snapshot=str(row.get("corpus_snapshot") or ""),
                 review_status=status,
                 raw=row,
+                answer_checks=tuple({"id": str(item["id"]), "text": str(item["text"]),
+                                     "role": str(item["role"])} for item in (checks or [])),
             )
         )
     if errors:

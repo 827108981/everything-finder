@@ -36,6 +36,14 @@ class HybridRetriever:
                 "正在执行关键词检索",
                 lexical_terms=list(plan.lexical_terms),
                 lexical_fts_expression=plan.lexical_expression,
+                lexical_query_variants=[{
+                    "route_id": variant.route_id, "query_text": variant.query_text,
+                    "expression": variant.expression,
+                } for variant in plan.lexical_variants] if self.lexical.multi_route_enabled else [],
+                semantic_query_variants=[{
+                    "route_id": variant.route_id, "query_text": variant.query_text,
+                } for variant in plan.semantic_variants
+                    if variant.route_id == "semantic_original" or self.vector.focused_enabled],
             )
         lexical = self.lexical.retrieve(query, token, plan)
         token.throw_if_cancelled()
@@ -47,6 +55,7 @@ class HybridRetriever:
                 lexical_candidates=[candidate_snapshot(item) for item in lexical],
                 lexical_terms=list(plan.lexical_terms),
                 lexical_fts_expression=plan.lexical_expression,
+                lexical_route_diagnostics=list(self.lexical.route_diagnostics),
             )
         vector = self.vector.retrieve(query, token, plan)
         if self.progress_callback:
@@ -55,6 +64,7 @@ class HybridRetriever:
                 "正在合并关键词与向量候选",
                 vector_count=len(vector),
                 vector_candidates=[candidate_snapshot(item) for item in vector],
+                vector_route_diagnostics=list(self.vector.route_diagnostics),
             )
         merged: dict[str, EvidenceChunk] = {}
         for item in lexical:
@@ -63,6 +73,10 @@ class HybridRetriever:
             target = merged.setdefault(key, EvidenceChunk(chunk=item.chunk))
             target.lexical_rank = item.lexical_rank
             target.lexical_score = item.lexical_score
+            target.lexical_score_kind = item.lexical_score_kind
+            target.lexical_contributions = item.lexical_contributions
+            target.lexical_route_hits = item.lexical_route_hits
+            target.lexical_route_rrf_score = item.lexical_route_rrf_score
             target.fused_score += 1.0 / (self.rrf_k + int(item.lexical_rank or 1))
         for item in vector:
             token.throw_if_cancelled()
@@ -70,10 +84,15 @@ class HybridRetriever:
             target = merged.setdefault(key, EvidenceChunk(chunk=item.chunk))
             target.vector_rank = item.vector_rank
             target.vector_score = item.vector_score
+            target.vector_route_hits = item.vector_route_hits
+            target.vector_route_rrf_score = item.vector_route_rrf_score
+            target.vector_unit_hits = item.vector_unit_hits
             target.fused_score += 1.0 / (self.rrf_k + int(item.vector_rank or 1))
         ordered = sorted(
             merged.values(),
             key=lambda item: (-item.fused_score, item.chunk.stable_chunk_id),
         )
+        for rank, item in enumerate(ordered, 1):
+            item.fused_rank = rank
         # 留出空间给后续去重；否则高排名重复块会让去重后候选量不足。
         return ordered[: max(1, int(query.fusion_top_k) * 2)]
