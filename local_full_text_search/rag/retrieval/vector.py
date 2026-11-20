@@ -39,6 +39,12 @@ class VectorRetriever:
             for variant in plan.semantic_variants:
                 if variant.route_id == "semantic_focused" and variant.query_text != variants[0][1]:
                     variants.append((variant.route_id, variant.query_text))
+        if plan and plan.adapter_active:
+            seen={value for _,value in variants}
+            for n,sub in enumerate(plan.sub_queries,1):
+                if sub.text not in seen:
+                    variants.append((f'answer_target_{n}',sub.text))
+                    seen.add(sub.text)
         route_hits = []
         self.route_diagnostics = []
         for route_id, route_text in variants:
@@ -108,6 +114,8 @@ class VectorRetriever:
                             start_char=int(detail.get("start_char") or 0),
                             end_char=int(detail.get("end_char") or 0),
                             token_count=int(detail.get("token_count") or 0),
+                            embedding_text=str(detail.get("embedding_text") or "") if detail.get("representation_metadata") is not None else "",
+                            representation_metadata=detail.get("representation_metadata"),
                         ),)
                     if chunk_id in seen_parents:
                         continue

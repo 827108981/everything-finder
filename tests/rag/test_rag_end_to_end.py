@@ -12,8 +12,9 @@ pytest.importorskip("chromadb")
 from local_full_text_search.config.defaults import AppSettings
 from local_full_text_search.core.task_manager import CancelToken
 from local_full_text_search.rag.answer_service import AnswerService
+from local_full_text_search.rag.evidence_policy import EvidencePolicy
 from local_full_text_search.rag.errors import RagIndexStaleError
-from local_full_text_search.rag.generation.base import ModelAnswer
+from local_full_text_search.rag.generation.base import ModelAnswer, ClarificationAssessment
 from local_full_text_search.rag.index_builder import RagIndexBuilder
 from local_full_text_search.rag.index_store import RagIndexStore
 from local_full_text_search.rag.models import (
@@ -342,7 +343,7 @@ def test_retrieval_mode_uses_the_same_pipeline_without_reading_key_or_calling_ll
     assert any(item["stage"] == "retrieval_completed" for item in progress)
 
 
-def test_low_reranker_score_refuses_without_calling_llm(indexed_rag) -> None:
+def test_explicit_legacy_policy_low_score_refuses_without_calling_llm(indexed_rag) -> None:
     source_store, rag_store, settings = indexed_rag
     secrets = MemorySecretStore()
     secrets.save(settings.rag_api_secret_ref, "test-secret")
@@ -357,6 +358,7 @@ def test_low_reranker_score_refuses_without_calling_llm(indexed_rag) -> None:
         secrets,
         settings,
         progress_callback=progress.append,
+        evidence_policy=EvidencePolicy(min_rerank_score=settings.rag_min_rerank_score),
     )
 
     answer = service.answer(RagQuery(text="索引任务中断后如何恢复？"), CancelToken())
@@ -507,7 +509,7 @@ def test_answer_review_failure_does_not_return_unreviewed_draft(indexed_rag) -> 
         service.answer(RagQuery(text="索引任务中断后如何恢复？"), CancelToken())
 
 
-def test_gold_single_project_case_filters_higher_rerank_all_project_evidence(tmp_path) -> None:
+def test_explicit_legacy_policy_filters_higher_rerank_all_project_evidence(tmp_path) -> None:
     snapshot = tmp_path / "scope-generation.db"
     _create_scope_snapshot(snapshot)
     source_store = _SourceGenerationStore(snapshot)
@@ -518,6 +520,7 @@ def test_gold_single_project_case_filters_higher_rerank_all_project_evidence(tmp
         rag_min_vector_score=0.1,
         rag_min_rerank_score=0.1,
         rag_final_top_k=1,
+        rag_constraint_matching_enabled=True,
         rag_answer_review_enabled=False,
     )
     RagIndexBuilder(source_store, rag_store, _Embedding(), settings).build(CancelToken())
@@ -546,6 +549,7 @@ def test_gold_single_project_case_filters_higher_rerank_all_project_evidence(tmp
         secrets,
         settings,
         progress_callback=progress.append,
+        evidence_policy=EvidencePolicy(),
     )
 
     answer = service.answer(
@@ -592,3 +596,64 @@ def test_constraint_switch_off_keeps_basic_retrieval_without_model_call(indexed_
     } <= stages
     checks = next(entry for entry in progress if entry["stage"] == "checking_constraints")
     assert checks["constraint_candidates"][0].get("constraint_decision") is None
+
+
+def test_evidence_based_clarification_returns_question_without_answer_review(indexed_rag):
+    source_store, rag_store, settings = indexed_rag
+    settings.rag_answer_review_enabled = True
+    settings.rag_semantic_clarification_enabled = True
+    secrets = MemorySecretStore()
+    secrets.save(settings.rag_api_secret_ref, "test-secret")
+
+    class Gateway(_Gateway):
+        def assess_clarification(self, request, token):
+            return ClarificationAssessment(True, "请确认中断发生在哪个处理阶段？", ("阶段",), (("S1", "检查点"),))
+
+    gateway = Gateway()
+    events = []
+    service = AnswerService(source_store, rag_store, _Embedding(), _Reranker(0.97),
+        gateway, secrets, settings, progress_callback=events.append)
+    answer = service.answer(RagQuery(text="索引任务中断后如何恢复？"), CancelToken())
+    assert answer.status is RagAnswerStatus.NEEDS_CLARIFICATION
+    assert answer.clarification_question == answer.answer_text
+    assert answer.model_name == settings.rag_api_model
+    assert answer.insufficient_evidence is False
+    assert answer.sources == ()
+    assert gateway.calls == 0 and gateway.review_calls == 0
+    assert any(e['stage'] == 'building_context' for e in events)
+    assert events[-1]['stage'] == 'needs_clarification'
+
+
+@pytest.mark.parametrize(("semantic_enabled", "clarification_enabled"), [(False, True), (True, False)])
+def test_semantic_assessment_is_opt_in_and_respects_clarification_switch(indexed_rag, semantic_enabled, clarification_enabled):
+    source_store, rag_store, settings = indexed_rag
+    settings.rag_semantic_clarification_enabled = semantic_enabled
+    settings.rag_clarification_enabled = clarification_enabled
+    secrets = MemorySecretStore()
+    secrets.save(settings.rag_api_secret_ref, "test-secret")
+
+    class Gateway(_Gateway):
+        def assess_clarification(self, request, token):
+            pytest.fail("disabled assessment must not call another model")
+
+    gateway = Gateway()
+    service = AnswerService(source_store, rag_store, _Embedding(), _Reranker(0.97), gateway, secrets, settings)
+    assert service.answer(RagQuery(text="索引任务中断后如何恢复？"), CancelToken()).status is RagAnswerStatus.ANSWERED
+    assert gateway.calls == 1
+
+
+def test_unverified_assessment_falls_back_without_dropping_evidence(indexed_rag):
+    source_store, rag_store, settings = indexed_rag
+    settings.rag_semantic_clarification_enabled = True
+    secrets = MemorySecretStore()
+    secrets.save(settings.rag_api_secret_ref, "test-secret")
+
+    class Gateway(_Gateway):
+        def assess_clarification(self, request, token):
+            return None
+
+    gateway = Gateway()
+    service = AnswerService(source_store, rag_store, _Embedding(), _Reranker(0.97), gateway, secrets, settings)
+    answer = service.answer(RagQuery(text="索引任务中断后如何恢复？"), CancelToken())
+    assert answer.status is RagAnswerStatus.ANSWERED and answer.sources
+    assert gateway.calls == 1

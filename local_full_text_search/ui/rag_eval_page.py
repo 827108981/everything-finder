@@ -255,7 +255,7 @@ class RagEvalPage(QWidget):
         return table
 
     def _load_default_dataset(self) -> None:
-        fixture = Path(__file__).resolve().parents[2] / "tests" / "rag" / "fixtures" / "rag_gold_v2_review.json"
+        fixture = Path(__file__).resolve().parents[2] / "tests" / "rag" / "fixtures" / "rag_gold_v5_1_reviewed.jsonl"
         if fixture.is_file():
             self.dataset_path.setText(str(fixture))
             self._refresh_dataset_preview()
@@ -717,8 +717,8 @@ class RagEvalPage(QWidget):
             "fusion": "融合：关键词与向量结果按 RRF 排序合并。",
             "deduplicated": "去重：查看相似正文块是否被合并，以及留下哪一个。",
             "rerank": "重排：查看 Cross-Encoder 对问题与候选正文联合打分后的顺序。",
-            "constraints": "条件检查：查看范围、阶段、对象等业务条件是否与候选冲突。",
-            "evidence": "证据筛选：查看候选通过或未通过证据门槛的原因。",
+            "constraints": "默认链路已移除条件检查，本列仅透传；历史运行请查看当次启用状态。",
+            "evidence": "默认保留BGE顺序，仅在上下文组装时合并重复正文并应用完整片段预算；历史运行可能有旧门槛。",
             "context": "送入上下文：查看实际提供给生成模型的证据块。",
         }.get(stage, "查看该阶段的候选、分数和处理原因。")
 

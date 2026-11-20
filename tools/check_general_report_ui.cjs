@@ -1,0 +1,41 @@
+const fs=require('node:fs');
+const path=require('node:path');
+const {chromium}=require('C:/Users/50263194/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright');
+(async()=>{
+ const out=path.resolve(process.argv[3]||'reports/rag_general_refactor_20261113');
+ const browser=await chromium.launch({headless:true,executablePath:'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe'});
+ const page=await browser.newPage({viewport:{width:1450,height:1000}});const errors=[];
+ page.on('pageerror',e=>errors.push(e.message));
+ await page.goto(process.argv[2],{waitUntil:'domcontentloaded',timeout:60000});
+ await page.waitForSelector('#navCase',{timeout:60000});
+ await page.screenshot({path:path.join(out,'report_overview.png')});
+ const before=await page.locator('#caseTable tbody tr').count();
+ await page.locator('#navCase').selectOption('rag-biz-019');
+ await page.locator('[data-action="stage"][data-stage="context"]').first().click();
+ const paired=await page.locator('#caseDetails').innerText();
+ if(!paired.includes('A · 修改前')||!paired.includes('B · 修改后'))throw Error('Missing paired answer panels');
+ await page.locator('#armSelect').selectOption('A');
+ await page.locator('#navCase').selectOption('rag-biz-019');
+ const runLine=await page.locator('#runLine').innerText();
+ if(!runLine.includes('20261113_A'))throw Error('Arm switch failed');
+ await page.locator('#armSelect').selectOption('B');
+ await page.locator('#navCase').selectOption('rag-biz-023');
+ await page.locator('#caseDetails').scrollIntoViewIfNeeded();
+ await page.screenshot({path:path.join(out,'report_case.png')});
+ const sources=JSON.parse(fs.readFileSync(path.join(out,'report_sources.json'),'utf8'));let requested;
+ await page.route('**/open-source',async route=>{
+  requested=route.request().postDataJSON();
+  if(!sources[requested.id])throw Error('Source ID not registered');
+  await route.fulfill({status:200,contentType:'application/json',body:JSON.stringify({message:'UI test: source and exact location resolved; native app launch omitted'})});
+ });
+ await page.locator('[data-original-source]').first().click();
+ await page.waitForFunction(()=>document.getElementById('sourceStatus').textContent.startsWith('UI test'));
+ if(!requested)throw Error('Source button did not send request');
+ await page.locator('#search').fill('rag-biz-021');
+ const filtered=await page.locator('#caseTable tbody tr').count();
+ if(filtered!==1||before!==91||errors.length)throw Error(JSON.stringify({before,filtered,errors}));
+ const result={cases:before,filtered,arm_switch:true,paired_answers:true,stage_navigation:true,source_request_resolves:true,
+  source_location:sources[requested.id].location,page_errors:errors,note:'Headless Edge UI check; native document launching not exercised'};
+ fs.writeFileSync(path.join(out,'report_ui_audit.json'),JSON.stringify(result,null,2));
+ console.log(JSON.stringify(result));await browser.close();
+})().catch(e=>{console.error(e);process.exit(1)});

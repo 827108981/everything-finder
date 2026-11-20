@@ -28,6 +28,8 @@ def _payload(*, fact_status="covered", forbidden_status="absent", behavior="matc
                            for check in checks],
         "forbidden_claims": [{"id": f"N{i}", "status": forbidden_status, "reason": "对照答案"}
                              for i in range(1, len(case.forbidden_claims) + 1)],
+        "object_binding": {"status": "match", "reason": "对象一致"},
+        "source_binding": {"status": "unavailable", "reason": "未提供实际上下文"},
     }, ensure_ascii=False)
 
 
@@ -72,7 +74,7 @@ def test_judge_sends_answer_and_gold_without_secret_in_prompt():
                                rag_api_style="responses", rag_api_timeout_seconds=10)
     judgement = GoldAnswerJudge(_Gateway(), settings, "private-key").evaluate(
         _case(), {"status": "answered", "text": "D63 是 +12V 光子计数电源灯。"}, CancelToken())
-    assert judgement["verdict"] == "consistent"
+    assert judgement["verdict"] == "uncertain"  # 无实际上下文，事实覆盖不等于引用已核实。
     assert "D63" in requests[0].user_prompt
     assert "private-key" not in requests[0].user_prompt
 
@@ -94,7 +96,7 @@ def test_judge_retries_once_when_rubric_ids_are_missing():
     result = GoldAnswerJudge(_Gateway(), settings, "private-key").evaluate(
         _case(), {"status": "answered", "text": "已有引用的答案。"}, CancelToken())
 
-    assert result["verdict"] == "consistent"
+    assert result["verdict"] == "uncertain"  # 结构重试成功，引用支持仍因上下文缺失而待核。
     assert len(requests) == 2
     assert "没有项目时返回空数组" in requests[1].user_prompt
     assert all("private-key" not in request.user_prompt for request in requests)

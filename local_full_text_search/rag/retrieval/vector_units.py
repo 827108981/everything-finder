@@ -63,14 +63,25 @@ class VectorRetrievalUnit:
     start_char: int
     end_char: int
     token_count: int
+    representation_metadata: dict | None = None
 
 
 class VectorUnitBuilder:
     """按模型 token 边界切分正文，不依赖领域词表或测试题。"""
 
-    def __init__(self, count_tokens: Callable[[str], int], policy: VectorUnitPolicy) -> None:
+    def __init__(self, count_tokens: Callable[[str], int], policy: VectorUnitPolicy,
+                 *, context_policy=None, background_provider=None) -> None:
         self.count_tokens = count_tokens
         self.policy = policy
+        self.context_policy = context_policy
+        self.background_provider = background_provider
+
+    @property
+    def fingerprint(self) -> str:
+        if self.context_policy is None:
+            return self.policy.fingerprint
+        provider_fingerprint = getattr(self.background_provider, "fingerprint", "none")
+        return hashlib.sha256((self.policy.fingerprint + self.context_policy.fingerprint + provider_fingerprint).encode()).hexdigest()
 
     def build(self, chunk: RagChunk) -> tuple[VectorRetrievalUnit, ...]:
         raw_text = chunk.text.replace("\r\n", "\n").replace("\r", "\n")
@@ -119,7 +130,13 @@ class VectorUnitBuilder:
 
         result = []
         for ordinal, (start_char, end_char, unit_text, kind) in enumerate(windows):
-            embedding_text = self._embedding_text(chunk, unit_text)
+            representation_metadata = None
+            if self.context_policy is None:
+                embedding_text = self._embedding_text(chunk, unit_text)
+            else:
+                background = self.background_provider(chunk, start_char, end_char) if self.background_provider else None
+                embedding_text, representation_metadata = self.context_policy.render(
+                    chunk, unit_text, self.count_tokens, self.policy.max_tokens, background)
             token_count = self.count_tokens(embedding_text)
             if token_count > self.policy.max_tokens:
                 # 来源背景不得挤占正文导致静默截断；超限时仅嵌入正文。
@@ -132,12 +149,18 @@ class VectorUnitBuilder:
             unit_id = hashlib.sha256(
                 f"{chunk.stable_chunk_id}\0{ordinal}\0{start_char}\0{end_char}\0{unit_text}".encode("utf-8")
             ).hexdigest()
+            if representation_metadata is not None:
+                representation_metadata["logical_unit_id"] = unit_id
+                # Alternate encodings cannot collide with the legacy view in one collection.
+                if self.context_policy.view != "W0":
+                    unit_id = hashlib.sha256((unit_id + "\0" + self.fingerprint + "\0" + embedding_text).encode()).hexdigest()
             result.append(VectorRetrievalUnit(
                 unit_id=unit_id, parent_chunk_id=chunk.stable_chunk_id, ordinal=ordinal,
                 text=unit_text, embedding_text=embedding_text, kind=kind,
                 start_char=start_char + leading_offset,
                 end_char=end_char + leading_offset,
                 token_count=token_count,
+                representation_metadata=representation_metadata,
             ))
         return tuple(result)
 

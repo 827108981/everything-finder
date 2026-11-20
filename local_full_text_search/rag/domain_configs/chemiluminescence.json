@@ -1,0 +1,202 @@
+{
+  "version": "3",
+  "entity_types": [
+    "alarm_code",
+    "instrument_model",
+    "stage",
+    "scope",
+    "metric",
+    "direction",
+    "product_line",
+    "reagent",
+    "calibrator",
+    "component",
+    "action",
+    "symptom",
+    "software_version",
+    "numeric_unit"
+  ],
+  "aliases": {
+    "stage": {
+      "calibration": [
+        "定标",
+        "校准"
+      ],
+      "sample_test": [
+        "样本检测",
+        "临床检测",
+        "标本检测"
+      ],
+      "quality_control": [
+        "质控",
+        "质量控制"
+      ]
+    },
+    "scope": {
+      "single": [
+        "单项目",
+        "单个项目",
+        "个别项目"
+      ],
+      "multiple": [
+        "多项目",
+        "多个项目",
+        "大部分项目"
+      ],
+      "all": [
+        "所有项目",
+        "全部项目"
+      ]
+    },
+    "direction": {
+      "low": [
+        "偏低"
+      ],
+      "high": [
+        "偏高"
+      ],
+      "abnormal": [
+        "异常"
+      ]
+    },
+    "metric": {
+      "luminescence": [
+        "发光值",
+        "RLU"
+      ],
+      "coefficient_of_variation": [
+        "CV"
+      ]
+    },
+    "product_line": {
+      "immuno": [
+        "化学发光",
+        "免疫仪",
+        "免疫分析",
+        "发光定标"
+      ],
+      "biochemistry": [
+        "生化仪",
+        "生化分析"
+      ]
+    },
+    "reagent": {
+      "reagent": [
+        "试剂"
+      ],
+      "substrate": [
+        "底物"
+      ]
+    },
+    "calibrator": {
+      "calibrator": [
+        "校准品",
+        "定标品"
+      ]
+    },
+    "component": {
+      "syringe": [
+        "注射器"
+      ],
+      "seal": [
+        "密封件",
+        "密封圈"
+      ],
+      "assembly": [
+        "组件",
+        "整套"
+      ],
+      "pump": [
+        "蠕动泵"
+      ],
+      "sample_probe": [
+        "样本针",
+        "标本针"
+      ]
+    },
+    "action": {
+      "replace": [
+        "更换"
+      ],
+      "prime": [
+        "灌注"
+      ],
+      "recalibrate": [
+        "重新定标",
+        "重新校准"
+      ]
+    },
+    "symptom": {
+      "bubble": [
+        "气泡"
+      ],
+      "leak": [
+        "漏液"
+      ],
+      "blocked": [
+        "堵塞"
+      ],
+      "failed": [
+        "失败",
+        "报警"
+      ]
+    }
+  },
+  "patterns": {
+    "identifier_candidate": "(?<![A-Za-z0-9_])[A-Z][A-Z0-9]{1,15}(?![A-Za-z0-9_])",
+    "instrument_model": "(?<![A-Za-z0-9])[A-Za-z]{1,6}-[0-9]{3,6}[A-Za-z]?(?![A-Za-z0-9])",
+    "numeric_unit": "[0-9]+(?:\\.[0-9]+)?(?:\\s*[±]\\s*[0-9]+(?:\\.[0-9]+)?)?\\s*(?:μL/s|uL/s|mL/min|μL|uL|mL|CPS|RLU|rpm|mmol/L|%|℃|°C)",
+    "software_version": "(?:软件版本|版本号|软件)\\s*[:：]?\\s*[Vv]?\\d+(?:\\.\\d+){1,3}"
+  },
+  "policy": {
+    "activation_confidence": 0.9,
+    "max_exact_representatives": 2,
+    "scope_patterns": {
+      "fault_precondition": "(?:如果|若|当|在)[^，。；？\\n]{2,35}(?:时|后|情况下)",
+      "time_condition": "(?:上次|本次|当前|前一次|仍然|重新|首次|再次)",
+      "negative_condition": "(?:不是|并非|没有|不能|未)[^，。；？\\n]{1,24}",
+      "numeric_range": "(?:超过|不超过|低于|高于|至少|至多|允许范围|允许误差|阈值)[^，。；？\\n]{0,18}"
+    },
+    "scope_entity_types": [
+      "instrument_model",
+      "product_line",
+      "reagent",
+      "calibrator",
+      "software_version",
+      "stage",
+      "component"
+    ]
+  },
+  "entity_hierarchy": {
+    "levels": [
+      "system",
+      "module",
+      "component",
+      "subcomponent",
+      "consumable"
+    ],
+    "binding": "explicit_question_spans_only"
+  },
+  "model_aliases": {},
+  "units": [
+    "V",
+    "mA",
+    "μL/s",
+    "mL/min",
+    "CPS",
+    "RLU",
+    "rpm",
+    "mmol/L",
+    "%",
+    "℃",
+    "次测试"
+  ],
+  "scope_levels": [
+    "single",
+    "multiple",
+    "all"
+  ],
+  "ambiguity_rules": [
+    "separate_noun_mentions_require_separate_binding"
+  ]
+}

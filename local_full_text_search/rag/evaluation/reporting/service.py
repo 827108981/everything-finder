@@ -21,8 +21,8 @@ from .timing_assets import TIMING_CSS, TIMING_JS
 
 
 REPORT_SCHEMA_VERSION = 4
-REPORT_MATCHER_VERSION = "evidence-equivalence-v2"
-REPORT_METRIC_VERSION = "diagnostic-v2"
+REPORT_MATCHER_VERSION = "source-quote-v3"
+REPORT_METRIC_VERSION = "object-source-binding-v3.1"
 
 
 @dataclass(frozen=True, slots=True)
@@ -185,10 +185,13 @@ def _match_stage_candidates(
     normalized_candidates: list[dict[str, Any]] = []
     for index, original in enumerate(candidates[: config.topk]):
         candidate = dict(original)
-        if stage == "context" and candidate.get("included_text") is not None:
+        if stage == "context":
             # 上下文预算可能只纳入正文前缀；匹配和高亮必须以实际入模文字为准。
             candidate["full_text"] = candidate.get("text")
-            candidate["text"] = candidate["included_text"]
+            candidate["text"] = candidate.get("included_text") or ""
+            if candidate.get("included_text") is None:
+                candidate["context_text_unavailable"] = True
+                candidate["reason"] = "未保存实际入模正文，仅有来源不能计为引文命中"
         candidate["stage_rank"] = _candidate_rank(stage, candidate, index)
         identity_text = str(candidate.get("full_text") or candidate.get("text") or "")
         canonical = canonical_content(identity_text)
@@ -210,12 +213,12 @@ def _match_stage_candidates(
             if match.status in {"exact", "high", "partial"}:
                 candidate_matches.append(match)
         matched = [item for item in candidate_matches if item.status in {"exact", "high", "partial"}]
-        countable = [item for item in matched if item.is_countable or (config.count_partial_matches and item.status == "partial")]
+        countable = [item for item in matched if item.is_countable or (item.kind != "hard_negative" and config.count_partial_matches and item.status == "partial")]
         gold = [item for item in countable if item.kind == "positive"]
         negatives_found = [item for item in countable if item.kind == "hard_negative"]
         matched_gold = [item for item in matched if item.kind == "positive"]
         matched_negatives = [item for item in matched if item.kind == "hard_negative"]
-        if matched_gold and matched_negatives:
+        if gold and negatives_found:
             category = "mixed"
         elif gold:
             category = "gold"
@@ -249,11 +252,11 @@ def _match_stage_candidates(
                     in canonical_content(str(candidate.get("text") or ""))
                     for item in formal_positive
                 )
-                candidate["category"] = "mixed" if matched_negatives else "gold" if full else "partial_gold"
+                candidate["category"] = "mixed" if full and negatives_found else "gold" if full else "partial_gold"
             elif suspected:
                 candidate["category"] = "partial_gold"
             elif category in {"gold", "partial_gold", "mixed"}:
-                candidate["category"] = "negative" if matched_negatives else "unlabelled"
+                candidate["category"] = "negative" if negatives_found else "partial_negative" if matched_negatives else "unlabelled"
             confirmed_ids = {str(item.get("evidence_id") or "") for item in formal_positive}
             for match in candidate["matches"]:
                 if match.get("kind") == "positive" and match.get("evidence_id") not in confirmed_ids:
@@ -328,10 +331,14 @@ def _case_diagnostics(
                 str(evidence_id): [int(rank)]
                 for evidence_id, rank in official["gold_completion_ranks"].items()
             }
+        if kind == "hard_negative" and official.get("scorer_version") == "source-quote-v3":
+            return {str(eid): [int(rank)] for eid, rank in official.get("hard_negative_completion_ranks", {}).items()}
         output: dict[str, list[int]] = {}
         for candidate in stage_data.get(stage, {}).get("candidates", []):
             for item in candidate.get("matches", []):
                 if item.get("kind") != kind:
+                    continue
+                if kind == "hard_negative" and item.get("status") != "exact":
                     continue
                 if item.get("status") not in {"exact", "high"} and not (config.count_partial_matches and item.get("status") == "partial"):
                     continue
@@ -487,7 +494,8 @@ def _stage_summary(
         if rank is None:
             continue
         for match in candidate.get("matches", []):
-            if match.get("status") in {"exact", "high"} or (config.count_partial_matches and match.get("status") == "partial"):
+            if (match.get("status") == "exact" if match.get("kind") == "hard_negative" else
+                match.get("status") in {"exact", "high"} or (config.count_partial_matches and match.get("status") == "partial")):
                 if match.get("kind") == "positive":
                     found.add(str(match.get("evidence_id")))
                     ranks.append(int(rank))
@@ -513,7 +521,7 @@ def _stage_summary(
             if candidate.get("stage_rank") is not None
             for match in candidate.get("matches", [])
             if match.get("kind") == "hard_negative"
-            and (match.get("status") in {"exact", "high"} or (config.count_partial_matches and match.get("status") == "partial"))
+            and match.get("status") == "exact"
         ) if negatives else None,
     }
     if official and "gold_completion_ranks" in official:
@@ -530,6 +538,11 @@ def _stage_summary(
             "hit_at_5": first is not None and first <= 5,
             "mrr": official.get("reciprocal_rank"),
         })
+    if official and official.get("scorer_version") == "source-quote-v3":
+        result.update(hard_negative_found=official.get("hard_negative_found", 0),
+                      hard_negative_first_rank=min(official.get("hard_negative_completion_ranks", {}).values(), default=None),
+                      hard_negative_page_only_ids=official.get("hard_negative_page_only_ids", []),
+                      hard_negative_unresolved_ids=official.get("hard_negative_unresolved_ids", []))
     return result
 
 

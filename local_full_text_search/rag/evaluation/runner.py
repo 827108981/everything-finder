@@ -217,11 +217,12 @@ class RagEvalRunner:
                 "embedding_revision": getattr(self.settings, "rag_embedding_revision", ""),
                 "reranker_model": getattr(self.settings, "rag_reranker_repo_id", ""),
                 "reranker_revision": getattr(self.settings, "rag_reranker_revision", ""),
+                "rerank_strategy": "bge_base",
                 "rerank_weights": {
-                    "cross_encoder": float(getattr(self.settings, "rag_rerank_cross_encoder_weight", 0.65)),
-                    "retrieval_prior": float(getattr(self.settings, "rag_rerank_retrieval_prior_weight", 0.05)),
-                    "answer_support": float(getattr(self.settings, "rag_rerank_answer_support_weight", 0.30)),
-                    "max_rank_drop": int(getattr(self.settings, "rag_rerank_max_rank_drop", 3)),
+                    "cross_encoder": 1.0,
+                    "retrieval_prior": 0.0,
+                    "answer_support": 0.0,
+                    "max_rank_drop": 0,
                 },
                 "llm_model": getattr(self.settings, "rag_api_model", "") if config.mode == "full" else "未调用",
                 "api_style": getattr(self.settings, "rag_api_style", "") if config.mode == "full" else "未调用",
@@ -314,6 +315,10 @@ class RagEvalRunner:
                 )
                 try:
                     service = service_factory(on_progress)
+                    active_reranker = getattr(service, "reranker", None)
+                    metadata["settings"]["reranker_input_mode"] = getattr(active_reranker, "input_mode", "unrecorded")
+                    metadata["settings"]["reranker_window_overlap"] = getattr(active_reranker, "window_overlap", None)
+                    metadata["settings"]["reranker_max_length"] = getattr(active_reranker, "max_length", None)
                     trace_id = f"eval-{run_id}-{case.case_id}"
                     if config.mode == "retrieval-only":
                         retrieval = service.retrieve(case_query, self.token, trace_id=trace_id)
@@ -325,7 +330,10 @@ class RagEvalRunner:
                     if config.mode == "full" and judge_factory is not None and str(answer_record.get("text") or "").strip():
                         on_progress({"stage": "gold_judging", "message": "正在将最终答案与人工金标逐项比较"})
                         try:
-                            gold_judgement = judge_factory(on_progress).evaluate(case, answer_record, self.token)
+                            actual_context = next((e["llm_context"] for e in reversed(events)
+                                                   if isinstance(e.get("llm_context"), str)), None)
+                            gold_judgement = judge_factory(on_progress).evaluate(
+                                case, {**answer_record, "evidence_context": actual_context}, self.token)
                         except Exception as judge_exc:
                             if self.token.cancelled:
                                 raise
@@ -601,7 +609,7 @@ class RagEvalRunner:
 def _api_attempt_count(events: list[dict[str, Any]]) -> int:
     """包含失败题、自动重试及独立金标裁判的真实请求尝试次数。"""
     return sum(str(event.get("stage") or "") in {
-        "generating", "generation_retry", "reviewing", "review_retry",
+        "assessing_clarification", "clarification_retry", "generating", "generation_retry", "reviewing", "review_retry",
         "gold_judging", "gold_judge_retry",
     } for event in events)
 

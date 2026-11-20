@@ -3,18 +3,18 @@
     "用途": "Gold v3：保留 v2 的 18 道历史题与新增 32 道题；按原 18 题和新增 32 题分别汇总。",
     "证据文件相对目录": "E:/免疫资料",
     "审核顺序": "先看 question、expected_behavior 和 required_facts，再核对 gold_evidence；最后检查 forbidden_claims 与 hard_negatives。",
-    "状态提示": "50 题均按用户要求标为 reviewed；标注依据的 AI 索引为 g000008-9f01fc283b。当前已发布 AI 索引为 g000033-71ec3c52f3，尚未在本次变更中重核对或更新 corpus_snapshot。",
-    "AI索引目录": "E:/everythingfinder-db/rag/rag.g000008-9f01fc283b",
-    "答案判分版本": "answer-checks-v2；仅改变答案裁判口径，不改变检索 Gold、反例和索引版本。",
+    "状态提示": "50 题均为 reviewed；标注依据的 AI 索引已更新为 g000033-71ec3c52f3。新旧索引的 11,769 个内容块在原始路径、位置和正文上完全一致。",
+    "AI索引目录": "E:/everythingfinder-db/rag/rag.g000033-71ec3c52f3",
+    "答案判分版本": "answer-checks-v2；答案检查项、检索 Gold 和反例保持不变。",
     "审核提示": "本次答案判分项由旧 Gold 拆分修订，涉及安全项与可选背景的业务适用性应由领域人员复核；旧版保留供历史对照。",
     "证据路径规则": "前 18 题沿用历史相对文件名（相对于 E:/免疫资料）；第 019–050 题的 file 为索引中的原始文件绝对路径，PPTX 的 page 为从 1 开始的幻灯片序号。",
-    "状态变更记录": "2026-10-30：按用户要求将新增 32 题由 pending 改为 reviewed；仅改审核状态，不改问题、证据、答案检查项和 corpus_snapshot。"
+    "状态变更记录": "2026-10-30：按用户要求将新增 32 题由 pending 改为 reviewed；仅改审核状态，不改问题、证据、答案检查项和 corpus_snapshot。 2026-11-01：核对新旧 AI 索引内容一致及全部 123 条证据在新包的原路径、位置、正文中存在，更新 corpus_snapshot。"
   },
   "_字段说明": {
     "id": "题目唯一编号，不随问法或排序改变。",
     "group_id": "同一业务问题的不同问法共用组名；不同业务问题使用不同组名。",
     "question": "拟真的用户原话；未明确的条件不得从问题外补入。",
-    "corpus_snapshot": "标注所对应的已发布 AI 索引包 bundle_id；本批为 g000008-9f01fc283b，不等同于当前全文索引代数。",
+    "corpus_snapshot": "标注所对应的已发布 AI 索引包 bundle_id；本批为 g000033-71ec3c52f3，不等同于普通全文索引代数。",
     "expected_behavior": "期望系统采取的回答方式；具体取值见 _取值说明.expected_behavior。",
     "constraints": {
       "说明": "只记录问题中明确的限制条件；未明确一律为空字符串。",
@@ -112,7 +112,7 @@
         }
       ],
       "group_id": "switch_port_light_off",
-      "corpus_snapshot": "g000008-9f01fc283b",
+      "corpus_snapshot": "g000033-71ec3c52f3",
       "review_status": "reviewed",
       "answer_checks": [
         {
@@ -180,7 +180,7 @@
         }
       ],
       "group_id": "photon_power_led",
-      "corpus_snapshot": "g000008-9f01fc283b",
+      "corpus_snapshot": "g000033-71ec3c52f3",
       "review_status": "reviewed",
       "answer_checks": [
         {
@@ -271,7 +271,7 @@
         }
       ],
       "group_id": "mainboard_replacement",
-      "corpus_snapshot": "g000008-9f01fc283b",
+      "corpus_snapshot": "g000033-71ec3c52f3",
       "review_status": "reviewed",
       "answer_checks": [
         {
@@ -345,7 +345,7 @@
         }
       ],
       "group_id": "temperature_board_roles",
-      "corpus_snapshot": "g000008-9f01fc283b",
+      "corpus_snapshot": "g000033-71ec3c52f3",
       "review_status": "reviewed",
       "answer_checks": [
         {
@@ -413,7 +413,7 @@
         }
       ],
       "group_id": "hardware_board_fault_isolation",
-      "corpus_snapshot": "g000008-9f01fc283b",
+      "corpus_snapshot": "g000033-71ec3c52f3",
       "review_status": "reviewed",
       "answer_checks": [
         {
@@ -493,7 +493,7 @@
         }
       ],
       "group_id": "wash_buffer_intake",
-      "corpus_snapshot": "g000008-9f01fc283b",
+      "corpus_snapshot": "g000033-71ec3c52f3",
       "review_status": "reviewed",
       "answer_checks": [
         {
@@ -550,7 +550,7 @@
         }
       ],
       "group_id": "aspiration_flow_cl8000",
-      "corpus_snapshot": "g000008-9f01fc283b",
+      "corpus_snapshot": "g000033-71ec3c52f3",
       "review_status": "reviewed",
       "answer_checks": [
         {
@@ -609,7 +609,7 @@
         }
       ],
       "group_id": "peristaltic_pump_stall",
-      "corpus_snapshot": "g000008-9f01fc283b",
+      "corpus_snapshot": "g000033-71ec3c52f3",
       "review_status": "reviewed",
       "answer_checks": [
         {
@@ -676,7 +676,7 @@
         }
       ],
       "group_id": "substrate_injection_path",
-      "corpus_snapshot": "g000008-9f01fc283b",
+      "corpus_snapshot": "g000033-71ec3c52f3",
       "review_status": "reviewed",
       "answer_checks": [
         {
@@ -760,7 +760,7 @@
         }
       ],
       "group_id": "substrate_retraction_cl8000",
-      "corpus_snapshot": "g000008-9f01fc283b",
+      "corpus_snapshot": "g000033-71ec3c52f3",
       "review_status": "reviewed",
       "answer_checks": [
         {
@@ -818,7 +818,7 @@
         }
       ],
       "group_id": "bubble_detector_ad_cl8000",
-      "corpus_snapshot": "g000008-9f01fc283b",
+      "corpus_snapshot": "g000033-71ec3c52f3",
       "review_status": "reviewed",
       "answer_checks": [
         {
@@ -871,7 +871,7 @@
         }
       ],
       "group_id": "syringe_reset_failure",
-      "corpus_snapshot": "g000008-9f01fc283b",
+      "corpus_snapshot": "g000033-71ec3c52f3",
       "review_status": "reviewed",
       "answer_checks": [
         {
@@ -923,7 +923,7 @@
         }
       ],
       "group_id": "vacuum_tank_pressure",
-      "corpus_snapshot": "g000008-9f01fc283b",
+      "corpus_snapshot": "g000033-71ec3c52f3",
       "review_status": "reviewed",
       "answer_checks": [
         {
@@ -977,7 +977,7 @@
         }
       ],
       "group_id": "aspiration_flow_cl2000_ambiguous",
-      "corpus_snapshot": "g000008-9f01fc283b",
+      "corpus_snapshot": "g000033-71ec3c52f3",
       "review_status": "reviewed",
       "answer_checks": [
         {
@@ -1043,7 +1043,7 @@
         }
       ],
       "group_id": "bubble_diagnosis_model_comparison",
-      "corpus_snapshot": "g000008-9f01fc283b",
+      "corpus_snapshot": "g000033-71ec3c52f3",
       "review_status": "reviewed",
       "answer_checks": [
         {
@@ -1102,7 +1102,7 @@
         }
       ],
       "group_id": "bubble_alarm_diagnostic_limits",
-      "corpus_snapshot": "g000008-9f01fc283b",
+      "corpus_snapshot": "g000033-71ec3c52f3",
       "review_status": "reviewed",
       "answer_checks": [
         {
@@ -1159,7 +1159,7 @@
         }
       ],
       "group_id": "ultrasound_imaging_probe_stripes_out_of_corpus",
-      "corpus_snapshot": "g000008-9f01fc283b",
+      "corpus_snapshot": "g000033-71ec3c52f3",
       "review_status": "reviewed",
       "answer_checks": [
         {
@@ -1216,7 +1216,7 @@
         }
       ],
       "group_id": "ultrasound_imaging_probe_power_out_of_corpus",
-      "corpus_snapshot": "g000008-9f01fc283b",
+      "corpus_snapshot": "g000033-71ec3c52f3",
       "review_status": "reviewed",
       "answer_checks": [
         {
@@ -1240,7 +1240,7 @@
       "id": "rag-biz-019",
       "group_id": "dev_scope_differential",
       "question": "同批次大部分发光项目定标都报 DEV，该从哪些方面逐步排查？处理后如何复核？",
-      "corpus_snapshot": "g000008-9f01fc283b",
+      "corpus_snapshot": "g000033-71ec3c52f3",
       "expected_behavior": "answer",
       "constraints": {
         "scope": "多项目",
@@ -1295,7 +1295,7 @@
       "id": "rag-biz-020",
       "group_id": "dev_scope_differential",
       "question": "只有一个发光项目定标报 DEV，各浓度点重复性好但偏离理论值，先查哪里、怎么处理？",
-      "corpus_snapshot": "g000008-9f01fc283b",
+      "corpus_snapshot": "g000033-71ec3c52f3",
       "expected_behavior": "answer",
       "constraints": {
         "scope": "单项目",
@@ -1358,7 +1358,7 @@
       "id": "rag-biz-021",
       "group_id": "lvc_previous_or_current",
       "question": "一个项目定标报 LVC，应该沿用上次定标，还是更换本次试剂和校准品？",
-      "corpus_snapshot": "g000008-9f01fc283b",
+      "corpus_snapshot": "g000033-71ec3c52f3",
       "expected_behavior": "clarify",
       "constraints": {
         "scope": "单项目",
@@ -1431,7 +1431,7 @@
       "id": "rag-biz-022",
       "group_id": "all_projects_calibration_low_light",
       "question": "几乎所有发光项目定标失败，发光值都低于 1000，先查哪里、怎么处理？",
-      "corpus_snapshot": "g000008-9f01fc283b",
+      "corpus_snapshot": "g000033-71ec3c52f3",
       "expected_behavior": "answer",
       "constraints": {
         "scope": "多项目",
@@ -1486,7 +1486,7 @@
       "id": "rag-biz-023",
       "group_id": "csdb_bubble_alarm",
       "question": "发光定标报 CSDB 是什么意思？该怎么处理？",
-      "corpus_snapshot": "g000008-9f01fc283b",
+      "corpus_snapshot": "g000033-71ec3c52f3",
       "expected_behavior": "answer",
       "constraints": {
         "scope": "",
@@ -1541,7 +1541,7 @@
       "id": "rag-biz-024",
       "group_id": "quantitative_vs_qualitative_calibration",
       "question": "发光定量项目和定性项目分别怎样根据样本发光值得出结果？",
-      "corpus_snapshot": "g000008-9f01fc283b",
+      "corpus_snapshot": "g000033-71ec3c52f3",
       "expected_behavior": "answer",
       "constraints": {
         "scope": "",
@@ -1596,7 +1596,7 @@
       "id": "rag-biz-025",
       "group_id": "tsh_cea_specimen_room_temperature",
       "question": "TSH 和 CEA 标本在室温下最多能保存多久？",
-      "corpus_snapshot": "g000008-9f01fc283b",
+      "corpus_snapshot": "g000033-71ec3c52f3",
       "expected_behavior": "answer",
       "constraints": {
         "scope": "",
@@ -1651,7 +1651,7 @@
       "id": "rag-biz-026",
       "group_id": "prl_e2_calibration_validity",
       "question": "PRL 和 E2 的发光校准有效期分别是多少天？",
-      "corpus_snapshot": "g000008-9f01fc283b",
+      "corpus_snapshot": "g000033-71ec3c52f3",
       "expected_behavior": "answer",
       "constraints": {
         "scope": "",
@@ -1714,7 +1714,7 @@
       "id": "rag-biz-027",
       "group_id": "infectious_repeat_interpretation",
       "question": "传染病项目初测阳性，复测两次后一阴一阳，结果怎么判？如果两次均阴性呢？",
-      "corpus_snapshot": "g000008-9f01fc283b",
+      "corpus_snapshot": "g000033-71ec3c52f3",
       "expected_behavior": "answer",
       "constraints": {
         "scope": "",
@@ -1769,7 +1769,7 @@
       "id": "rag-biz-028",
       "group_id": "systematic_clinical_result_low_limits",
       "question": "发光临床结果普遍偏低，该从哪些方面排查？能直接判断是哪块板卡故障吗？",
-      "corpus_snapshot": "g000008-9f01fc283b",
+      "corpus_snapshot": "g000033-71ec3c52f3",
       "expected_behavior": "partial_answer",
       "constraints": {
         "scope": "多项目",
@@ -1832,7 +1832,7 @@
       "id": "rag-biz-029",
       "group_id": "hbsag_negative_qc_limit",
       "question": "HBsAg 定量阴性质控靶值为 0，为什么不能直接用 SD 判断是否失控？该按什么范围判断？",
-      "corpus_snapshot": "g000008-9f01fc283b",
+      "corpus_snapshot": "g000033-71ec3c52f3",
       "expected_behavior": "answer",
       "constraints": {
         "scope": "",
@@ -1887,7 +1887,7 @@
       "id": "rag-biz-030",
       "group_id": "new_lot_qc_parameters",
       "question": "新批号质控品目前只有 20 个结果，建立均值和 SD 时采集时间怎么安排，SD 怎么处理？",
-      "corpus_snapshot": "g000008-9f01fc283b",
+      "corpus_snapshot": "g000033-71ec3c52f3",
       "expected_behavior": "answer",
       "constraints": {
         "scope": "",
@@ -1950,7 +1950,7 @@
       "id": "rag-biz-031",
       "group_id": "westgard_12s_vs_13s",
       "question": "一个质控值超过均值 ±2SD，与超过 ±3SD，分别是警告还是失控？",
-      "corpus_snapshot": "g000008-9f01fc283b",
+      "corpus_snapshot": "g000033-71ec3c52f3",
       "expected_behavior": "answer",
       "constraints": {
         "scope": "",
@@ -2005,7 +2005,7 @@
       "id": "rag-biz-032",
       "group_id": "fpsa_single_qc_case",
       "question": "FPSA 质控突然严重偏低，复测仍低，该怎么逐步排查？",
-      "corpus_snapshot": "g000008-9f01fc283b",
+      "corpus_snapshot": "g000033-71ec3c52f3",
       "expected_behavior": "answer",
       "constraints": {
         "scope": "单项目",
@@ -2065,7 +2065,7 @@
       "id": "rag-biz-033",
       "group_id": "qc_competitive_sandwich_pattern",
       "question": "多个项目质控失控，有的显示“＞”、有的显示“＜”，这两种方向可能说明什么？先查哪里？",
-      "corpus_snapshot": "g000008-9f01fc283b",
+      "corpus_snapshot": "g000033-71ec3c52f3",
       "expected_behavior": "answer",
       "constraints": {
         "scope": "多项目",
@@ -2120,7 +2120,7 @@
       "id": "rag-biz-034",
       "group_id": "hbsag_single_result_clinical_diagnosis",
       "question": "患者 HBsAg 初测 0.3 IU/mL，能只凭这个结果确诊感染并决定治疗方案吗？",
-      "corpus_snapshot": "g000008-9f01fc283b",
+      "corpus_snapshot": "g000033-71ec3c52f3",
       "expected_behavior": "refuse",
       "constraints": {
         "scope": "单项目",
@@ -2165,7 +2165,7 @@
       "id": "rag-biz-035",
       "group_id": "iqc_pass_eqa_fail",
       "question": "室内质控显示在控，但室间质评不合格，主要可能是什么原因？应先查什么？",
-      "corpus_snapshot": "g000008-9f01fc283b",
+      "corpus_snapshot": "g000033-71ec3c52f3",
       "expected_behavior": "answer",
       "constraints": {
         "scope": "",
@@ -2235,7 +2235,7 @@
       "id": "rag-biz-036",
       "group_id": "biochem_linear_nonlinear_calibration",
       "question": "生化比色法和比浊法分别该怎样选择线性或非线性校准？需要几个校准点？",
-      "corpus_snapshot": "g000008-9f01fc283b",
+      "corpus_snapshot": "g000033-71ec3c52f3",
       "expected_behavior": "answer",
       "constraints": {
         "scope": "",
@@ -2290,7 +2290,7 @@
       "id": "rag-biz-037",
       "group_id": "biochem_calibration_failure_iqc_k",
       "question": "生化项目校准后 IQC 失控或 K 值超限，应该立即反复定标，还是先核查哪些方面？",
-      "corpus_snapshot": "g000008-9f01fc283b",
+      "corpus_snapshot": "g000033-71ec3c52f3",
       "expected_behavior": "answer",
       "constraints": {
         "scope": "",
@@ -2345,7 +2345,7 @@
       "id": "rag-biz-038",
       "group_id": "daily_calibration_not_guarantee",
       "question": "生化项目每天重新定标，TBIL、DBIL 结果仍不稳定，先考虑什么？",
-      "corpus_snapshot": "g000008-9f01fc283b",
+      "corpus_snapshot": "g000033-71ec3c52f3",
       "expected_behavior": "answer",
       "constraints": {
         "scope": "",
@@ -2400,7 +2400,7 @@
       "id": "rag-biz-039",
       "group_id": "dual_wavelength_interference",
       "question": "生化双波长检测主要用来减轻哪些干扰？双波长怎么选才合适？",
-      "corpus_snapshot": "g000008-9f01fc283b",
+      "corpus_snapshot": "g000033-71ec3c52f3",
       "expected_behavior": "answer",
       "constraints": {
         "scope": "",
@@ -2455,7 +2455,7 @@
       "id": "rag-biz-040",
       "group_id": "small_volume_sample_needle_clog",
       "question": "ALB、GLU 等小样本量项目重复性变差，ALT、AST 较稳，优先查哪里？如果所有项目都变差呢？",
-      "corpus_snapshot": "g000008-9f01fc283b",
+      "corpus_snapshot": "g000033-71ec3c52f3",
       "expected_behavior": "answer",
       "constraints": {
         "scope": "多项目",
@@ -2518,7 +2518,7 @@
       "id": "rag-biz-041",
       "group_id": "water_vs_low_reaction_temperature",
       "question": "生化项目中 Ca、Mg、Fe 先变差，而 LDH 明显偏低，分别该检查什么？",
-      "corpus_snapshot": "g000008-9f01fc283b",
+      "corpus_snapshot": "g000033-71ec3c52f3",
       "expected_behavior": "answer",
       "constraints": {
         "scope": "多项目",
@@ -2573,7 +2573,7 @@
       "id": "rag-biz-042",
       "group_id": "tbil_reagent_actual_consumption",
       "question": "TBIL 试剂 R1 60 mL×3、R2 45 mL×1，参数量分别设为 196 和 49 μL，为什么 R2 先用完？两者每测实际消耗量和可测人份各是多少？",
-      "corpus_snapshot": "g000008-9f01fc283b",
+      "corpus_snapshot": "g000033-71ec3c52f3",
       "expected_behavior": "answer",
       "constraints": {
         "scope": "",
@@ -2636,7 +2636,7 @@
       "id": "rag-biz-043",
       "group_id": "matrix_effect_vs_bias",
       "question": "换用另一品牌质控品后，测得值与标示靶值不一致，是基质效应还是其他原因？基质效应和基质偏差各指什么？",
-      "corpus_snapshot": "g000008-9f01fc283b",
+      "corpus_snapshot": "g000033-71ec3c52f3",
       "expected_behavior": "answer",
       "constraints": {
         "scope": "",
@@ -2699,7 +2699,7 @@
       "id": "rag-biz-044",
       "group_id": "at_ise_hstd_lstd_sequence",
       "question": "A&T-ISE 模块定标时，H-STD 和 L-STD 依什么顺序判通过？3 mV 与 Cl Bias 条件分别在哪一步用？",
-      "corpus_snapshot": "g000008-9f01fc283b",
+      "corpus_snapshot": "g000033-71ec3c52f3",
       "expected_behavior": "answer",
       "constraints": {
         "scope": "",
@@ -2760,7 +2760,7 @@
       "id": "rag-biz-045",
       "group_id": "ise_sodium_low_unique_part_unjustified",
       "question": "BS 生化仪 ISE 钠结果偏低，只凭这一项症状，能直接确定坏的是哪支电极并给出更换物料编码吗？",
-      "corpus_snapshot": "g000008-9f01fc283b",
+      "corpus_snapshot": "g000033-71ec3c52f3",
       "expected_behavior": "refuse",
       "constraints": {
         "scope": "单项目",
@@ -2805,7 +2805,7 @@
       "id": "rag-biz-046",
       "group_id": "immuno_dark_count",
       "question": "免疫光度计暗计数诊断要检查多少个杯位？合格上限和通常正常值各是多少 CPS？",
-      "corpus_snapshot": "g000008-9f01fc283b",
+      "corpus_snapshot": "g000033-71ec3c52f3",
       "expected_behavior": "answer",
       "constraints": {
         "scope": "",
@@ -2860,7 +2860,7 @@
       "id": "rag-biz-047",
       "group_id": "immuno_dcf_acceptance",
       "question": "免疫光度计做 DCF 诊断，测几次？相对极差和 DCF 因子的通过标准分别是多少？",
-      "corpus_snapshot": "g000008-9f01fc283b",
+      "corpus_snapshot": "g000033-71ec3c52f3",
       "expected_behavior": "answer",
       "constraints": {
         "scope": "",
@@ -2915,7 +2915,7 @@
       "id": "rag-biz-048",
       "group_id": "temperature_board_model_compatibility",
       "question": "CL-6000i 与 CL-8000i 的反应盘、磁分离盘温度采集板物料能通用吗？编码分别是什么？",
-      "corpus_snapshot": "g000008-9f01fc283b",
+      "corpus_snapshot": "g000033-71ec3c52f3",
       "expected_behavior": "answer",
       "constraints": {
         "scope": "",
@@ -3002,7 +3002,7 @@
       "id": "rag-biz-049",
       "group_id": "cl6000_sdm_backup_transport",
       "question": "CL-6000i 的 SDM 非运动参数能不能一键备份和恢复？具体怎么做？",
-      "corpus_snapshot": "g000008-9f01fc283b",
+      "corpus_snapshot": "g000033-71ec3c52f3",
       "expected_behavior": "clarify",
       "constraints": {
         "scope": "",
@@ -3067,7 +3067,7 @@
       "id": "rag-biz-050",
       "group_id": "immuno_dark_count_failure",
       "question": "CL-8000i 暗计数诊断失败，先检查哪些环节？目前能直接判定光度计损坏并确定更换件吗？",
-      "corpus_snapshot": "g000008-9f01fc283b",
+      "corpus_snapshot": "g000033-71ec3c52f3",
       "expected_behavior": "partial_answer",
       "constraints": {
         "scope": "",

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from difflib import SequenceMatcher
 from pathlib import PurePath
 from typing import Any
@@ -40,6 +41,8 @@ class EvidencePart:
     quote_original_end: int | None = None
     source_original_start: int | None = None
     source_original_end: int | None = None
+    source_quote_occurrences: int = 1
+    source_canonical_hash: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,6 +133,8 @@ def _declared_alternatives(
                             normalized_quote.offsets[quote_end - 1][1],
                             source_normalized.offsets[source_start][0],
                             source_normalized.offsets[source_end - 1][1],
+                            source_normalized.text.count(source_normalized.text[source_start:source_end]),
+                            hashlib.sha256(source_normalized.text.encode("utf-8")).hexdigest(),
                         ))
                     offset += len(text)
                 if parts and all(part.chunk_id for part in parts):
@@ -145,7 +150,7 @@ def _declared_alternatives(
     return tuple(unique.values())
 
 
-def map_case_evidence(case: GoldCase, chunk_rows: list[dict[str, Any]]) -> list[GoldEvidenceMatch]:
+def _map_declared_case_evidence(case: GoldCase, chunk_rows: list[dict[str, Any]]) -> list[GoldEvidenceMatch]:
     matches: list[GoldEvidenceMatch] = []
     for kind, entries in (("positive", case.gold_evidence), ("hard_negative", case.hard_negatives)):
         for index, entry in enumerate(entries, 1):
@@ -266,6 +271,53 @@ def map_case_evidence(case: GoldCase, chunk_rows: list[dict[str, Any]]) -> list[
                 suspected_chunk_ids=tuple(dict.fromkeys(suspected_ids)),
                 alternatives=tuple(alternatives),
             ))
+    return matches
+
+
+def approved_alternative_sources(entry: dict[str, Any]) -> list[dict[str, Any]]:
+    """Explicit, fact-scoped OR sources; no inferred cross-document equivalence.
+
+    Canonically equal quotations keep EvidencePart offsets in the same quote
+    coordinate system. Different facts must remain separate requirements.
+    """
+    result = []
+    for source in entry.get("alternative_sources", []):
+        if not isinstance(source, dict) or source.get("approved") is not True:
+            raise ValueError("Alternative source requires explicit approval")
+        quote = str(source.get("quote") or entry.get("quote") or "")
+        if not source.get("file") or not quote or canonical_content(quote) != canonical_content(str(entry.get("quote") or "")):
+            raise ValueError("Alternative source must support the same canonical quotation")
+        result.append({**source, "quote": quote})
+    return result
+
+
+def map_case_evidence(case: GoldCase, chunk_rows: list[dict[str, Any]]) -> list[GoldEvidenceMatch]:
+    matches = _map_declared_case_evidence(case, chunk_rows)
+    for index, entry in enumerate(case.gold_evidence):
+        base = matches[index]
+        alternatives = list(base.alternatives)
+        approved_ids = []
+        for number, source in enumerate(approved_alternative_sources(entry), 1):
+            # An explicitly declared absolute source is bound to that path,
+            # rather than every unrelated file sharing its basename.
+            path = str(source["file"]).replace("\\", "/").casefold()
+            rows = [r for r in chunk_rows if str(r.get("file_path") or "").replace("\\", "/").casefold() == path]
+            mapped = _map_declared_case_evidence(
+                replace(case, gold_evidence=(source,), hard_negatives=()), rows,
+            )[0]
+            for item in mapped.alternatives:
+                if not item.confirmed:
+                    continue
+                alternatives.append(replace(item,
+                    alternative_id=f"{base.evidence_id}:approved_source:{number}:{len(alternatives)+1}",
+                    match_type="approved_source"))
+                approved_ids.extend(p.chunk_id for p in item.parts)
+        if approved_ids:
+            matches[index] = replace(base,
+                chunk_ids=tuple(dict.fromkeys((*base.chunk_ids, *approved_ids))),
+                equivalent_chunk_ids=tuple(dict.fromkeys((*base.equivalent_chunk_ids, *approved_ids))),
+                alternatives=tuple(alternatives), confidence="exact",
+                reason="已明确批准的同事实替代来源按OR计分；每项事实仍只计一次")
     return matches
 
 

@@ -204,6 +204,9 @@ class VectorIndexStore:
         connection = VectorIndexStore.connect_read_only(database_path)
         try:
             output: dict[str, dict[str, object]] = {}
+            has_representations = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='vector_unit_representation'"
+            ).fetchone() is not None
             for offset in range(0, len(unit_ids), 500):
                 batch = unit_ids[offset:offset + 500]
                 marks = ",".join("?" for _ in batch)
@@ -211,6 +214,12 @@ class VectorIndexStore:
                     f"SELECT * FROM vector_units WHERE unit_id IN ({marks})", batch,
                 ).fetchall()
                 output.update({str(row["unit_id"]): dict(row) for row in rows})
+                if has_representations:
+                    for row in connection.execute(
+                        f"SELECT unit_id,metadata_json FROM vector_unit_representation WHERE unit_id IN ({marks})", batch,
+                    ):
+                        if str(row[0]) in output:
+                            output[str(row[0])]["representation_metadata"] = json.loads(row[1])
             return output
         finally:
             connection.close()

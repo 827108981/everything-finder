@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import re
+import json
+from pathlib import Path
+
+_VOCABULARY = json.loads((Path(__file__).parent / "domain_configs/query_vocabulary.json").read_text(encoding="utf8"))
 from dataclasses import dataclass, replace
 
 from local_full_text_search.core.normalizer import normalize_text
@@ -32,42 +36,13 @@ _QUESTION_SUFFIXES = (
 )
 
 # 只扩展语义稳定、实际会出现在维修资料中的同义词。
-_STABLE_VARIANTS = {
-    "不通过": ("未通过", "失败"),
-    "未通过": ("不通过", "失败"),
-    "报错": ("错误", "异常"),
-    "错误": ("报错", "异常"),
-    "偏低": ("低", "下降"),
-    "偏高": ("高", "升高"),
-}
+_STABLE_VARIANTS = _VOCABULARY["_STABLE_VARIANTS"]
 
-_DOMAIN_TERMS = (
-    "免疫底物", "底物本底", "发光值异常", "发光值偏低", "发光值偏高",
-    "定标失败", "定标异常", "质控异常", "发光值", "异常", "失败",
-    "检查点", "数据库", "搜索索引", "全文索引", "AI索引", "向量索引",
-    "重排模型", "向量模型", "搜索任务", "索引任务", "项目", "底物", "本底",
-    "定标", "校准", "质控", "试剂", "样本", "标本", "发光", "异常", "失败",
-    "不通过", "未通过", "报错", "错误", "恢复", "中断", "索引", "任务",
-    "文件", "正文", "数据库", "版本", "模型", "向量", "搜索", "启动",
-    "停止", "取消", "线程", "锁", "事务", "快照", "发布", "generation",
-)
+_DOMAIN_TERMS = _VOCABULARY["_DOMAIN_TERMS"]
 
-_SCOPE_PATTERNS = {
-    "single": ("只有某个项目", "某个项目", "单个项目", "只有一个项目", "仅一个项目", "单一项目"),
-    "multiple": ("多个项目", "部分项目", "几个项目", "一部分项目"),
-    "all": ("全部项目", "所有项目", "所有检测项目", "每个项目", "大面积"),
-}
-_STAGE_PATTERNS = {
-    "calibration": ("定标", "校准", "校正"),
-    "quality_control": ("质控", "质控品", "质量控制"),
-    "sample_test": ("样本检测", "标本检测"),
-    "startup": ("开机", "启动", "自检"),
-}
-_DIRECTION_PATTERNS = {
-    "low": ("偏低", "过低", "低于", "下降", "不足"),
-    "high": ("偏高", "过高", "高于", "升高"),
-    "abnormal": ("异常", "故障", "报错", "错误", "不通过", "失败"),
-}
+_SCOPE_PATTERNS = _VOCABULARY["_SCOPE_PATTERNS"]
+_STAGE_PATTERNS = _VOCABULARY["_STAGE_PATTERNS"]
+_DIRECTION_PATTERNS = _VOCABULARY["_DIRECTION_PATTERNS"]
 _STOP_CONTENT = ("这个时候", "这个问题", "的情况", "的原因", "该如何", "应该如何", "请帮我")
 _QUESTION_WORDS = re.compile(
     r"(?:什么时候|是什么原因|有什么|为什么|怎么样|怎么办|如何|怎样|怎么|何时|多少|哪些|哪个|是否|请问|吗|呢)"
@@ -331,7 +306,10 @@ class QueryAnalyzer:
         topic_match = re.match(r"^\s*([\u3400-\u9fff]{2,8})(?=如何|怎么|怎样)", normalized)
         if topic_match:
             topic = topic_match.group(1)
-            if not any(item.is_hard and item.source_text and item.source_text in topic for item in constraints):
+            if topic != "项目" and not any(
+                item.is_hard and item.source_text and item.source_text in topic
+                for item in constraints
+            ):
                 constraints.append(QueryConstraint(
                     ConstraintKind.TOPIC, topic, source_text=topic,
                     reason="问题句首明确给出主题，需结合来源范围和正文事实核对",
@@ -339,7 +317,9 @@ class QueryAnalyzer:
         for term in matched_terms:
             object_term = next(
                 (
-                    value for value in ("发光值", "底物", "本底", "试剂", "样本", "标本", "项目")
+                    # “项目”是检索词，不单独表示证据适用条件；具体范围仍由
+                    # single/multiple/all 表达，具体项目名称仍保留在检索词中。
+                    value for value in _VOCABULARY["_OBJECT_TERMS"]
                     if value in term
                 ),
                 None,

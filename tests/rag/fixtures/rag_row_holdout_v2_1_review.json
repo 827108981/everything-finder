@@ -1,0 +1,434 @@
+{
+  "cases": [
+    {
+      "id": "rag-row-holdout2-001",
+      "group_id": "row_holdout2_topic_001",
+      "question": "免疫仪样本条码支持哪些条形码码制？",
+      "corpus_snapshot": "g000033-71ec3c52f3",
+      "expected_behavior": "answer",
+      "constraints": {
+        "scope": "",
+        "stage": "",
+        "direction": "",
+        "object": "免疫仪样本条码码制"
+      },
+      "missing_fields": [],
+      "gold_evidence": [
+        {
+          "file": "E:/免疫资料/高速免疫/10-学习参考资料包/高速免疫场景化培训教材-条码V1.1.pptx",
+          "page": 17,
+          "position": "原文对应表格/正文；页码从1开始",
+          "quote": "支持条形码码制\nCodabar、I 2 of 5、code128、code39、UPC/EAN、Code93",
+          "relevance": 2,
+          "why_sufficient": "原资料与已发布索引逐字核实；对象及字段/步骤对应本题。"
+        },
+        {
+          "file": "E:/免疫资料/中低速免疫/10-学习参考资料包/中低速免疫场景化培训教材-条码V1.1.pptx",
+          "page": 14,
+          "position": "原文对应表格/正文；页码从1开始",
+          "quote": "支持条形码码制\nCodabar、I 2 of 5、code128、code39、UPC/EAN、Code93",
+          "relevance": 2,
+          "why_sufficient": "原资料与已发布索引逐字核实；对象及字段/步骤对应本题。"
+        }
+      ],
+      "hard_negatives": [],
+      "required_facts": [
+        "高速和中低速免疫资料共同列出Codabar、I 2 of 5、Code128、Code39、UPC/EAN、Code93。"
+      ],
+      "forbidden_claims": [
+        "把共同条码码制限定为仅CL-2600i支持。",
+        "把单一机型独有规则推广到全部免疫仪。",
+        "不同资料不一致时将支持码制直接取并集作为共同标准。"
+      ],
+      "answer_checks": [
+        {
+          "id": "F1",
+          "role": "core",
+          "text": "高速和中低速免疫资料共同列出Codabar、I 2 of 5、Code128、Code39、UPC/EAN、Code93。"
+        }
+      ],
+      "review_status": "reviewed",
+      "annotation_provenance": {
+        "review_date": "2026-11-12",
+        "review_basis": "用户本轮明确确认业务结论；按原资料和当前AI索引核实，不依据系统答案改标。",
+        "source_version": "previous fixture",
+        "model_alias_policy": "不推断BS-2800与BS-2800M等价，电压题使用手册准确型号。"
+      },
+      "evidence_requirements": {
+        "distinct_sources_min": 2,
+        "platform_groups": [
+          "高速免疫",
+          "中低速免疫"
+        ],
+        "consistency_required": true
+      }
+    },
+    {
+      "id": "rag-row-holdout2-002",
+      "group_id": "row_holdout2_topic_002",
+      "question": "CL-8000i光耦转接板的绿色状态灯常亮和熄灭，分别对应光耦什么状态？",
+      "corpus_snapshot": "g000033-71ec3c52f3",
+      "expected_behavior": "answer",
+      "constraints": {
+        "scope": "",
+        "stage": "",
+        "direction": "",
+        "object": ""
+      },
+      "missing_fields": [],
+      "gold_evidence": [
+        {
+          "file": "E:\\免疫资料\\全线免疫\\10-学习参考资料包\\免疫场景化培训教材-机械V1.1.pptx",
+          "page": 23,
+          "position": "原生表1第2行",
+          "quote": "绿色指示灯\n不涉及\n对应光耦未遮挡\n对应光耦被遮挡",
+          "relevance": 2,
+          "why_sufficient": "原文对象、列名和数值直接对应问题，答案只要求所问事实。"
+        }
+      ],
+      "hard_negatives": [],
+      "required_facts": [
+        "常亮表示对应光耦未遮挡，熄灭表示被遮挡。"
+      ],
+      "forbidden_claims": [],
+      "answer_checks": [
+        {
+          "id": "F1",
+          "role": "core",
+          "text": "常亮表示对应光耦未遮挡，熄灭表示被遮挡。"
+        }
+      ],
+      "review_status": "pending"
+    },
+    {
+      "id": "rag-row-holdout2-003",
+      "group_id": "row_holdout2_topic_003",
+      "question": "BS-2800M和BS-5000的反应体积范围分别是多少？",
+      "corpus_snapshot": "g000033-71ec3c52f3",
+      "expected_behavior": "answer",
+      "constraints": {
+        "scope": "",
+        "stage": "",
+        "direction": "",
+        "object": ""
+      },
+      "missing_fields": [],
+      "gold_evidence": [
+        {
+          "file": "E:\\生化资料\\BS5000\\BS-5000系列_工程师品培训PPT_V1.0_CH\\A-CMSH-26001-BS-5000系列_工程师品培训PPT_V1.0_CH\\IVD_生化_BS-5000系列_02 产品介绍.pptx",
+          "page": 5,
+          "position": "原生表1第4行",
+          "quote": "反应体积\n80-280uL\n70-240uL",
+          "relevance": 2,
+          "why_sufficient": "原文对象、列名和数值直接对应问题，答案只要求所问事实。"
+        }
+      ],
+      "hard_negatives": [],
+      "required_facts": [
+        "BS-2800M为80–280μL。",
+        "BS-5000为70–240μL。"
+      ],
+      "forbidden_claims": [],
+      "answer_checks": [
+        {
+          "id": "F1",
+          "role": "core",
+          "text": "BS-2800M为80–280μL。"
+        },
+        {
+          "id": "F2",
+          "role": "core",
+          "text": "BS-5000为70–240μL。"
+        }
+      ],
+      "review_status": "pending"
+    },
+    {
+      "id": "rag-row-holdout2-004",
+      "group_id": "row_holdout2_topic_004",
+      "question": "BS-5000透射模块的卤钨灯标称寿命是多少小时？",
+      "corpus_snapshot": "g000033-71ec3c52f3",
+      "expected_behavior": "answer",
+      "constraints": {
+        "scope": "",
+        "stage": "",
+        "direction": "",
+        "object": ""
+      },
+      "missing_fields": [],
+      "gold_evidence": [
+        {
+          "file": "E:\\生化资料\\BS5000\\BS-5000系列_工程师品培训PPT_V1.0_CH\\A-CMSH-26001-BS-5000系列_工程师品培训PPT_V1.0_CH\\IVD_生化_BS-5000系列_06 光学及反应盘子系统.pptx",
+          "page": 12,
+          "position": "原生表1第3行",
+          "quote": "光源（卤钨灯）寿命\n投射模块：2400小时\n",
+          "relevance": 2,
+          "why_sufficient": "原文对象、列名和数值直接对应问题，答案只要求所问事实。"
+        }
+      ],
+      "hard_negatives": [],
+      "required_facts": [
+        "标称寿命为2400小时。"
+      ],
+      "forbidden_claims": [],
+      "answer_checks": [
+        {
+          "id": "F1",
+          "role": "core",
+          "text": "标称寿命为2400小时。"
+        }
+      ],
+      "review_status": "pending"
+    },
+    {
+      "id": "rag-row-holdout2-005",
+      "group_id": "row_holdout2_topic_005",
+      "question": "BS-360E和BS-430的反应盘分别用什么方式加热？",
+      "corpus_snapshot": "g000033-71ec3c52f3",
+      "expected_behavior": "answer",
+      "constraints": {
+        "scope": "",
+        "stage": "",
+        "direction": "",
+        "object": ""
+      },
+      "missing_fields": [],
+      "gold_evidence": [
+        {
+          "file": "E:\\生化资料\\生化场景化培训教材-热工V1.1.pptx",
+          "page": 5,
+          "position": "原生表1第2行",
+          "quote": "BS-360E\n空气浴\n/\n直热\n直热\n直热\n直热\n帕尔贴制冷",
+          "relevance": 2,
+          "why_sufficient": "原文对象、列名和数值直接对应问题，答案只要求所问事实。"
+        },
+        {
+          "file": "E:\\生化资料\\生化场景化培训教材-热工V1.1.pptx",
+          "page": 5,
+          "position": "原生表1第3行",
+          "quote": "BS-430\n固体直热\n/\n直热\n直热\n/\n直热\n帕尔贴制冷",
+          "relevance": 2,
+          "why_sufficient": "原文对象、列名和数值直接对应问题，答案只要求所问事实。"
+        }
+      ],
+      "hard_negatives": [],
+      "required_facts": [
+        "BS-360E采用空气浴，BS-430采用固体直热。"
+      ],
+      "forbidden_claims": [],
+      "answer_checks": [
+        {
+          "id": "F1",
+          "role": "core",
+          "text": "BS-360E采用空气浴，BS-430采用固体直热。"
+        }
+      ],
+      "review_status": "pending"
+    },
+    {
+      "id": "rag-row-holdout2-006",
+      "group_id": "row_holdout2_topic_006",
+      "question": "生化仪去离子水加热保护开关在多少温度关断，降到多少温度重新开启？",
+      "corpus_snapshot": "g000033-71ec3c52f3",
+      "expected_behavior": "answer",
+      "constraints": {
+        "scope": "",
+        "stage": "",
+        "direction": "",
+        "object": ""
+      },
+      "missing_fields": [],
+      "gold_evidence": [
+        {
+          "file": "E:\\生化资料\\生化场景化培训教材-热工V1.1.pptx",
+          "page": 11,
+          "position": "原生表1第2行",
+          "quote": "去离子加热保护开关\n1\n60℃\n< 30℃.",
+          "relevance": 2,
+          "why_sufficient": "原文对象、列名和数值直接对应问题，答案只要求所问事实。"
+        }
+      ],
+      "hard_negatives": [],
+      "required_facts": [
+        "60℃关断，低于30℃开启。"
+      ],
+      "forbidden_claims": [],
+      "answer_checks": [
+        {
+          "id": "F1",
+          "role": "core",
+          "text": "60℃关断，低于30℃开启。"
+        }
+      ],
+      "review_status": "pending"
+    },
+    {
+      "id": "rag-row-holdout2-007",
+      "group_id": "row_holdout2_topic_007",
+      "question": "BS-800反应盘温度传感器在37℃时正常阻值约多少，是正还是负温度系数？",
+      "corpus_snapshot": "g000033-71ec3c52f3",
+      "expected_behavior": "answer",
+      "constraints": {
+        "scope": "",
+        "stage": "",
+        "direction": "",
+        "object": ""
+      },
+      "missing_fields": [],
+      "gold_evidence": [
+        {
+          "file": "E:\\生化资料\\生化场景化培训教材-热工V1.1.pptx",
+          "page": 27,
+          "position": "原生表1第2行",
+          "quote": "反应盘温度传感器\n3\n1115Ω~37 ℃\n（正温度系数）",
+          "relevance": 2,
+          "why_sufficient": "原文对象、列名和数值直接对应问题，答案只要求所问事实。"
+        },
+        {
+          "file": "E:\\生化资料\\生化场景化培训教材-热工V1.1.pptx",
+          "page": 26,
+          "position": "反应盘加热机型标签",
+          "quote": "BS-800",
+          "relevance": 2,
+          "why_sufficient": "相邻连续反应盘加热页面标示BS-800；阻值表在下一张。"
+        }
+      ],
+      "hard_negatives": [],
+      "required_facts": [
+        "37℃时约1115Ω，正温度系数。"
+      ],
+      "forbidden_claims": [],
+      "answer_checks": [
+        {
+          "id": "F1",
+          "role": "core",
+          "text": "37℃时约1115Ω，正温度系数。"
+        }
+      ],
+      "review_status": "pending"
+    },
+    {
+      "id": "rag-row-holdout2-008",
+      "group_id": "row_holdout2_topic_008",
+      "question": "生化仪压缩制冷模块红灯连续闪13次、间隔4秒后重复，是什么报警？什么条件会触发？",
+      "corpus_snapshot": "g000033-71ec3c52f3",
+      "expected_behavior": "answer",
+      "constraints": {
+        "scope": "",
+        "stage": "",
+        "direction": "",
+        "object": ""
+      },
+      "missing_fields": [],
+      "gold_evidence": [
+        {
+          "file": "E:\\生化资料\\生化场景化培训教材-热工V1.1.pptx",
+          "page": 51,
+          "position": "原生表1第4行",
+          "quote": "防冻\n13\n300毫秒\n4秒\n制冷模块内部检测到的蒸发器温度低于-20℃，持续5min，告警，提示存在蒸发器结冰的风险。",
+          "relevance": 2,
+          "why_sufficient": "原文对象、列名和数值直接对应问题，答案只要求所问事实。"
+        }
+      ],
+      "hard_negatives": [],
+      "required_facts": [
+        "是防冻报警。",
+        "内部蒸发器温度低于−20℃持续5分钟触发。"
+      ],
+      "forbidden_claims": [],
+      "answer_checks": [
+        {
+          "id": "F1",
+          "role": "core",
+          "text": "是防冻报警。"
+        },
+        {
+          "id": "F2",
+          "role": "core",
+          "text": "内部蒸发器温度低于−20℃持续5分钟触发。"
+        }
+      ],
+      "review_status": "pending"
+    },
+    {
+      "id": "rag-row-holdout2-009",
+      "group_id": "row_holdout2_topic_009",
+      "question": "BS-5000有多少个测量波长，覆盖什么范围？",
+      "corpus_snapshot": "g000033-71ec3c52f3",
+      "expected_behavior": "answer",
+      "constraints": {
+        "scope": "",
+        "stage": "",
+        "direction": "",
+        "object": ""
+      },
+      "missing_fields": [],
+      "gold_evidence": [
+        {
+          "file": "E:\\生化资料\\BS5000\\BS-5000系列_工程师品培训PPT_V1.0_CH\\A-CMSH-26001-BS-5000系列_工程师品培训PPT_V1.0_CH\\IVD_生化_BS-5000系列_02 产品介绍.pptx",
+          "page": 5,
+          "position": "原生表1第3行",
+          "quote": "测量波长\n16个，340-850nm\n16个，340-850nm",
+          "relevance": 2,
+          "why_sufficient": "原文对象、列名和数值直接对应问题，答案只要求所问事实。"
+        }
+      ],
+      "hard_negatives": [],
+      "required_facts": [
+        "16个测量波长，范围340–850nm。"
+      ],
+      "forbidden_claims": [],
+      "answer_checks": [
+        {
+          "id": "F1",
+          "role": "core",
+          "text": "16个测量波长，范围340–850nm。"
+        }
+      ],
+      "review_status": "pending"
+    },
+    {
+      "id": "rag-row-holdout2-010",
+      "group_id": "row_holdout2_topic_010",
+      "question": "CL-8000i样本针水平零位传感器接在光耦转接板哪个接口？能换到其他接口吗？",
+      "corpus_snapshot": "g000033-71ec3c52f3",
+      "expected_behavior": "answer",
+      "constraints": {
+        "scope": "",
+        "stage": "",
+        "direction": "",
+        "object": ""
+      },
+      "missing_fields": [],
+      "gold_evidence": [
+        {
+          "file": "E:\\免疫资料\\全线免疫\\10-学习参考资料包\\免疫场景化培训教材-机械V1.1.pptx",
+          "page": 23,
+          "position": "传感器接线注意事项",
+          "quote": "CL-8000i样本针水平零位传感器的插头在光耦转接板上的J1位置，不能随意插到其他位置",
+          "relevance": 2,
+          "why_sufficient": "原文对象、列名和数值直接对应问题，答案只要求所问事实。"
+        }
+      ],
+      "hard_negatives": [],
+      "required_facts": [
+        "接在J1，位置一一对应，不能随意换到其他接口。"
+      ],
+      "forbidden_claims": [],
+      "answer_checks": [
+        {
+          "id": "F1",
+          "role": "core",
+          "text": "接在J1，位置一一对应，不能随意换到其他接口。"
+        }
+      ],
+      "review_status": "pending"
+    }
+  ],
+  "_说明": {
+    "version": "business-gold-v5-20261112",
+    "previous_file": "E:\\code\\everything-finder\\tests\\rag\\fixtures\\rag_row_holdout_v2_review.json",
+    "cases": 10,
+    "review_policy": "本轮五题业务结论获用户明确确认，其余状态保持不变；040从活动集合删除。"
+  }
+}

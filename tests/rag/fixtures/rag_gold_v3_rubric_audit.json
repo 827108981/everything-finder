@@ -1,0 +1,3686 @@
+{
+  "source_sha256": "a56594cb13900105ffc16aef3d9091858d2cec4db1baa87e6aab959edc74ce27",
+  "bundle_id": "g000033-71ec3c52f3",
+  "counts": {
+    "total": 50,
+    "revise": 13,
+    "disputed": 4,
+    "keep": 33
+  },
+  "cases": [
+    {
+      "id": "rag-biz-001",
+      "question": "仪器已上电、网线也接好了，交换机这个端口灯还是灭的，怎么查？",
+      "expected_behavior": "answer",
+      "missing_fields": [],
+      "source_review_status": "reviewed",
+      "review_status": "pending",
+      "proposal": "revise",
+      "reason": "用户已说明上电、接线且灯灭；正常灯态是背景，标准模式、端口排查与更换前提仍是必答。",
+      "original_checks": [
+        {
+          "id": "F1",
+          "text": "步骤1：确认交换机已上电，电源指示灯亮起。",
+          "role": "core"
+        },
+        {
+          "id": "F2",
+          "text": "步骤2：确认模式开关处于标准模式。",
+          "role": "core"
+        },
+        {
+          "id": "F3",
+          "text": "步骤3：仪器上电且网线已连接时，检查对应端口灯是否常亮或闪烁。",
+          "role": "core"
+        },
+        {
+          "id": "F4",
+          "text": "步骤4：若端口灯灭，来回拨动模式开关并最终拨回标准模式，再尝试更换插口。",
+          "role": "core"
+        },
+        {
+          "id": "F5",
+          "text": "步骤5：上述检查后仍异常，才考虑更换交换机。",
+          "role": "core"
+        }
+      ],
+      "proposed_checks": [
+        {
+          "id": "F1",
+          "text": "步骤1：确认交换机已上电，电源指示灯亮起。",
+          "role": "context"
+        },
+        {
+          "id": "F2",
+          "text": "步骤2：确认模式开关处于标准模式。",
+          "role": "core"
+        },
+        {
+          "id": "F3",
+          "text": "步骤3：仪器上电且网线已连接时，检查对应端口灯是否常亮或闪烁。",
+          "role": "context"
+        },
+        {
+          "id": "F4",
+          "text": "步骤4：若端口灯灭，来回拨动模式开关并最终拨回标准模式，再尝试更换插口。",
+          "role": "core"
+        },
+        {
+          "id": "F5",
+          "text": "步骤5：上述检查后仍异常，才考虑更换交换机。",
+          "role": "core"
+        }
+      ],
+      "evidence": [
+        {
+          "evidence_id": "rag-biz-001:positive:1",
+          "file": "免疫场景化培训教材-硬件V1.1.pdf",
+          "page": "9",
+          "quote": "检查点：检查确认交换机的工作状态及指示灯状态\n1. 检查交换机是否已上电-指示灯亮起\n2. 交换机的模式开关是否在【标准模式】下；\n3. 仪器上电状态下，已连接网线的接口对应的指示灯是否处于常亮或闪烁的状态；\n4. 若接口对应的指示灯为灭：\na) 尝试来回拨动模式开关，并最终拨回标准模式（模式开关接触不良）；\nb) 尝试更换插口\n5. 存在异常则考虑更换交换机；",
+          "indexed": true,
+          "confidence": "exact"
+        }
+      ],
+      "scope_note": "复用原已审核引文，本轮只核实其仍存在于当前AI索引；未重新打开全部原文件，未新增业务事实或引文。",
+      "check_review": [
+        {
+          "id": "F1",
+          "role": "context",
+          "decision": "optional",
+          "reason": "用户已说明上电、接线且灯灭；正常灯态是背景，标准模式、端口排查与更换前提仍是必答。"
+        },
+        {
+          "id": "F2",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        },
+        {
+          "id": "F3",
+          "role": "context",
+          "decision": "optional",
+          "reason": "用户已说明上电、接线且灯灭；正常灯态是背景，标准模式、端口排查与更换前提仍是必答。"
+        },
+        {
+          "id": "F4",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        },
+        {
+          "id": "F5",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        }
+      ]
+    },
+    {
+      "id": "rag-biz-002",
+      "question": "CL-8000i功率驱动板上的D63、D64灯分别表示什么？",
+      "expected_behavior": "answer",
+      "missing_fields": [],
+      "source_review_status": "reviewed",
+      "review_status": "pending",
+      "proposal": "revise",
+      "reason": "只问D63/D64含义，上电后应亮起是可选背景。",
+      "original_checks": [
+        {
+          "id": "F1",
+          "text": "D63表示+12V光子计数电源上电。",
+          "role": "core"
+        },
+        {
+          "id": "F2",
+          "text": "D64表示-12V光子计数电源上电。",
+          "role": "core"
+        },
+        {
+          "id": "F3",
+          "text": "两灯在整机上电后应亮起。",
+          "role": "core"
+        }
+      ],
+      "proposed_checks": [
+        {
+          "id": "F1",
+          "text": "D63表示+12V光子计数电源上电。",
+          "role": "core"
+        },
+        {
+          "id": "F2",
+          "text": "D64表示-12V光子计数电源上电。",
+          "role": "core"
+        },
+        {
+          "id": "F3",
+          "text": "两灯在整机上电后应亮起。",
+          "role": "context"
+        }
+      ],
+      "evidence": [
+        {
+          "evidence_id": "rag-biz-002:positive:1",
+          "file": "免疫场景化培训教材-硬件V1.1.pdf",
+          "page": "20",
+          "quote": "D63：绿色，整机上电后应亮起，表示+12V光子计数电源已经上电；\nD64：绿色，整机上电后应亮起，表示-12V光子计数电源已经上电；",
+          "indexed": true,
+          "confidence": "exact"
+        }
+      ],
+      "scope_note": "复用原已审核引文，本轮只核实其仍存在于当前AI索引；未重新打开全部原文件，未新增业务事实或引文。",
+      "check_review": [
+        {
+          "id": "F1",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        },
+        {
+          "id": "F2",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        },
+        {
+          "id": "F3",
+          "role": "context",
+          "decision": "optional",
+          "reason": "只问D63/D64含义，上电后应亮起是可选背景。"
+        }
+      ]
+    },
+    {
+      "id": "rag-biz-003",
+      "question": "更换主控板前后，整机参数、IP和序列号要怎么处理？",
+      "expected_behavior": "answer",
+      "missing_fields": [],
+      "source_review_status": "reviewed",
+      "review_status": "pending",
+      "proposal": "disputed",
+      "reason": "问参数、IP和序列号，并未询问拆装方法；断电和防静电不能因资料同页就自动成为本题必答。若答案涉及实际拆装，安全要求仍适用，需业务复核。",
+      "original_checks": [
+        {
+          "id": "F1",
+          "text": "更换前备份整机调试参数到PC，通常换后恢复到新主控板",
+          "role": "core"
+        },
+        {
+          "id": "F2",
+          "text": "部分带扣板主控板可移用旧扣板，此时无需重新导入整机参数",
+          "role": "core"
+        },
+        {
+          "id": "F3",
+          "text": "更换后重新配置各模块IP或机器号",
+          "role": "core"
+        },
+        {
+          "id": "F4",
+          "text": "更换后在研发权限下重新配置仪器序列号",
+          "role": "core"
+        },
+        {
+          "id": "S1",
+          "text": "拆装板卡前必须断电，禁止带电插拔",
+          "role": "safety"
+        },
+        {
+          "id": "S2",
+          "text": "拆装板卡时佩戴防静电手环",
+          "role": "safety"
+        }
+      ],
+      "proposed_checks": [
+        {
+          "id": "F1",
+          "text": "更换前备份整机调试参数到PC，通常换后恢复到新主控板",
+          "role": "core"
+        },
+        {
+          "id": "F2",
+          "text": "部分带扣板主控板可移用旧扣板，此时无需重新导入整机参数",
+          "role": "core"
+        },
+        {
+          "id": "F3",
+          "text": "更换后重新配置各模块IP或机器号",
+          "role": "core"
+        },
+        {
+          "id": "F4",
+          "text": "更换后在研发权限下重新配置仪器序列号",
+          "role": "core"
+        },
+        {
+          "id": "S1",
+          "text": "拆装板卡前必须断电，禁止带电插拔",
+          "role": "context"
+        },
+        {
+          "id": "S2",
+          "text": "拆装板卡时佩戴防静电手环",
+          "role": "context"
+        }
+      ],
+      "evidence": [
+        {
+          "evidence_id": "rag-biz-003:positive:1",
+          "file": "免疫场景化培训教材-硬件V1.1.pdf",
+          "page": "23",
+          "quote": "更换前进入参数配置查询界面，备份所有参数到PC，更换主控板后再将所有参数重新恢复到新主控板中",
+          "indexed": true,
+          "confidence": "exact"
+        },
+        {
+          "evidence_id": "rag-biz-003:positive:2",
+          "file": "免疫场景化培训教材-硬件V1.1.pdf",
+          "page": "23",
+          "quote": "注意：扣板主要储存整机参数，如主控板故障，将旧扣板更换到\n新主控板上，则无需重新导入整机参数（仅部分主控板有）；",
+          "indexed": true,
+          "confidence": "exact"
+        },
+        {
+          "evidence_id": "rag-biz-003:positive:3",
+          "file": "免疫场景化培训教材-硬件V1.1.pdf",
+          "page": "53",
+          "quote": "更换主控板后需要重新配置IP（机器号）",
+          "indexed": true,
+          "confidence": "exact"
+        },
+        {
+          "evidence_id": "rag-biz-003:positive:4",
+          "file": "免疫场景化培训教材-硬件V1.1.pdf",
+          "page": "53",
+          "quote": "更换主控板后需要在研发权限下重新配置序列号",
+          "indexed": true,
+          "confidence": "exact"
+        },
+        {
+          "evidence_id": "rag-biz-003:positive:5",
+          "file": "免疫场景化培训教材-硬件V1.1.pdf",
+          "page": "53",
+          "quote": "1. 拆卸板卡：断电操作，带防静电手环，避免手触碰到板卡上的元器件，严禁带电插拔板卡。",
+          "indexed": true,
+          "confidence": "exact"
+        }
+      ],
+      "scope_note": "复用原已审核引文，本轮只核实其仍存在于当前AI索引；未重新打开全部原文件，未新增业务事实或引文。",
+      "check_review": [
+        {
+          "id": "F1",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        },
+        {
+          "id": "F2",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        },
+        {
+          "id": "F3",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        },
+        {
+          "id": "F4",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        },
+        {
+          "id": "S1",
+          "role": "context",
+          "decision": "optional",
+          "reason": "问参数、IP和序列号，并未询问拆装方法；断电和防静电不能因资料同页就自动成为本题必答。若答案涉及实际拆装，安全要求仍适用，需业务复核。"
+        },
+        {
+          "id": "S2",
+          "role": "context",
+          "decision": "optional",
+          "reason": "问参数、IP和序列号，并未询问拆装方法；断电和防静电不能因资料同页就自动成为本题必答。若答案涉及实际拆装，安全要求仍适用，需业务复核。"
+        }
+      ]
+    },
+    {
+      "id": "rag-biz-004",
+      "question": "CL-8000i三块温度采集板分别采集哪些位置？",
+      "expected_behavior": "answer",
+      "missing_fields": [],
+      "source_review_status": "reviewed",
+      "review_status": "pending",
+      "proposal": "keep",
+      "reason": "当前检查项直接回答所问内容或约束不应出现的错误结论，建议保留。",
+      "original_checks": [
+        {
+          "id": "F1",
+          "text": "1#采集第一磁分离盘及底物预热温度。",
+          "role": "core"
+        },
+        {
+          "id": "F2",
+          "text": "2#采集第二磁分离盘及底物预热温度。",
+          "role": "core"
+        },
+        {
+          "id": "F3",
+          "text": "3#采集反应盘温度。",
+          "role": "core"
+        }
+      ],
+      "proposed_checks": [
+        {
+          "id": "F1",
+          "text": "1#采集第一磁分离盘及底物预热温度。",
+          "role": "core"
+        },
+        {
+          "id": "F2",
+          "text": "2#采集第二磁分离盘及底物预热温度。",
+          "role": "core"
+        },
+        {
+          "id": "F3",
+          "text": "3#采集反应盘温度。",
+          "role": "core"
+        }
+      ],
+      "evidence": [
+        {
+          "evidence_id": "rag-biz-004:positive:1",
+          "file": "免疫场景化培训教材-硬件V1.1.pdf",
+          "page": "31",
+          "quote": "1#温度采集板，实现对第一磁分离盘及底物预热温度传感器信号的采集；\n➢ 2#温度采集板，实现对第二磁分离盘及底物预热温度传感器信号的采集；\n➢ 3#温度采集板，实现对反应盘温度传感器信号的采集；反应盘温度传感器一共有3个；",
+          "indexed": true,
+          "confidence": "exact"
+        }
+      ],
+      "scope_note": "复用原已审核引文，本轮只核实其仍存在于当前AI索引；未重新打开全部原文件，未新增业务事实或引文。",
+      "check_review": [
+        {
+          "id": "F1",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        },
+        {
+          "id": "F2",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        },
+        {
+          "id": "F3",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        }
+      ]
+    },
+    {
+      "id": "rag-biz-005",
+      "question": "怀疑某块硬件板卡故障，教材建议按什么思路定位？",
+      "expected_behavior": "answer",
+      "missing_fields": [],
+      "source_review_status": "reviewed",
+      "review_status": "pending",
+      "proposal": "keep",
+      "reason": "当前检查项直接回答所问内容或约束不应出现的错误结论，建议保留。",
+      "original_checks": [
+        {
+          "id": "F1",
+          "text": "先检查板卡供电及通讯链路",
+          "role": "core"
+        },
+        {
+          "id": "F2",
+          "text": "排查该板卡输入与输出",
+          "role": "core"
+        },
+        {
+          "id": "F3",
+          "text": "排查电源系统输入与输出",
+          "role": "core"
+        },
+        {
+          "id": "F4",
+          "text": "保留最小系统配置，通过逐个接入或拔去可疑板卡或负载比较运行状态",
+          "role": "core"
+        },
+        {
+          "id": "S1",
+          "text": "插拔板卡前必须断电，禁止带电插拔",
+          "role": "safety"
+        },
+        {
+          "id": "S2",
+          "text": "插拔板卡时注意防静电",
+          "role": "safety"
+        }
+      ],
+      "proposed_checks": [
+        {
+          "id": "F1",
+          "text": "先检查板卡供电及通讯链路",
+          "role": "core"
+        },
+        {
+          "id": "F2",
+          "text": "排查该板卡输入与输出",
+          "role": "core"
+        },
+        {
+          "id": "F3",
+          "text": "排查电源系统输入与输出",
+          "role": "core"
+        },
+        {
+          "id": "F4",
+          "text": "保留最小系统配置，通过逐个接入或拔去可疑板卡或负载比较运行状态",
+          "role": "core"
+        },
+        {
+          "id": "S1",
+          "text": "插拔板卡前必须断电，禁止带电插拔",
+          "role": "safety"
+        },
+        {
+          "id": "S2",
+          "text": "插拔板卡时注意防静电",
+          "role": "safety"
+        }
+      ],
+      "evidence": [
+        {
+          "evidence_id": "rag-biz-005:positive:1",
+          "file": "免疫场景化培训教材-硬件V1.1.pdf",
+          "page": "54",
+          "quote": "板卡类故障处理思路：\n1. 查看板卡的供电及通讯链路；\n2. 排查该板卡的输入、输出；\n3. 排查电源系统的输入、输出；\n4. 最小系统法排查：拔去怀疑有故障的板卡或负载，并根据机器在此前和此后的运行情况对比，判断定位故障\n所在。拔插板卡或负载的基本要求是保留系统工作的最小配置，以便缩小故障的范围。",
+          "indexed": true,
+          "confidence": "exact"
+        },
+        {
+          "evidence_id": "rag-biz-005:positive:2",
+          "file": "免疫场景化培训教材-硬件V1.1.pdf",
+          "page": "53",
+          "quote": "1. 拆卸板卡：断电操作，带防静电手环，避免手触碰到板卡上的元器件，严禁带电插拔板卡。",
+          "indexed": true,
+          "confidence": "exact"
+        }
+      ],
+      "scope_note": "复用原已审核引文，本轮只核实其仍存在于当前AI索引；未重新打开全部原文件，未新增业务事实或引文。",
+      "check_review": [
+        {
+          "id": "F1",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        },
+        {
+          "id": "F2",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        },
+        {
+          "id": "F3",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        },
+        {
+          "id": "F4",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        },
+        {
+          "id": "S1",
+          "role": "safety",
+          "decision": "required",
+          "reason": "本题涉及实际拆装，保留操作安全要求"
+        },
+        {
+          "id": "S2",
+          "role": "safety",
+          "decision": "required",
+          "reason": "本题涉及实际拆装，保留操作安全要求"
+        }
+      ]
+    },
+    {
+      "id": "rag-biz-006",
+      "question": "以教材中的CL-8000i示例，清洗液缓冲容器何时开始、停止吸液？一瓶空了会怎样？",
+      "expected_behavior": "answer",
+      "missing_fields": [],
+      "source_review_status": "reviewed",
+      "review_status": "pending",
+      "proposal": "keep",
+      "reason": "当前检查项直接回答所问内容或约束不应出现的错误结论，建议保留。",
+      "original_checks": [
+        {
+          "id": "F1",
+          "text": "低位液位传感器触发后，P01泵启动，SV01/SV02开启并吸入清洗液。",
+          "role": "core"
+        },
+        {
+          "id": "F2",
+          "text": "高位传感器触发后泵阀关闭，停止吸液。",
+          "role": "core"
+        },
+        {
+          "id": "F3",
+          "text": "一个清洗剂容器空后，仪器自动切换另一瓶并提示警告。",
+          "role": "core"
+        }
+      ],
+      "proposed_checks": [
+        {
+          "id": "F1",
+          "text": "低位液位传感器触发后，P01泵启动，SV01/SV02开启并吸入清洗液。",
+          "role": "core"
+        },
+        {
+          "id": "F2",
+          "text": "高位传感器触发后泵阀关闭，停止吸液。",
+          "role": "core"
+        },
+        {
+          "id": "F3",
+          "text": "一个清洗剂容器空后，仪器自动切换另一瓶并提示警告。",
+          "role": "core"
+        }
+      ],
+      "evidence": [
+        {
+          "evidence_id": "rag-biz-006:positive:1",
+          "file": "免疫场景化培训教材-液路V1.1.pdf",
+          "page": "7",
+          "quote": "清洗液缓冲容器内设计有\n高低位液位传感器，当低\n位传感器触发时，系统控\n制P01泵启动，同时控制电\n磁阀SV01/SV02开启，将\n清洗液从清洗液容器吸入\n到缓冲容器中，当高位传\n感器触发后，系统控制泵\n阀关闭，停止吸液;",
+          "indexed": true,
+          "confidence": "exact"
+        },
+        {
+          "evidence_id": "rag-biz-006:positive:2",
+          "file": "免疫场景化培训教材-液路V1.1.pdf",
+          "page": "7",
+          "quote": "当一个清洗剂容器空后，仪器自动切换使用另外一瓶清洗剂容器，并提示警告信息",
+          "indexed": true,
+          "confidence": "exact"
+        }
+      ],
+      "scope_note": "复用原已审核引文，本轮只核实其仍存在于当前AI索引；未重新打开全部原文件，未新增业务事实或引文。",
+      "check_review": [
+        {
+          "id": "F1",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        },
+        {
+          "id": "F2",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        },
+        {
+          "id": "F3",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        }
+      ]
+    },
+    {
+      "id": "rag-biz-007",
+      "question": "CL-8000i磁分离盘吸液流量标准是多少？",
+      "expected_behavior": "answer",
+      "missing_fields": [],
+      "source_review_status": "reviewed",
+      "review_status": "pending",
+      "proposal": "disputed",
+      "reason": "原Gold机型表为140±5；另一份高速液路V1.1第22张写CL-8000i调试145±5。需业务确认版本/测量口径，不能让用户任选文件，也不自动改变原标准答案。",
+      "original_checks": [
+        {
+          "id": "F1",
+          "text": "CL-8000i磁分离盘吸液流量标准为140±5 μL/s",
+          "role": "core"
+        },
+        {
+          "id": "C1",
+          "text": "CL-8000i使用BM80磁分离盘",
+          "role": "context"
+        },
+        {
+          "id": "C2",
+          "text": "CL-8000i磁分离盘使用蠕动泵吸液",
+          "role": "context"
+        }
+      ],
+      "proposed_checks": [
+        {
+          "id": "F1",
+          "text": "CL-8000i磁分离盘吸液流量标准为140±5 μL/s",
+          "role": "core"
+        },
+        {
+          "id": "C1",
+          "text": "CL-8000i使用BM80磁分离盘",
+          "role": "context"
+        },
+        {
+          "id": "C2",
+          "text": "CL-8000i磁分离盘使用蠕动泵吸液",
+          "role": "context"
+        }
+      ],
+      "evidence": [
+        {
+          "evidence_id": "rag-biz-007:positive:1",
+          "file": "免疫场景化培训教材-液路V1.1.pdf",
+          "page": "19",
+          "quote": "CL-8000i BM80 140±5 使用蠕动泵吸液",
+          "indexed": true,
+          "confidence": "exact"
+        }
+      ],
+      "scope_note": "复用原已审核引文，本轮只核实其仍存在于当前AI索引；未重新打开全部原文件，未新增业务事实或引文。",
+      "check_review": [
+        {
+          "id": "F1",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        },
+        {
+          "id": "C1",
+          "role": "context",
+          "decision": "optional",
+          "reason": "原检查项已标为可选背景，保持。"
+        },
+        {
+          "id": "C2",
+          "role": "context",
+          "decision": "optional",
+          "reason": "原检查项已标为可选背景，保持。"
+        }
+      ],
+      "additional_evidence_for_review": {
+        "file": "E:\\免疫资料\\高速免疫\\10-学习参考资料包\\高速免疫场景化培训教材-液路V1.1.pptx",
+        "slide": 22,
+        "quote": "磁分离吸液检查：\n蠕动泵及泵管检查：\n磁分离吸液流量调试：145±5μL/s（通过参数调整）；\nCL-8000i维护中有流程自动完成吸液流量测试，按软件提示完成调试；\n仪器液路-原理举例",
+        "native_and_index_verified": true,
+        "note": "仅争议记录，不加入计分正向证据，不修改v3或v4草案的原数值。"
+      }
+    },
+    {
+      "id": "rag-biz-008",
+      "question": "磁分离蠕动泵通电正常但不转；如果能转却报堵转，又分别检查什么？",
+      "expected_behavior": "answer",
+      "missing_fields": [],
+      "source_review_status": "reviewed",
+      "review_status": "pending",
+      "proposal": "keep",
+      "reason": "当前检查项直接回答所问内容或约束不应出现的错误结论，建议保留。",
+      "original_checks": [
+        {
+          "id": "F1",
+          "text": "先在软件界面控制蠕动泵转动并观察响应",
+          "role": "core"
+        },
+        {
+          "id": "F2",
+          "text": "通电正常但不转动时，教材判断蠕动泵损坏，需要更换",
+          "role": "core"
+        },
+        {
+          "id": "F3",
+          "text": "能转动但报警堵转时检查转速检测光耦，异常则更换",
+          "role": "core"
+        }
+      ],
+      "proposed_checks": [
+        {
+          "id": "F1",
+          "text": "先在软件界面控制蠕动泵转动并观察响应",
+          "role": "core"
+        },
+        {
+          "id": "F2",
+          "text": "通电正常但不转动时，教材判断蠕动泵损坏，需要更换",
+          "role": "core"
+        },
+        {
+          "id": "F3",
+          "text": "能转动但报警堵转时检查转速检测光耦，异常则更换",
+          "role": "core"
+        }
+      ],
+      "evidence": [
+        {
+          "evidence_id": "rag-biz-008:positive:1",
+          "file": "免疫场景化培训教材-液路V1.1.pdf",
+          "page": "22",
+          "quote": "软件中控制蠕动泵转动，如果蠕动泵通电正常但是不转动，则蠕动泵损坏需要更换；\n• 如蠕动泵能转动但是报警堵转则需检查蠕动泵转速光耦，异常则更换；",
+          "indexed": true,
+          "confidence": "exact"
+        }
+      ],
+      "scope_note": "复用原已审核引文，本轮只核实其仍存在于当前AI索引；未重新打开全部原文件，未新增业务事实或引文。",
+      "check_review": [
+        {
+          "id": "F1",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        },
+        {
+          "id": "F2",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        },
+        {
+          "id": "F3",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        }
+      ]
+    },
+    {
+      "id": "rag-biz-009",
+      "question": "教材中的底物液路示例：从选择底物瓶到注入反应杯，SV30、SV31、SV32/SV33及SR09依次怎样动作？",
+      "expected_behavior": "answer",
+      "missing_fields": [],
+      "source_review_status": "reviewed",
+      "review_status": "pending",
+      "proposal": "keep",
+      "reason": "当前检查项直接回答所问内容或约束不应出现的错误结论，建议保留。",
+      "original_checks": [
+        {
+          "id": "F1",
+          "text": "通过SV30选择底物瓶1或2",
+          "role": "core"
+        },
+        {
+          "id": "F2",
+          "text": "吸液时SV31打开，SV32与SV33关闭",
+          "role": "core"
+        },
+        {
+          "id": "F3",
+          "text": "吸液时SR09注射器下拉从瓶中吸取底物",
+          "role": "core"
+        },
+        {
+          "id": "F4",
+          "text": "注液时SV31关闭，对应SV32或SV33打开",
+          "role": "core"
+        },
+        {
+          "id": "F5",
+          "text": "注液时SR09上推，将底物注入反应杯",
+          "role": "core"
+        },
+        {
+          "id": "C1",
+          "text": "底物需要避光",
+          "role": "context"
+        },
+        {
+          "id": "C2",
+          "text": "注入反应杯前底物需要预加热",
+          "role": "context"
+        },
+        {
+          "id": "C3",
+          "text": "注入对象是已完成磁分离清洗的反应杯",
+          "role": "context"
+        }
+      ],
+      "proposed_checks": [
+        {
+          "id": "F1",
+          "text": "通过SV30选择底物瓶1或2",
+          "role": "core"
+        },
+        {
+          "id": "F2",
+          "text": "吸液时SV31打开，SV32与SV33关闭",
+          "role": "core"
+        },
+        {
+          "id": "F3",
+          "text": "吸液时SR09注射器下拉从瓶中吸取底物",
+          "role": "core"
+        },
+        {
+          "id": "F4",
+          "text": "注液时SV31关闭，对应SV32或SV33打开",
+          "role": "core"
+        },
+        {
+          "id": "F5",
+          "text": "注液时SR09上推，将底物注入反应杯",
+          "role": "core"
+        },
+        {
+          "id": "C1",
+          "text": "底物需要避光",
+          "role": "context"
+        },
+        {
+          "id": "C2",
+          "text": "注入反应杯前底物需要预加热",
+          "role": "context"
+        },
+        {
+          "id": "C3",
+          "text": "注入对象是已完成磁分离清洗的反应杯",
+          "role": "context"
+        }
+      ],
+      "evidence": [
+        {
+          "evidence_id": "rag-biz-009:positive:1",
+          "file": "免疫场景化培训教材-液路V1.1.pdf",
+          "page": "26",
+          "quote": "底物注射器从底物瓶吸取底物液通过电磁阀配合注入已完成磁分离清洗的反应杯中（底物需要避光，注入\n反应杯前需要预加热）；",
+          "indexed": true,
+          "confidence": "exact"
+        },
+        {
+          "evidence_id": "rag-biz-009:positive:2",
+          "file": "免疫场景化培训教材-液路V1.1.pdf",
+          "page": "26",
+          "quote": "通过SV30切换确认使用底物1或者2，SV31阀打开，SV32和\nSV33阀关闭，注射器下拉从底物瓶吸取底物；\n• SV31关闭， SV32或者SV33阀打开，底物注射器SR09上推，\n注入底物到对应磁分离盘的反应杯中；",
+          "indexed": true,
+          "confidence": "exact"
+        }
+      ],
+      "scope_note": "复用原已审核引文，本轮只核实其仍存在于当前AI索引；未重新打开全部原文件，未新增业务事实或引文。",
+      "check_review": [
+        {
+          "id": "F1",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        },
+        {
+          "id": "F2",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        },
+        {
+          "id": "F3",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        },
+        {
+          "id": "F4",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        },
+        {
+          "id": "F5",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        },
+        {
+          "id": "C1",
+          "role": "context",
+          "decision": "optional",
+          "reason": "原检查项已标为可选背景，保持。"
+        },
+        {
+          "id": "C2",
+          "role": "context",
+          "decision": "optional",
+          "reason": "原检查项已标为可选背景，保持。"
+        },
+        {
+          "id": "C3",
+          "role": "context",
+          "decision": "optional",
+          "reason": "原检查项已标为可选背景，保持。"
+        }
+      ]
+    },
+    {
+      "id": "rag-biz-010",
+      "question": "CL-8000i调底物注液回吸量，前提和合格位置是什么？",
+      "expected_behavior": "answer",
+      "missing_fields": [],
+      "source_review_status": "reviewed",
+      "review_status": "pending",
+      "proposal": "keep",
+      "reason": "当前检查项直接回答所问内容或约束不应出现的错误结论，建议保留。",
+      "original_checks": [
+        {
+          "id": "F1",
+          "text": "必须先完成液路灌注再执行调试。",
+          "role": "core"
+        },
+        {
+          "id": "F2",
+          "text": "回吸后底物液终端应距预热块上端面0～5 mm。",
+          "role": "core"
+        },
+        {
+          "id": "F3",
+          "text": "发光液应回吸到气泡检测光耦右侧边沿。",
+          "role": "core"
+        }
+      ],
+      "proposed_checks": [
+        {
+          "id": "F1",
+          "text": "必须先完成液路灌注再执行调试。",
+          "role": "core"
+        },
+        {
+          "id": "F2",
+          "text": "回吸后底物液终端应距预热块上端面0～5 mm。",
+          "role": "core"
+        },
+        {
+          "id": "F3",
+          "text": "发光液应回吸到气泡检测光耦右侧边沿。",
+          "role": "core"
+        }
+      ],
+      "evidence": [
+        {
+          "evidence_id": "rag-biz-010:positive:1",
+          "file": "免疫场景化培训教材-液路V1.1.pdf",
+          "page": "29",
+          "quote": "本调试必须在液路灌注完成后才能执行；\n✓ 调试标准：底物注液回吸后，底物液终端距离预热块上端面\n0～5mm范围内（参数每16微步约为3mm）；\n✓ 底物注液回吸后，发光液正好回吸到气泡检测光耦右侧边沿；",
+          "indexed": true,
+          "confidence": "exact"
+        }
+      ],
+      "scope_note": "复用原已审核引文，本轮只核实其仍存在于当前AI索引；未重新打开全部原文件，未新增业务事实或引文。",
+      "check_review": [
+        {
+          "id": "F1",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        },
+        {
+          "id": "F2",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        },
+        {
+          "id": "F3",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        }
+      ]
+    },
+    {
+      "id": "rag-biz-011",
+      "question": "CL-8000i清洗液气泡检测光耦，有水和无水时AD多少算正常？",
+      "expected_behavior": "answer",
+      "missing_fields": [],
+      "source_review_status": "reviewed",
+      "review_status": "pending",
+      "proposal": "keep",
+      "reason": "当前检查项直接回答所问内容或约束不应出现的错误结论，建议保留。",
+      "original_checks": [
+        {
+          "id": "F1",
+          "text": "CL-8000i有水时1988≤AD≤2108。",
+          "role": "core"
+        },
+        {
+          "id": "F2",
+          "text": "无水时AD≤900。",
+          "role": "core"
+        }
+      ],
+      "proposed_checks": [
+        {
+          "id": "F1",
+          "text": "CL-8000i有水时1988≤AD≤2108。",
+          "role": "core"
+        },
+        {
+          "id": "F2",
+          "text": "无水时AD≤900。",
+          "role": "core"
+        }
+      ],
+      "evidence": [
+        {
+          "evidence_id": "rag-biz-011:positive:1",
+          "file": "免疫场景化培训教材-液路V1.1.pdf",
+          "page": "40",
+          "quote": "有水:1988≤AD≤2108，无水：AD ≤ 900",
+          "indexed": true,
+          "confidence": "exact"
+        }
+      ],
+      "scope_note": "复用原已审核引文，本轮只核实其仍存在于当前AI索引；未重新打开全部原文件，未新增业务事实或引文。",
+      "check_review": [
+        {
+          "id": "F1",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        },
+        {
+          "id": "F2",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        }
+      ]
+    },
+    {
+      "id": "rag-biz-012",
+      "question": "注射器会动但回不到初始位，教材让检查哪些地方？",
+      "expected_behavior": "answer",
+      "missing_fields": [],
+      "source_review_status": "reviewed",
+      "review_status": "pending",
+      "proposal": "keep",
+      "reason": "当前检查项直接回答所问内容或约束不应出现的错误结论，建议保留。",
+      "original_checks": [
+        {
+          "id": "F1",
+          "text": "检查注射器是否卡滞或松脱。",
+          "role": "core"
+        },
+        {
+          "id": "F2",
+          "text": "确认初始位传感器是否异常。",
+          "role": "core"
+        }
+      ],
+      "proposed_checks": [
+        {
+          "id": "F1",
+          "text": "检查注射器是否卡滞或松脱。",
+          "role": "core"
+        },
+        {
+          "id": "F2",
+          "text": "确认初始位传感器是否异常。",
+          "role": "core"
+        }
+      ],
+      "evidence": [
+        {
+          "evidence_id": "rag-biz-012:positive:1",
+          "file": "免疫场景化培训教材-液路V1.1.pdf",
+          "page": "49",
+          "quote": "注射器有动作但是无法复位则检测是否存在卡滞或者松脱情况，并确认初始位传感器无异常",
+          "indexed": true,
+          "confidence": "exact"
+        }
+      ],
+      "scope_note": "复用原已审核引文，本轮只核实其仍存在于当前AI索引；未重新打开全部原文件，未新增业务事实或引文。",
+      "check_review": [
+        {
+          "id": "F1",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        },
+        {
+          "id": "F2",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        }
+      ]
+    },
+    {
+      "id": "rag-biz-013",
+      "question": "主真空罐周边漏气或堵塞会导致什么问题？它在针清洗时起什么作用？",
+      "expected_behavior": "answer",
+      "missing_fields": [],
+      "source_review_status": "reviewed",
+      "review_status": "pending",
+      "proposal": "keep",
+      "reason": "当前检查项直接回答所问内容或约束不应出现的错误结论，建议保留。",
+      "original_checks": [
+        {
+          "id": "F1",
+          "text": "主真空罐储存真空压力，针清洗时提供负压吸走废液。",
+          "role": "core"
+        },
+        {
+          "id": "F2",
+          "text": "罐体、周边管路或接头漏气或堵塞会造成仪器压力故障。",
+          "role": "core"
+        }
+      ],
+      "proposed_checks": [
+        {
+          "id": "F1",
+          "text": "主真空罐储存真空压力，针清洗时提供负压吸走废液。",
+          "role": "core"
+        },
+        {
+          "id": "F2",
+          "text": "罐体、周边管路或接头漏气或堵塞会造成仪器压力故障。",
+          "role": "core"
+        }
+      ],
+      "evidence": [
+        {
+          "evidence_id": "rag-biz-013:positive:1",
+          "file": "免疫场景化培训教材-液路V1.1.pdf",
+          "page": "51",
+          "quote": "主真空罐主要用于储存真空压力在针清洗时提供真空负\n压吸走废液；\n• 主真空罐、周边管路、接头、出现漏气或者堵塞都会造\n成仪器压力故障；",
+          "indexed": true,
+          "confidence": "exact"
+        }
+      ],
+      "scope_note": "复用原已审核引文，本轮只核实其仍存在于当前AI索引；未重新打开全部原文件，未新增业务事实或引文。",
+      "check_review": [
+        {
+          "id": "F1",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        },
+        {
+          "id": "F2",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        }
+      ]
+    },
+    {
+      "id": "rag-biz-014",
+      "question": "CL-2000i原机型磁分离吸液流量到底按多少调？",
+      "expected_behavior": "clarify",
+      "missing_fields": [
+        "磁分离盘标识"
+      ],
+      "source_review_status": "reviewed",
+      "review_status": "pending",
+      "proposal": "revise",
+      "reason": "唯一数值取决于盘标识，必须追问；追问时没有必要同时提供两个数值，数值分支改为背景。",
+      "original_checks": [
+        {
+          "id": "F1",
+          "text": "在给唯一调试值前询问用户磁分离盘是无标识还是BM10",
+          "role": "core"
+        },
+        {
+          "id": "F2",
+          "text": "无标识盘对应115±5 μL/s",
+          "role": "core"
+        },
+        {
+          "id": "F3",
+          "text": "BM10盘对应140±5 μL/s",
+          "role": "core"
+        }
+      ],
+      "proposed_checks": [
+        {
+          "id": "F1",
+          "text": "在给唯一调试值前询问用户磁分离盘是无标识还是BM10",
+          "role": "core"
+        },
+        {
+          "id": "F2",
+          "text": "无标识盘对应115±5 μL/s",
+          "role": "context"
+        },
+        {
+          "id": "F3",
+          "text": "BM10盘对应140±5 μL/s",
+          "role": "context"
+        }
+      ],
+      "evidence": [
+        {
+          "evidence_id": "rag-biz-014:positive:1",
+          "file": "免疫场景化培训教材-液路V1.1.pdf",
+          "page": "19",
+          "quote": "CL-2000i原机型 无标识 115±5 使用蠕动泵吸液\nCL-2000i原机型 BM10 140±5 使用无标识磁分离盘更改",
+          "indexed": true,
+          "confidence": "exact"
+        }
+      ],
+      "scope_note": "复用原已审核引文，本轮只核实其仍存在于当前AI索引；未重新打开全部原文件，未新增业务事实或引文。",
+      "check_review": [
+        {
+          "id": "F1",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        },
+        {
+          "id": "F2",
+          "role": "context",
+          "decision": "optional",
+          "reason": "唯一数值取决于盘标识，必须追问；追问时没有必要同时提供两个数值，数值分支改为背景。"
+        },
+        {
+          "id": "F3",
+          "role": "context",
+          "decision": "optional",
+          "reason": "唯一数值取决于盘标识，必须追问；追问时没有必要同时提供两个数值，数值分支改为背景。"
+        }
+      ]
+    },
+    {
+      "id": "rag-biz-015",
+      "question": "CL-6000i和CL-8000i清洗液气泡检测怎么进入诊断？两款机型的AD合格范围各是多少？",
+      "expected_behavior": "partial_answer",
+      "missing_fields": [],
+      "source_review_status": "reviewed",
+      "review_status": "pending",
+      "proposal": "keep",
+      "reason": "当前检查项直接回答所问内容或约束不应出现的错误结论，建议保留。",
+      "original_checks": [
+        {
+          "id": "F1",
+          "text": "CL-8000i在工程维护软件中进入M1/M2→诊断→清洗液气泡检测诊断；有水1988≤AD≤2108、无水AD≤900。",
+          "role": "core"
+        },
+        {
+          "id": "F2",
+          "text": "CL-6000i在操作软件中进入应用→诊断→诊断→M1→清洗液气泡检测诊断。",
+          "role": "core"
+        },
+        {
+          "id": "F3",
+          "text": "这两页未给出CL-6000i的AD合格范围，不能套用CL-8000i的数值。",
+          "role": "core"
+        }
+      ],
+      "proposed_checks": [
+        {
+          "id": "F1",
+          "text": "CL-8000i在工程维护软件中进入M1/M2→诊断→清洗液气泡检测诊断；有水1988≤AD≤2108、无水AD≤900。",
+          "role": "core"
+        },
+        {
+          "id": "F2",
+          "text": "CL-6000i在操作软件中进入应用→诊断→诊断→M1→清洗液气泡检测诊断。",
+          "role": "core"
+        },
+        {
+          "id": "F3",
+          "text": "这两页未给出CL-6000i的AD合格范围，不能套用CL-8000i的数值。",
+          "role": "core"
+        }
+      ],
+      "evidence": [
+        {
+          "evidence_id": "rag-biz-015:positive:1",
+          "file": "免疫场景化培训教材-液路V1.1.pdf",
+          "page": "40",
+          "quote": "工程维护软件（D:/Mindray/CL8000i/WorkStation/Engnieersoft/ Engnieersoft .exe）→【M1/M2】→【诊断】→【清\n洗液气泡检测诊断】；\n✓ 根据软件提示操作进行有水、无水诊断确认分离液气泡检测光耦是否正常（有水:1988≤AD≤2108，无水：AD ≤ 900）；",
+          "indexed": true,
+          "confidence": "exact"
+        },
+        {
+          "evidence_id": "rag-biz-015:positive:2",
+          "file": "免疫场景化培训教材-液路V1.1.pdf",
+          "page": "41",
+          "quote": "操作软件【应用】→【诊断】→【诊断】 →【M1】→【清洗液气泡检测诊断】",
+          "indexed": true,
+          "confidence": "exact"
+        }
+      ],
+      "scope_note": "复用原已审核引文，本轮只核实其仍存在于当前AI索引；未重新打开全部原文件，未新增业务事实或引文。",
+      "check_review": [
+        {
+          "id": "F1",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        },
+        {
+          "id": "F2",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        },
+        {
+          "id": "F3",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        }
+      ]
+    },
+    {
+      "id": "rag-biz-016",
+      "question": "CL-8000i清洗液气泡检测一直报警，教材给出了哪些检查？检查后怎样判断是检测光耦、板卡还是供电问题？",
+      "expected_behavior": "partial_answer",
+      "missing_fields": [],
+      "source_review_status": "reviewed",
+      "review_status": "pending",
+      "proposal": "keep",
+      "reason": "当前检查项直接回答所问内容或约束不应出现的错误结论，建议保留。",
+      "original_checks": [
+        {
+          "id": "F1",
+          "text": "CL-8000i可进入工程维护软件的M1/M2→诊断→清洗液气泡检测诊断，按提示做有水和无水诊断。",
+          "role": "core"
+        },
+        {
+          "id": "F2",
+          "text": "教材给出的范围为有水1988≤AD≤2108、无水AD≤900。",
+          "role": "core"
+        },
+        {
+          "id": "F3",
+          "text": "两份教材没有给出仅凭报警就能确定具体故障件的依据；不能直接要求更换板卡或光耦。",
+          "role": "core"
+        }
+      ],
+      "proposed_checks": [
+        {
+          "id": "F1",
+          "text": "CL-8000i可进入工程维护软件的M1/M2→诊断→清洗液气泡检测诊断，按提示做有水和无水诊断。",
+          "role": "core"
+        },
+        {
+          "id": "F2",
+          "text": "教材给出的范围为有水1988≤AD≤2108、无水AD≤900。",
+          "role": "core"
+        },
+        {
+          "id": "F3",
+          "text": "两份教材没有给出仅凭报警就能确定具体故障件的依据；不能直接要求更换板卡或光耦。",
+          "role": "core"
+        }
+      ],
+      "evidence": [
+        {
+          "evidence_id": "rag-biz-016:positive:1",
+          "file": "免疫场景化培训教材-液路V1.1.pdf",
+          "page": "40",
+          "quote": "工程维护软件（D:/Mindray/CL8000i/WorkStation/Engnieersoft/ Engnieersoft .exe）→【M1/M2】→【诊断】→【清\n洗液气泡检测诊断】；\n✓ 根据软件提示操作进行有水、无水诊断确认分离液气泡检测光耦是否正常（有水:1988≤AD≤2108，无水：AD ≤ 900）；",
+          "indexed": true,
+          "confidence": "exact"
+        }
+      ],
+      "scope_note": "复用原已审核引文，本轮只核实其仍存在于当前AI索引；未重新打开全部原文件，未新增业务事实或引文。",
+      "check_review": [
+        {
+          "id": "F1",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        },
+        {
+          "id": "F2",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        },
+        {
+          "id": "F3",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        }
+      ]
+    },
+    {
+      "id": "rag-biz-017",
+      "question": "超声影像诊断仪的探头扫查时图像出现竖条纹，应该更换哪块板卡？物料编码是多少？",
+      "expected_behavior": "refuse",
+      "missing_fields": [],
+      "source_review_status": "reviewed",
+      "review_status": "pending",
+      "proposal": "keep",
+      "reason": "当前检查项直接回答所问内容或约束不应出现的错误结论，建议保留。",
+      "original_checks": [
+        {
+          "id": "C1",
+          "text": "当前资料没有可支持超声影像探头竖条纹故障具体维修结论的证据",
+          "role": "context"
+        },
+        {
+          "id": "C2",
+          "text": "不能据此指定更换板卡或物料编码",
+          "role": "context"
+        },
+        {
+          "id": "C3",
+          "text": "应依据对应超声影像设备型号的维修资料与检查结果",
+          "role": "context"
+        }
+      ],
+      "proposed_checks": [
+        {
+          "id": "C1",
+          "text": "当前资料没有可支持超声影像探头竖条纹故障具体维修结论的证据",
+          "role": "context"
+        },
+        {
+          "id": "C2",
+          "text": "不能据此指定更换板卡或物料编码",
+          "role": "context"
+        },
+        {
+          "id": "C3",
+          "text": "应依据对应超声影像设备型号的维修资料与检查结果",
+          "role": "context"
+        }
+      ],
+      "evidence": [],
+      "scope_note": "复用原已审核引文，本轮只核实其仍存在于当前AI索引；未重新打开全部原文件，未新增业务事实或引文。",
+      "check_review": [
+        {
+          "id": "C1",
+          "role": "context",
+          "decision": "optional",
+          "reason": "原检查项已标为可选背景，保持。"
+        },
+        {
+          "id": "C2",
+          "role": "context",
+          "decision": "optional",
+          "reason": "原检查项已标为可选背景，保持。"
+        },
+        {
+          "id": "C3",
+          "role": "context",
+          "decision": "optional",
+          "reason": "原检查项已标为可选背景，保持。"
+        }
+      ]
+    },
+    {
+      "id": "rag-biz-018",
+      "question": "超声影像诊断仪的探头发射功率合格范围是多少？在维修软件里怎样调？",
+      "expected_behavior": "refuse",
+      "missing_fields": [],
+      "source_review_status": "reviewed",
+      "review_status": "pending",
+      "proposal": "keep",
+      "reason": "当前检查项直接回答所问内容或约束不应出现的错误结论，建议保留。",
+      "original_checks": [
+        {
+          "id": "C1",
+          "text": "当前资料没有超声影像探头发射功率合格范围与维修软件调节步骤",
+          "role": "context"
+        },
+        {
+          "id": "C2",
+          "text": "不能据此给出具体数值或操作路径",
+          "role": "context"
+        },
+        {
+          "id": "C3",
+          "text": "应依据对应型号的超声影像设备维修资料",
+          "role": "context"
+        }
+      ],
+      "proposed_checks": [
+        {
+          "id": "C1",
+          "text": "当前资料没有超声影像探头发射功率合格范围与维修软件调节步骤",
+          "role": "context"
+        },
+        {
+          "id": "C2",
+          "text": "不能据此给出具体数值或操作路径",
+          "role": "context"
+        },
+        {
+          "id": "C3",
+          "text": "应依据对应型号的超声影像设备维修资料",
+          "role": "context"
+        }
+      ],
+      "evidence": [],
+      "scope_note": "复用原已审核引文，本轮只核实其仍存在于当前AI索引；未重新打开全部原文件，未新增业务事实或引文。",
+      "check_review": [
+        {
+          "id": "C1",
+          "role": "context",
+          "decision": "optional",
+          "reason": "原检查项已标为可选背景，保持。"
+        },
+        {
+          "id": "C2",
+          "role": "context",
+          "decision": "optional",
+          "reason": "原检查项已标为可选背景，保持。"
+        },
+        {
+          "id": "C3",
+          "role": "context",
+          "decision": "optional",
+          "reason": "原检查项已标为可选背景，保持。"
+        }
+      ]
+    },
+    {
+      "id": "rag-biz-019",
+      "question": "同批次大部分发光项目定标都报 DEV，该从哪些方面逐步排查？处理后如何复核？",
+      "expected_behavior": "answer",
+      "missing_fields": [],
+      "source_review_status": "reviewed",
+      "review_status": "pending",
+      "proposal": "keep",
+      "reason": "当前检查项直接回答所问内容或约束不应出现的错误结论，建议保留。",
+      "original_checks": [
+        {
+          "id": "F1",
+          "text": "大部分项目同时报 DEV 时，优先排查仪器管路、分离液、底物液污染及加样系统等共性因素。",
+          "role": "core"
+        },
+        {
+          "id": "F2",
+          "text": "排除故障和污染源后执行灌注，再重新定标；教材在该场景建议灌注 40 次以上。",
+          "role": "core"
+        }
+      ],
+      "proposed_checks": [
+        {
+          "id": "F1",
+          "text": "大部分项目同时报 DEV 时，优先排查仪器管路、分离液、底物液污染及加样系统等共性因素。",
+          "role": "core"
+        },
+        {
+          "id": "F2",
+          "text": "排除故障和污染源后执行灌注，再重新定标；教材在该场景建议灌注 40 次以上。",
+          "role": "core"
+        }
+      ],
+      "evidence": [
+        {
+          "evidence_id": "rag-biz-019:positive:1",
+          "file": "E:\\生化免疫临床知识\\化学发光定标处理思路分析.pptx",
+          "page": "14",
+          "quote": "可能原因：\n1.仪器管路污染\n2. 分离液污染\n3.底物液污染\n4.仪器加样系统故障\n解决思路：\n1.排查仪器因素\n2. 排除故障及污染源后执行灌注\n3.重新定标\n建议灌注次数：40次以上",
+          "indexed": true,
+          "confidence": "exact"
+        }
+      ],
+      "scope_note": "复用原已审核引文，本轮只核实其仍存在于当前AI索引；未重新打开全部原文件，未新增业务事实或引文。",
+      "check_review": [
+        {
+          "id": "F1",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        },
+        {
+          "id": "F2",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        }
+      ]
+    },
+    {
+      "id": "rag-biz-020",
+      "question": "只有一个发光项目定标报 DEV，各浓度点重复性好但偏离理论值，先查哪里、怎么处理？",
+      "expected_behavior": "answer",
+      "missing_fields": [],
+      "source_review_status": "reviewed",
+      "review_status": "pending",
+      "proposal": "keep",
+      "reason": "当前检查项直接回答所问内容或约束不应出现的错误结论，建议保留。",
+      "original_checks": [
+        {
+          "id": "F1",
+          "text": "单项目 DEV 且各浓度点重复性好但与理论值偏差大时，先核查该项目试剂的失效、污染或装载，以及校准品的失效、污染和加样气泡。",
+          "role": "core"
+        },
+        {
+          "id": "F2",
+          "text": "可先混匀并重新装载或更换试剂、启用新校准品重新定标；若仍异常，再排查系统故障并维护后重定标。",
+          "role": "core"
+        }
+      ],
+      "proposed_checks": [
+        {
+          "id": "F1",
+          "text": "单项目 DEV 且各浓度点重复性好但与理论值偏差大时，先核查该项目试剂的失效、污染或装载，以及校准品的失效、污染和加样气泡。",
+          "role": "core"
+        },
+        {
+          "id": "F2",
+          "text": "可先混匀并重新装载或更换试剂、启用新校准品重新定标；若仍异常，再排查系统故障并维护后重定标。",
+          "role": "core"
+        }
+      ],
+      "evidence": [
+        {
+          "evidence_id": "rag-biz-020:positive:1",
+          "file": "E:\\生化免疫临床知识\\化学发光定标处理思路分析.pptx",
+          "page": "16",
+          "quote": "故障表现：各浓度点发光值重复性好，与理论值偏差过大",
+          "indexed": true,
+          "confidence": "exact"
+        },
+        {
+          "evidence_id": "rag-biz-020:positive:2",
+          "file": "E:\\生化免疫临床知识\\化学发光定标处理思路分析.pptx",
+          "page": "17",
+          "quote": "可能原因：\n1.试剂失效、污染、未正确装载\n2.校准品失效、污染、添加过程中引入气泡\n3.系统故障（管路、底物、分离液等）\n故障：个别项目定标失败，报DEV\n解决思路：\n1.试剂混匀重新装载/更换新试剂重新定标\n2.启用新校准品重新定标\n3.仪器故障排查、维护后重新定标",
+          "indexed": true,
+          "confidence": "exact"
+        }
+      ],
+      "scope_note": "复用原已审核引文，本轮只核实其仍存在于当前AI索引；未重新打开全部原文件，未新增业务事实或引文。",
+      "check_review": [
+        {
+          "id": "F1",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        },
+        {
+          "id": "F2",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        }
+      ]
+    },
+    {
+      "id": "rag-biz-021",
+      "question": "一个项目定标报 LVC，应该沿用上次定标，还是更换本次试剂和校准品？",
+      "expected_behavior": "clarify",
+      "missing_fields": [
+        "前次成功定标与本次定标数据及哪次异常的核查结果"
+      ],
+      "source_review_status": "reviewed",
+      "review_status": "pending",
+      "proposal": "revise",
+      "reason": "必须请求决定前次/本次异常的检查信息；LVC定义可辅助说明，但不是发出澄清的必备内容。",
+      "original_checks": [
+        {
+          "id": "F1",
+          "text": "先请用户提供前次成功定标与本次定标的数据或核查结果，以判断哪一次异常，不能直接选择延期或更换。",
+          "role": "core"
+        },
+        {
+          "id": "F2",
+          "text": "LVC 指同批次试剂本次与上次成功定标的数据比较超出范围；资料把前次异常和本次试剂／校准品变化列为不同分支。",
+          "role": "core"
+        }
+      ],
+      "proposed_checks": [
+        {
+          "id": "F1",
+          "text": "先请用户提供前次成功定标与本次定标的数据或核查结果，以判断哪一次异常，不能直接选择延期或更换。",
+          "role": "core"
+        },
+        {
+          "id": "F2",
+          "text": "LVC 指同批次试剂本次与上次成功定标的数据比较超出范围；资料把前次异常和本次试剂／校准品变化列为不同分支。",
+          "role": "context"
+        }
+      ],
+      "evidence": [
+        {
+          "evidence_id": "rag-biz-021:positive:1",
+          "file": "E:\\生化免疫临床知识\\化学发光定标处理思路分析.pptx",
+          "page": "27",
+          "quote": "同批次试剂当前定标和上次定标（成功的）相比，两次定标数据超过范围",
+          "indexed": true,
+          "confidence": "exact"
+        },
+        {
+          "evidence_id": "rag-biz-021:positive:2",
+          "file": "E:\\生化免疫临床知识\\化学发光定标处理思路分析.pptx",
+          "page": "28",
+          "quote": "可能原因：\n1.该瓶试剂/校准品变质，导致发光值变化\n2.前一批次定标异常未发现",
+          "indexed": true,
+          "confidence": "exact"
+        },
+        {
+          "evidence_id": "rag-biz-021:positive:3",
+          "file": "E:\\生化免疫临床知识\\化学发光定标处理思路分析.pptx",
+          "page": "30",
+          "quote": "分析哪次定标有问题\n上次定标有问题\n当前定标有问题",
+          "indexed": true,
+          "confidence": "exact"
+        }
+      ],
+      "scope_note": "复用原已审核引文，本轮只核实其仍存在于当前AI索引；未重新打开全部原文件，未新增业务事实或引文。",
+      "check_review": [
+        {
+          "id": "F1",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        },
+        {
+          "id": "F2",
+          "role": "context",
+          "decision": "optional",
+          "reason": "必须请求决定前次/本次异常的检查信息；LVC定义可辅助说明，但不是发出澄清的必备内容。"
+        }
+      ]
+    },
+    {
+      "id": "rag-biz-022",
+      "question": "几乎所有发光项目定标失败，发光值都低于 1000，先查哪里、怎么处理？",
+      "expected_behavior": "answer",
+      "missing_fields": [],
+      "source_review_status": "reviewed",
+      "review_status": "pending",
+      "proposal": "keep",
+      "reason": "当前检查项直接回答所问内容或约束不应出现的错误结论，建议保留。",
+      "original_checks": [
+        {
+          "id": "F1",
+          "text": "教材列出的可能原因是底物管路破裂或使用了空底物瓶，不应仅凭低值断言某一原因。",
+          "role": "core"
+        },
+        {
+          "id": "F2",
+          "text": "先排查仪器和底物供给，装载底物液并灌注后再重新定标。",
+          "role": "core"
+        }
+      ],
+      "proposed_checks": [
+        {
+          "id": "F1",
+          "text": "教材列出的可能原因是底物管路破裂或使用了空底物瓶，不应仅凭低值断言某一原因。",
+          "role": "core"
+        },
+        {
+          "id": "F2",
+          "text": "先排查仪器和底物供给，装载底物液并灌注后再重新定标。",
+          "role": "core"
+        }
+      ],
+      "evidence": [
+        {
+          "evidence_id": "rag-biz-022:positive:1",
+          "file": "E:\\生化免疫临床知识\\化学发光定标处理思路分析.pptx",
+          "page": "39",
+          "quote": "几乎所有项目定标失败，发光值＜1000\n故障特点:发光值普遍偏低\n可能原因：\n1.仪器底物管路破裂\n2.使用空底物瓶\n（开启 底物气泡检测后可避免）\n解决思路：\n1.仪器排查\n2.装载底物液，灌注后重新定标",
+          "indexed": true,
+          "confidence": "exact"
+        }
+      ],
+      "scope_note": "复用原已审核引文，本轮只核实其仍存在于当前AI索引；未重新打开全部原文件，未新增业务事实或引文。",
+      "check_review": [
+        {
+          "id": "F1",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        },
+        {
+          "id": "F2",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        }
+      ]
+    },
+    {
+      "id": "rag-biz-023",
+      "question": "发光定标报 CSDB 是什么意思？该怎么处理？",
+      "expected_behavior": "answer",
+      "missing_fields": [],
+      "source_review_status": "reviewed",
+      "review_status": "pending",
+      "proposal": "keep",
+      "reason": "当前检查项直接回答所问内容或约束不应出现的错误结论，建议保留。",
+      "original_checks": [
+        {
+          "id": "F1",
+          "text": "CSDB 表示在底物注入过程中检测到气泡。",
+          "role": "core"
+        },
+        {
+          "id": "F2",
+          "text": "按教材先灌注底物，再重新定标。",
+          "role": "core"
+        }
+      ],
+      "proposed_checks": [
+        {
+          "id": "F1",
+          "text": "CSDB 表示在底物注入过程中检测到气泡。",
+          "role": "core"
+        },
+        {
+          "id": "F2",
+          "text": "按教材先灌注底物，再重新定标。",
+          "role": "core"
+        }
+      ],
+      "evidence": [
+        {
+          "evidence_id": "rag-biz-023:positive:1",
+          "file": "E:\\生化免疫临床知识\\化学发光定标处理思路分析.pptx",
+          "page": "11",
+          "quote": "CSDB\n校准结果错误，检测到气泡\n底物注入过程中，检测到气泡\n底物灌注后重新定标",
+          "indexed": true,
+          "confidence": "exact"
+        }
+      ],
+      "scope_note": "复用原已审核引文，本轮只核实其仍存在于当前AI索引；未重新打开全部原文件，未新增业务事实或引文。",
+      "check_review": [
+        {
+          "id": "F1",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        },
+        {
+          "id": "F2",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        }
+      ]
+    },
+    {
+      "id": "rag-biz-024",
+      "question": "发光定量项目和定性项目分别怎样根据样本发光值得出结果？",
+      "expected_behavior": "answer",
+      "missing_fields": [],
+      "source_review_status": "reviewed",
+      "review_status": "pending",
+      "proposal": "revise",
+      "reason": "询问发光值如何得到浓度或阴阳性，不是询问校准点数；转换关系必答，点数为背景。",
+      "original_checks": [
+        {
+          "id": "F1",
+          "text": "定量项目用 1–3 点校准调整试剂盒主曲线，再把样本发光值转换为浓度。",
+          "role": "core"
+        },
+        {
+          "id": "F2",
+          "text": "定性项目用 1–2 点校准计算 Cutoff 值，再比较样本发光值与 Cutoff 判断阴阳性。",
+          "role": "core"
+        }
+      ],
+      "proposed_checks": [
+        {
+          "id": "F1",
+          "role": "core",
+          "text": "定量项目根据校准调整后的主曲线，将样本发光值转换为浓度。"
+        },
+        {
+          "id": "F2",
+          "role": "core",
+          "text": "定性项目根据校准得到Cutoff，比较样本发光值与Cutoff判断阴阳性。"
+        },
+        {
+          "id": "C1",
+          "role": "context",
+          "text": "原文定量采用1–3点校准，定性采用1–2点校准。"
+        }
+      ],
+      "evidence": [
+        {
+          "evidence_id": "rag-biz-024:positive:1",
+          "file": "E:\\生化免疫临床知识\\化学发光定标处理思路分析.pptx",
+          "page": "7",
+          "quote": "定量（4PLC）\n系统使用1-3点校准，对试剂盒内的校准主曲线进行调整，得到校准结果。根据校准结果，将样本测试的发光值转化为浓度值。\n\n定性（COI）\n系统使用1-2点校准，按照各项目预设的公式，将校准品的发光值转化为Cutoff值。比较样本测试的发光值和Cutoff值，判断样本的阴阳性",
+          "indexed": true,
+          "confidence": "exact"
+        }
+      ],
+      "scope_note": "复用原已审核引文，本轮只核实其仍存在于当前AI索引；未重新打开全部原文件，未新增业务事实或引文。",
+      "check_review": [
+        {
+          "id": "F1",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        },
+        {
+          "id": "F2",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        },
+        {
+          "id": "C1",
+          "role": "context",
+          "decision": "optional",
+          "reason": "询问发光值如何得到浓度或阴阳性，不是询问校准点数；转换关系必答，点数为背景。"
+        }
+      ]
+    },
+    {
+      "id": "rag-biz-025",
+      "question": "TSH 和 CEA 标本在室温下最多能保存多久？",
+      "expected_behavior": "answer",
+      "missing_fields": [],
+      "source_review_status": "reviewed",
+      "review_status": "pending",
+      "proposal": "keep",
+      "reason": "当前检查项直接回答所问内容或约束不应出现的错误结论，建议保留。",
+      "original_checks": [
+        {
+          "id": "F1",
+          "text": "该教材的标本稳定性表列 TSH 室温为不超过 8 小时。",
+          "role": "core"
+        },
+        {
+          "id": "F2",
+          "text": "同表列 CEA 室温为不超过 72 小时；这里的 h 是小时，不是天。",
+          "role": "core"
+        }
+      ],
+      "proposed_checks": [
+        {
+          "id": "F1",
+          "text": "该教材的标本稳定性表列 TSH 室温为不超过 8 小时。",
+          "role": "core"
+        },
+        {
+          "id": "F2",
+          "text": "同表列 CEA 室温为不超过 72 小时；这里的 h 是小时，不是天。",
+          "role": "core"
+        }
+      ],
+      "evidence": [
+        {
+          "evidence_id": "rag-biz-025:positive:1",
+          "file": "E:\\生化免疫临床知识\\发光临床结果处理与思路初级培训版1.pptx",
+          "page": "18",
+          "quote": "TSH\n≤8h\n≤72h\n≥72h\n≤5次\nCEA\n≤72h\n7days\n3months\n≤5次",
+          "indexed": true,
+          "confidence": "review"
+        }
+      ],
+      "scope_note": "复用原已审核引文，本轮只核实其仍存在于当前AI索引；未重新打开全部原文件，未新增业务事实或引文。",
+      "check_review": [
+        {
+          "id": "F1",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        },
+        {
+          "id": "F2",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        }
+      ]
+    },
+    {
+      "id": "rag-biz-026",
+      "question": "PRL 和 E2 的发光校准有效期分别是多少天？",
+      "expected_behavior": "answer",
+      "missing_fields": [],
+      "source_review_status": "reviewed",
+      "review_status": "pending",
+      "proposal": "keep",
+      "reason": "当前检查项直接回答所问内容或约束不应出现的错误结论，建议保留。",
+      "original_checks": [
+        {
+          "id": "F1",
+          "text": "该教材表格列 PRL 校准有效期为 28 天。",
+          "role": "core"
+        },
+        {
+          "id": "F2",
+          "text": "E2 校准有效期为 14 天，不能沿用 PRL 的 28 天。",
+          "role": "core"
+        }
+      ],
+      "proposed_checks": [
+        {
+          "id": "F1",
+          "text": "该教材表格列 PRL 校准有效期为 28 天。",
+          "role": "core"
+        },
+        {
+          "id": "F2",
+          "text": "E2 校准有效期为 14 天，不能沿用 PRL 的 28 天。",
+          "role": "core"
+        }
+      ],
+      "evidence": [
+        {
+          "evidence_id": "rag-biz-026:positive:1",
+          "file": "E:\\生化免疫临床知识\\发光临床结果处理与思路初级培训版1.pptx",
+          "page": "19",
+          "quote": "PRL\n2～8℃ 2个月\n28天",
+          "indexed": true,
+          "confidence": "review"
+        },
+        {
+          "evidence_id": "rag-biz-026:positive:2",
+          "file": "E:\\生化免疫临床知识\\发光临床结果处理与思路初级培训版1.pptx",
+          "page": "19",
+          "quote": "E2\n2～8℃ 3个月\n14天",
+          "indexed": true,
+          "confidence": "review"
+        }
+      ],
+      "scope_note": "复用原已审核引文，本轮只核实其仍存在于当前AI索引；未重新打开全部原文件，未新增业务事实或引文。",
+      "check_review": [
+        {
+          "id": "F1",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        },
+        {
+          "id": "F2",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        }
+      ]
+    },
+    {
+      "id": "rag-biz-027",
+      "question": "传染病项目初测阳性，复测两次后一阴一阳，结果怎么判？如果两次均阴性呢？",
+      "expected_behavior": "answer",
+      "missing_fields": [],
+      "source_review_status": "reviewed",
+      "review_status": "pending",
+      "proposal": "revise",
+      "reason": "用户已给复测结果，仅问结果判定；复测前离心条件属于流程背景，不强制复述。判定适用性仍受原资料限制，不能推广到任意检测方法。",
+      "original_checks": [
+        {
+          "id": "F1",
+          "text": "教材建议将复测标本转入离心管，以至少 10000g RCF 离心 10 分钟后检测两次。",
+          "role": "core"
+        },
+        {
+          "id": "F2",
+          "text": "两次复测一阴一阳时最终判阳性；两次均阴性时最终判阴性。",
+          "role": "core"
+        }
+      ],
+      "proposed_checks": [
+        {
+          "id": "F1",
+          "text": "教材建议将复测标本转入离心管，以至少 10000g RCF 离心 10 分钟后检测两次。",
+          "role": "context"
+        },
+        {
+          "id": "F2",
+          "text": "两次复测一阴一阳时最终判阳性；两次均阴性时最终判阴性。",
+          "role": "core"
+        }
+      ],
+      "evidence": [
+        {
+          "evidence_id": "rag-biz-027:positive:1",
+          "file": "E:\\生化免疫临床知识\\发光临床结果处理与思路初级培训版1.pptx",
+          "page": "54",
+          "quote": "复测时建议将样本转移到离心管中，以≥10000g RCF的速度离心10分钟，然后检测2次。如果两次重测均为阴性，此样本判断为阴性；如果其中至少一次的结果为阳性，此样本判断为阳性",
+          "indexed": true,
+          "confidence": "review"
+        }
+      ],
+      "scope_note": "复用原已审核引文，本轮只核实其仍存在于当前AI索引；未重新打开全部原文件，未新增业务事实或引文。",
+      "check_review": [
+        {
+          "id": "F1",
+          "role": "context",
+          "decision": "optional",
+          "reason": "用户已给复测结果，仅问结果判定；复测前离心条件属于流程背景，不强制复述。判定适用性仍受原资料限制，不能推广到任意检测方法。"
+        },
+        {
+          "id": "F2",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        }
+      ]
+    },
+    {
+      "id": "rag-biz-028",
+      "question": "发光临床结果普遍偏低，该从哪些方面排查？能直接判断是哪块板卡故障吗？",
+      "expected_behavior": "partial_answer",
+      "missing_fields": [],
+      "source_review_status": "reviewed",
+      "review_status": "pending",
+      "proposal": "keep",
+      "reason": "当前检查项直接回答所问内容或约束不应出现的错误结论，建议保留。",
+      "original_checks": [
+        {
+          "id": "F1",
+          "text": "资料列出试剂是否超过定标周期、底物液是否过期、校准品状态与操作、仪器长期维护情况等排查方向。",
+          "role": "core"
+        },
+        {
+          "id": "F2",
+          "text": "整体偏低这一现象不足以锁定具体板卡；只能先列可能因素并结合定标、质控及实际检查继续定位。",
+          "role": "core"
+        }
+      ],
+      "proposed_checks": [
+        {
+          "id": "F1",
+          "text": "资料列出试剂是否超过定标周期、底物液是否过期、校准品状态与操作、仪器长期维护情况等排查方向。",
+          "role": "core"
+        },
+        {
+          "id": "F2",
+          "text": "整体偏低这一现象不足以锁定具体板卡；只能先列可能因素并结合定标、质控及实际检查继续定位。",
+          "role": "core"
+        }
+      ],
+      "evidence": [
+        {
+          "evidence_id": "rag-biz-028:positive:1",
+          "file": "E:\\生化免疫临床知识\\发光临床结果处理与思路初级培训版1.pptx",
+          "page": "58",
+          "quote": "临床结果系统偏高或偏低\n常见原因：\n1.试剂过了定标周期、底物液过期\n2.校准品失效或使用操作不当\n3.仪器长时间未维护保养\n处理措施：\n1.重新定标\n2.更换校准品，并按标准操作程序操作\n3.定期维护保养",
+          "indexed": true,
+          "confidence": "review"
+        },
+        {
+          "evidence_id": "rag-biz-028:positive:2",
+          "file": "E:\\生化免疫临床知识\\化学发光定标处理思路分析.pptx",
+          "page": "49",
+          "quote": "化学发光仪器、试剂、校准质控品组成的发光检测系统，任一环节出错将导致整体故障，分析原因应综合考虑",
+          "indexed": true,
+          "confidence": "exact"
+        }
+      ],
+      "scope_note": "复用原已审核引文，本轮只核实其仍存在于当前AI索引；未重新打开全部原文件，未新增业务事实或引文。",
+      "check_review": [
+        {
+          "id": "F1",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        },
+        {
+          "id": "F2",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        }
+      ]
+    },
+    {
+      "id": "rag-biz-029",
+      "question": "HBsAg 定量阴性质控靶值为 0，为什么不能直接用 SD 判断是否失控？该按什么范围判断？",
+      "expected_behavior": "answer",
+      "missing_fields": [],
+      "source_review_status": "reviewed",
+      "review_status": "pending",
+      "proposal": "keep",
+      "reason": "当前检查项直接回答所问内容或约束不应出现的错误结论，建议保留。",
+      "original_checks": [
+        {
+          "id": "F1",
+          "text": "阴性质控通常不含分析物、靶值为零；检测系统波动可能测得检测下限以下的非零值，此时计算 SD 没有意义。",
+          "role": "core"
+        },
+        {
+          "id": "F2",
+          "text": "教材说厂家通常给出范围上限，未超过该上限可视为在控；具体上限须按适用产品资料确认。",
+          "role": "core"
+        }
+      ],
+      "proposed_checks": [
+        {
+          "id": "F1",
+          "text": "阴性质控通常不含分析物、靶值为零；检测系统波动可能测得检测下限以下的非零值，此时计算 SD 没有意义。",
+          "role": "core"
+        },
+        {
+          "id": "F2",
+          "text": "教材说厂家通常给出范围上限，未超过该上限可视为在控；具体上限须按适用产品资料确认。",
+          "role": "core"
+        }
+      ],
+      "evidence": [
+        {
+          "evidence_id": "rag-biz-029:positive:1",
+          "file": "E:\\生化免疫临床知识\\质控的应用及结果的有效解读.pptx",
+          "page": "29",
+          "quote": "HBsAg定量检测试剂：阴性质控通常为0值血清（不含分析物），靶值即为0，但是由于检测系统的随机波动，可能会测得一个值（通常这个值在检测下限之下），此时计算SD没有意义。通常厂家会给一个范围上限，只要未超过上限，即在控",
+          "indexed": true,
+          "confidence": "exact"
+        }
+      ],
+      "scope_note": "复用原已审核引文，本轮只核实其仍存在于当前AI索引；未重新打开全部原文件，未新增业务事实或引文。",
+      "check_review": [
+        {
+          "id": "F1",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        },
+        {
+          "id": "F2",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        }
+      ]
+    },
+    {
+      "id": "rag-biz-030",
+      "question": "新批号质控品目前只有 20 个结果，建立均值和 SD 时采集时间怎么安排，SD 怎么处理？",
+      "expected_behavior": "answer",
+      "missing_fields": [],
+      "source_review_status": "reviewed",
+      "review_status": "pending",
+      "proposal": "keep",
+      "reason": "当前检查项直接回答所问内容或约束不应出现的错误结论，建议保留。",
+      "original_checks": [
+        {
+          "id": "F1",
+          "text": "初始均值建议在 20 个工作日收集至少 20 个结果；若做不到，可至少 5 个工作日、每天 4 个结果。",
+          "role": "core"
+        },
+        {
+          "id": "F2",
+          "text": "初始 SD 也可按这两种采集方案估计；仅有 20 个结果时，教材要求将 SD 扩大 30%。",
+          "role": "core"
+        }
+      ],
+      "proposed_checks": [
+        {
+          "id": "F1",
+          "text": "初始均值建议在 20 个工作日收集至少 20 个结果；若做不到，可至少 5 个工作日、每天 4 个结果。",
+          "role": "core"
+        },
+        {
+          "id": "F2",
+          "text": "初始 SD 也可按这两种采集方案估计；仅有 20 个结果时，教材要求将 SD 扩大 30%。",
+          "role": "core"
+        }
+      ],
+      "evidence": [
+        {
+          "evidence_id": "rag-biz-030:positive:1",
+          "file": "E:\\生化免疫临床知识\\质控的应用及结果的有效解读.pptx",
+          "page": "26",
+          "quote": "质控靶值：\n初始值：推荐20个工作日，收集至少20个质控结果取均值；至少5个工作日，   每天获得4个质控结果，取均值",
+          "indexed": true,
+          "confidence": "exact"
+        },
+        {
+          "evidence_id": "rag-biz-030:positive:2",
+          "file": "E:\\生化免疫临床知识\\质控的应用及结果的有效解读.pptx",
+          "page": "27",
+          "quote": "质控标准差：\n初始值：推荐20个工作日，收集至少20个质控结果计算标准差；或者5个工作日，每天获得4个质控结果，计算标准差。如果是20个结果，请将SD扩大30%",
+          "indexed": true,
+          "confidence": "exact"
+        }
+      ],
+      "scope_note": "复用原已审核引文，本轮只核实其仍存在于当前AI索引；未重新打开全部原文件，未新增业务事实或引文。",
+      "check_review": [
+        {
+          "id": "F1",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        },
+        {
+          "id": "F2",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        }
+      ]
+    },
+    {
+      "id": "rag-biz-031",
+      "question": "一个质控值超过均值 ±2SD，与超过 ±3SD，分别是警告还是失控？",
+      "expected_behavior": "answer",
+      "missing_fields": [],
+      "source_review_status": "reviewed",
+      "review_status": "pending",
+      "proposal": "keep",
+      "reason": "当前检查项直接回答所问内容或约束不应出现的错误结论，建议保留。",
+      "original_checks": [
+        {
+          "id": "F1",
+          "text": "12S 是一个质控值超过均值±2SD，教材将其列为警告规则。",
+          "role": "core"
+        },
+        {
+          "id": "F2",
+          "text": "13S 是一个质控值超过均值±3SD，教材将其列为失控规则。",
+          "role": "core"
+        }
+      ],
+      "proposed_checks": [
+        {
+          "id": "F1",
+          "text": "12S 是一个质控值超过均值±2SD，教材将其列为警告规则。",
+          "role": "core"
+        },
+        {
+          "id": "F2",
+          "text": "13S 是一个质控值超过均值±3SD，教材将其列为失控规则。",
+          "role": "core"
+        }
+      ],
+      "evidence": [
+        {
+          "evidence_id": "rag-biz-031:positive:1",
+          "file": "E:\\生化免疫临床知识\\质控的应用及结果的有效解读.pptx",
+          "page": "14",
+          "quote": "12S\n1个质控测定值超出均值±2SD，属于可接受的随机误差，警告规则\n4.5%\n13S\n1个质控测定值超出均值±3SD，随机误差为主，也可反映系统误差，失控规则\n0.27%",
+          "indexed": true,
+          "confidence": "exact"
+        }
+      ],
+      "scope_note": "复用原已审核引文，本轮只核实其仍存在于当前AI索引；未重新打开全部原文件，未新增业务事实或引文。",
+      "check_review": [
+        {
+          "id": "F1",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        },
+        {
+          "id": "F2",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        }
+      ]
+    },
+    {
+      "id": "rag-biz-032",
+      "question": "FPSA 质控突然严重偏低，复测仍低，该怎么逐步排查？",
+      "expected_behavior": "answer",
+      "missing_fields": [],
+      "source_review_status": "reviewed",
+      "review_status": "pending",
+      "proposal": "disputed",
+      "reason": "问如何排查，应检查其他项目、历史/反应数据、试剂装载与混匀；不要求复述特定医院已发生的结局，也不能把案例当作当前诊断。",
+      "original_checks": [
+        {
+          "id": "F1",
+          "text": "先核对其他肿瘤项目质控是否在控，单独 FPSA 失控时查看其历史结果和反应数据。",
+          "role": "core"
+        },
+        {
+          "id": "F2",
+          "text": "案例中异常结果来自新装载的一瓶试剂，换瓶核查时发现磁珠瓶未卡到位；重新装载并混匀后质控恢复。",
+          "role": "core"
+        },
+        {
+          "id": "C1",
+          "text": "这是教材中的特定案例，不表示所有 FPSA 偏低都由磁珠瓶未卡到位造成。",
+          "role": "context"
+        }
+      ],
+      "proposed_checks": [
+        {
+          "id": "F1",
+          "text": "先核对其他肿瘤项目质控是否在控，单独 FPSA 失控时查看其历史结果和反应数据。",
+          "role": "core"
+        },
+        {
+          "id": "F2",
+          "role": "core",
+          "text": "核查失控是否关联新装载试剂，检查磁珠瓶是否卡到位及是否混匀；重新装载、混匀后复测验证，不直接断言当前故障原因。"
+        },
+        {
+          "id": "C1",
+          "text": "这是教材中的特定案例，不表示所有 FPSA 偏低都由磁珠瓶未卡到位造成。",
+          "role": "context"
+        },
+        {
+          "id": "C2",
+          "role": "context",
+          "text": "案例中异常结果来自新装载的一瓶试剂，换瓶核查时发现磁珠瓶未卡到位；重新装载并混匀后质控恢复。"
+        }
+      ],
+      "evidence": [
+        {
+          "evidence_id": "rag-biz-032:positive:1",
+          "file": "E:\\生化免疫临床知识\\发光临床结果处理与思路初级培训版1.pptx",
+          "page": "42",
+          "quote": "案例分享2 -“诡异”的失控\n问题描述\n某医院投诉：FPSA项目质控突然失控，结果严重偏低，复测后仍偏低，还有很多样本等着测试，求解释。\n分析思路\n1.怀疑质控品问题，查看其余肿瘤项目，质控结果全部在控，故暂时排除质控品因素。\n2.只有FPSA这个项目失控，因此也暂不考虑仪器的因素。\n3.单项目失控，很有可能是试剂问题，查看历史结果及反应数据，发现失控的结果是一瓶刚装载的试剂测得的，进一步锁定试剂存在瓶间差。\n4.为验证推论，换新瓶试剂进行测试，更换过程中发现试剂仓中的FPSA试剂磁珠瓶没有卡到位，翘在上面，导致磁珠没有混匀。\n5.重新装载试剂混匀后测试质控结果回复正常，失控原因如此“简单”",
+          "indexed": true,
+          "confidence": "review"
+        }
+      ],
+      "scope_note": "复用原已审核引文，本轮只核实其仍存在于当前AI索引；未重新打开全部原文件，未新增业务事实或引文。",
+      "check_review": [
+        {
+          "id": "F1",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        },
+        {
+          "id": "F2",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        },
+        {
+          "id": "C1",
+          "role": "context",
+          "decision": "optional",
+          "reason": "问如何排查，应检查其他项目、历史/反应数据、试剂装载与混匀；不要求复述特定医院已发生的结局，也不能把案例当作当前诊断。"
+        },
+        {
+          "id": "C2",
+          "role": "context",
+          "decision": "optional",
+          "reason": "问如何排查，应检查其他项目、历史/反应数据、试剂装载与混匀；不要求复述特定医院已发生的结局，也不能把案例当作当前诊断。"
+        }
+      ]
+    },
+    {
+      "id": "rag-biz-033",
+      "question": "多个项目质控失控，有的显示“＞”、有的显示“＜”，这两种方向可能说明什么？先查哪里？",
+      "expected_behavior": "answer",
+      "missing_fields": [],
+      "source_review_status": "reviewed",
+      "review_status": "pending",
+      "proposal": "disputed",
+      "reason": "问方向含义及先检查什么，须结合方法判断并检查磁珠混匀；历史停电维修及未进入软件是个案背景。",
+      "original_checks": [
+        {
+          "id": "F1",
+          "text": "案例中显示“＞”的失控项目为竞争法、“＜”的为夹心法，整体提示发光值偏低。",
+          "role": "core"
+        },
+        {
+          "id": "F2",
+          "text": "复测发光值升高后检查试剂磁珠混匀；案例最终发现维修后未进入操作软件，试剂仓未自动混匀，磁珠沉降。",
+          "role": "core"
+        }
+      ],
+      "proposed_checks": [
+        {
+          "id": "F1",
+          "text": "案例中显示“＞”的失控项目为竞争法、“＜”的为夹心法，整体提示发光值偏低。",
+          "role": "core"
+        },
+        {
+          "id": "F2",
+          "role": "core",
+          "text": "结合复测发光值变化，检查试剂磁珠是否充分混匀；不能仅凭失控方向确定唯一故障。"
+        },
+        {
+          "id": "C1",
+          "role": "context",
+          "text": "案例最终发现维修后未进入操作软件，试剂仓未自动混匀，磁珠沉降。"
+        }
+      ],
+      "evidence": [
+        {
+          "evidence_id": "rag-biz-033:positive:1",
+          "file": "E:\\生化免疫临床知识\\质控的应用及结果的有效解读.pptx",
+          "page": "35",
+          "quote": "案例分享2\n医院科室人员做日常质控时发现：发现多项目的质控都失控了，有的显示“＞”，有的显示“＜”，怀疑仪器出现了问题。\n1.多项目失控，怀疑系统问题。进一步分析，部分项目在控，暂时排除仪器因素。\n2.多项目失控，怀疑复合质控的问题。 进一步分析，复合质控所包含的项目有些是在控的，同时多个复合质控都出现同样问题，故暂时排除质控问题。\n3.寻找规律：显示“＞”的失控项目均为竞争法，显示“＜”的失控项目均为夹心法，是发光值偏低的表现。\n4.质控复测后，失控项目的发光值均存在升高的趋势，符合磁珠未混匀的测试表现。\n5.开仓检查试剂，发现失控项目的磁珠未充分混匀。\n6.未混匀的原因：前一天仪器经历过长时间的断电维修，由于是周末，维修后没有进入操作软件，试剂仓丧失自动混匀功能，磁珠完全沉降到底部后，仅靠试剂仓的混匀力度在短时间内无法将磁珠充分混匀",
+          "indexed": true,
+          "confidence": "exact"
+        }
+      ],
+      "scope_note": "复用原已审核引文，本轮只核实其仍存在于当前AI索引；未重新打开全部原文件，未新增业务事实或引文。",
+      "check_review": [
+        {
+          "id": "F1",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        },
+        {
+          "id": "F2",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        },
+        {
+          "id": "C1",
+          "role": "context",
+          "decision": "optional",
+          "reason": "问方向含义及先检查什么，须结合方法判断并检查磁珠混匀；历史停电维修及未进入软件是个案背景。"
+        }
+      ]
+    },
+    {
+      "id": "rag-biz-034",
+      "question": "患者 HBsAg 初测 0.3 IU/mL，能只凭这个结果确诊感染并决定治疗方案吗？",
+      "expected_behavior": "refuse",
+      "missing_fields": [],
+      "source_review_status": "reviewed",
+      "review_status": "pending",
+      "proposal": "keep",
+      "reason": "当前检查项直接回答所问内容或约束不应出现的错误结论，建议保留。",
+      "original_checks": [
+        {
+          "id": "C1",
+          "text": "当前索引的复检范围与复测流程不足以支持仅凭单个数值确诊或制定治疗方案。",
+          "role": "context"
+        }
+      ],
+      "proposed_checks": [
+        {
+          "id": "C1",
+          "text": "当前索引的复检范围与复测流程不足以支持仅凭单个数值确诊或制定治疗方案。",
+          "role": "context"
+        }
+      ],
+      "evidence": [],
+      "scope_note": "复用原已审核引文，本轮只核实其仍存在于当前AI索引；未重新打开全部原文件，未新增业务事实或引文。",
+      "check_review": [
+        {
+          "id": "C1",
+          "role": "context",
+          "decision": "optional",
+          "reason": "原检查项已标为可选背景，保持。"
+        }
+      ]
+    },
+    {
+      "id": "rag-biz-035",
+      "question": "室内质控显示在控，但室间质评不合格，主要可能是什么原因？应先查什么？",
+      "expected_behavior": "answer",
+      "missing_fields": [],
+      "source_review_status": "reviewed",
+      "review_status": "pending",
+      "proposal": "keep",
+      "reason": "当前检查项直接回答所问内容或约束不应出现的错误结论，建议保留。",
+      "original_checks": [
+        {
+          "id": "F1",
+          "text": "室内质控显示在控但室间质评不合格时，主要从样本问题、试剂定标、质控失控三类原因排查；这些是可能原因，尚不能确定单一故障。",
+          "role": "core"
+        },
+        {
+          "id": "F2",
+          "text": "室内质控在控只能说明所监测的精密度，不能单独证明正确度，应复核校准流程。",
+          "role": "core"
+        },
+        {
+          "id": "F3",
+          "text": "还应核查质评样本及操作流程，因为室内质控不能覆盖分析前、分析后的质量问题。",
+          "role": "core"
+        }
+      ],
+      "proposed_checks": [
+        {
+          "id": "F1",
+          "text": "室内质控显示在控但室间质评不合格时，主要从样本问题、试剂定标、质控失控三类原因排查；这些是可能原因，尚不能确定单一故障。",
+          "role": "core"
+        },
+        {
+          "id": "F2",
+          "text": "室内质控在控只能说明所监测的精密度，不能单独证明正确度，应复核校准流程。",
+          "role": "core"
+        },
+        {
+          "id": "F3",
+          "text": "还应核查质评样本及操作流程，因为室内质控不能覆盖分析前、分析后的质量问题。",
+          "role": "core"
+        }
+      ],
+      "evidence": [
+        {
+          "evidence_id": "rag-biz-035:positive:1",
+          "file": "E:\\生化免疫临床知识\\发光临床结果处理与思路初级培训版1.pptx",
+          "page": "50",
+          "quote": "室内质控只反映检测精密度，不能反映正确度，确认校准流程；\n室内质控是分析中的质量控制，不能反映分析前、分析后的质量问题，确认质评操作流程",
+          "indexed": true,
+          "confidence": "review"
+        },
+        {
+          "evidence_id": "rag-biz-035:positive:2",
+          "file": "E:\\生化免疫临床知识\\发光临床结果处理与思路初级培训版1.pptx",
+          "page": "50",
+          "quote": "主要原因：样本问题、试剂定标、质控失控",
+          "indexed": true,
+          "confidence": "review"
+        }
+      ],
+      "scope_note": "复用原已审核引文，本轮只核实其仍存在于当前AI索引；未重新打开全部原文件，未新增业务事实或引文。",
+      "check_review": [
+        {
+          "id": "F1",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        },
+        {
+          "id": "F2",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        },
+        {
+          "id": "F3",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        }
+      ]
+    },
+    {
+      "id": "rag-biz-036",
+      "question": "生化比色法和比浊法分别该怎样选择线性或非线性校准？需要几个校准点？",
+      "expected_behavior": "answer",
+      "missing_fields": [],
+      "source_review_status": "reviewed",
+      "review_status": "pending",
+      "proposal": "keep",
+      "reason": "当前检查项直接回答所问内容或约束不应出现的错误结论，建议保留。",
+      "original_checks": [
+        {
+          "id": "F1",
+          "text": "教材说线性校准主要适用于比色法；常用两点线性校准采用空白溶液和一个已知浓度校准品。",
+          "role": "core"
+        },
+        {
+          "id": "F2",
+          "text": "非线性校准主要用于比浊法等非线性关系，涉及 3–6 个不同浓度校准品进行曲线拟合。",
+          "role": "core"
+        }
+      ],
+      "proposed_checks": [
+        {
+          "id": "F1",
+          "text": "教材说线性校准主要适用于比色法；常用两点线性校准采用空白溶液和一个已知浓度校准品。",
+          "role": "core"
+        },
+        {
+          "id": "F2",
+          "text": "非线性校准主要用于比浊法等非线性关系，涉及 3–6 个不同浓度校准品进行曲线拟合。",
+          "role": "core"
+        }
+      ],
+      "evidence": [
+        {
+          "evidence_id": "rag-biz-036:positive:1",
+          "file": "E:\\生化免疫临床知识\\生化校准的意义及正确操作.pptx",
+          "page": "13",
+          "quote": "校准方法的选择：\n线性校准：线性校准方法需选用一个或多个已知浓度的校准物质或校准品，一点线性校准通常被定义为K因子校准，仅用空白溶液进行校准。生化分析仪上常用的是两点线性校准，需要用空白溶液和一个已知浓度的校准品进行校准。\n非线性校准：测量方法的反应信号与被测物质浓度不呈线性关系（如免疫比浊分析法），则采用非线性校准模式，需涉及3-6个不同浓度的校准品，采用曲线拟合、多项式、对数等方式建立非线性函数。\n备注：\n线性校准主要适用于比色法测定的项目；\n非线性校准主要适用于比浊法项目的测定；\n方法的选择一般已有厂家推荐，执行厂家推荐即可",
+          "indexed": true,
+          "confidence": "exact"
+        }
+      ],
+      "scope_note": "复用原已审核引文，本轮只核实其仍存在于当前AI索引；未重新打开全部原文件，未新增业务事实或引文。",
+      "check_review": [
+        {
+          "id": "F1",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        },
+        {
+          "id": "F2",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        }
+      ]
+    },
+    {
+      "id": "rag-biz-037",
+      "question": "生化项目校准后 IQC 失控或 K 值超限，应该立即反复定标，还是先核查哪些方面？",
+      "expected_behavior": "answer",
+      "missing_fields": [],
+      "source_review_status": "reviewed",
+      "review_status": "pending",
+      "proposal": "revise",
+      "reason": "问是否反复校准及核查方面；排除原因后再校准和核查列表为必答，不强制复述术语及记录要求。",
+      "original_checks": [
+        {
+          "id": "F1",
+          "text": "资料把校准后 IQC 失控或 K 值超出允许范围视为校准失败；应先分析、确认并记录原因，排除异常后再校准。",
+          "role": "core"
+        },
+        {
+          "id": "F2",
+          "text": "核查试剂、质控品与校准品的状态和效期，以及仪器光路、比色杯、温度、保养和实验室水质。",
+          "role": "core"
+        }
+      ],
+      "proposed_checks": [
+        {
+          "id": "F1",
+          "role": "core",
+          "text": "先分析并排除异常原因后再校准，不应在未排查原因时立即反复定标。"
+        },
+        {
+          "id": "F2",
+          "text": "核查试剂、质控品与校准品的状态和效期，以及仪器光路、比色杯、温度、保养和实验室水质。",
+          "role": "core"
+        },
+        {
+          "id": "C1",
+          "role": "context",
+          "text": "原资料称该现象为校准失败，应确认并记录原因。"
+        }
+      ],
+      "evidence": [
+        {
+          "evidence_id": "rag-biz-037:positive:1",
+          "file": "E:\\生化免疫临床知识\\生化校准的意义及正确操作.pptx",
+          "page": "31",
+          "quote": "校准后，如出现IQC失控或校准K值超出允许范围则视为校准失败，首先分析、确认并记录校准失败原因，排除异常情况后再校准。\n试剂：试剂状态（颜色、沉淀物等）、批号、贮存有效期、开瓶有效期、保存条件等\n室内质控品：复溶状态、保存时间、保存条件及有效期等。\n校准品：复溶状态、保存时间、保存条件及有效期等。\n仪器：光路（灯泡寿命）、比色杯、温度及保养情况，必要时联系工程师维护保养。\n实验室用水：水质是否符合要求",
+          "indexed": true,
+          "confidence": "exact"
+        }
+      ],
+      "scope_note": "复用原已审核引文，本轮只核实其仍存在于当前AI索引；未重新打开全部原文件，未新增业务事实或引文。",
+      "check_review": [
+        {
+          "id": "F1",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        },
+        {
+          "id": "F2",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        },
+        {
+          "id": "C1",
+          "role": "context",
+          "decision": "optional",
+          "reason": "问是否反复校准及核查方面；排除原因后再校准和核查列表为必答，不强制复述术语及记录要求。"
+        }
+      ]
+    },
+    {
+      "id": "rag-biz-038",
+      "question": "生化项目每天重新定标，TBIL、DBIL 结果仍不稳定，先考虑什么？",
+      "expected_behavior": "answer",
+      "missing_fields": [],
+      "source_review_status": "reviewed",
+      "review_status": "pending",
+      "proposal": "revise",
+      "reason": "问先考虑什么，定标液复溶稳定性和保存条件为必答；每天校准并非保证、天间校准引入不确定因素是背景。",
+      "original_checks": [
+        {
+          "id": "F1",
+          "text": "教材明确说每天定标也不一定保证结果稳定。",
+          "role": "core"
+        },
+        {
+          "id": "F2",
+          "text": "TBIL、DBIL 等复溶后不稳定且见光易分解；应参照说明书规定的存放时间，频繁定标也会引入额外不确定因素。",
+          "role": "core"
+        }
+      ],
+      "proposed_checks": [
+        {
+          "id": "F1",
+          "role": "context",
+          "text": "教材明确说每天定标也不一定保证结果稳定。"
+        },
+        {
+          "id": "F2",
+          "role": "core",
+          "text": "先核查TBIL、DBIL定标液复溶后的稳定性及见光分解，按说明书确认其存放时间和保存条件。"
+        },
+        {
+          "id": "C1",
+          "role": "context",
+          "text": "天间校准也会引入额外不确定因素。"
+        }
+      ],
+      "evidence": [
+        {
+          "evidence_id": "rag-biz-038:positive:1",
+          "file": "E:\\生化免疫临床知识\\生化试剂应用及常见问题-SH-20190110.pptx",
+          "page": "8",
+          "quote": "7）、是否每天定标就能保证结果的稳定性？\n不一定：1、可能您在定标时并不是每天都新溶解定标液，因为定标液复溶后有一些项目不稳定，比如：TBIL、DBIL(见光易分解）。解决方法：以上项目在校准时参考说明书宣称的存放时间。\n2、天间存在校准也引入很多不确定因素",
+          "indexed": true,
+          "confidence": "exact"
+        }
+      ],
+      "scope_note": "复用原已审核引文，本轮只核实其仍存在于当前AI索引；未重新打开全部原文件，未新增业务事实或引文。",
+      "check_review": [
+        {
+          "id": "F1",
+          "role": "context",
+          "decision": "optional",
+          "reason": "问先考虑什么，定标液复溶稳定性和保存条件为必答；每天校准并非保证、天间校准引入不确定因素是背景。"
+        },
+        {
+          "id": "F2",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        },
+        {
+          "id": "C1",
+          "role": "context",
+          "decision": "optional",
+          "reason": "问先考虑什么，定标液复溶稳定性和保存条件为必答；每天校准并非保证、天间校准引入不确定因素是背景。"
+        }
+      ]
+    },
+    {
+      "id": "rag-biz-039",
+      "question": "生化双波长检测主要用来减轻哪些干扰？双波长怎么选才合适？",
+      "expected_behavior": "answer",
+      "missing_fields": [],
+      "source_review_status": "reviewed",
+      "review_status": "pending",
+      "proposal": "keep",
+      "reason": "当前检查项直接回答所问内容或约束不应出现的错误结论，建议保留。",
+      "original_checks": [
+        {
+          "id": "F1",
+          "text": "该教材列双波长用于减轻黄疸、溶血、乳糜等有色溶液干扰，也可减轻比色杯气泡或灯泡不稳定的影响。",
+          "role": "core"
+        },
+        {
+          "id": "F2",
+          "text": "不同双波长组合的抗干扰能力不同，教材建议向试剂厂家索取合适设置。",
+          "role": "core"
+        }
+      ],
+      "proposed_checks": [
+        {
+          "id": "F1",
+          "text": "该教材列双波长用于减轻黄疸、溶血、乳糜等有色溶液干扰，也可减轻比色杯气泡或灯泡不稳定的影响。",
+          "role": "core"
+        },
+        {
+          "id": "F2",
+          "text": "不同双波长组合的抗干扰能力不同，教材建议向试剂厂家索取合适设置。",
+          "role": "core"
+        }
+      ],
+      "evidence": [
+        {
+          "evidence_id": "rag-biz-039:positive:1",
+          "file": "E:\\生化免疫临床知识\\生化试剂应用及常见问题-SH-20190110.pptx",
+          "page": "5",
+          "quote": "双波长的意义?如何选择双波长？\n1）、双波长的意义：\nA、消除有色溶液（黄疸、溶血和乳糜等）的干扰\nB、消除比色杯中的气泡或灯泡的不稳定造成的对测定结果的影响。\n2）、如何设定双波长？\n最好向试剂厂家索取最为安全,因为不同的双波长测定抗干扰不同",
+          "indexed": true,
+          "confidence": "exact"
+        }
+      ],
+      "scope_note": "复用原已审核引文，本轮只核实其仍存在于当前AI索引；未重新打开全部原文件，未新增业务事实或引文。",
+      "check_review": [
+        {
+          "id": "F1",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        },
+        {
+          "id": "F2",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        }
+      ]
+    },
+    {
+      "id": "rag-biz-040",
+      "question": "ALB、GLU 等小样本量项目重复性变差，ALT、AST 较稳，优先查哪里？如果所有项目都变差呢？",
+      "expected_behavior": "answer",
+      "missing_fields": [],
+      "source_review_status": "reviewed",
+      "review_status": "pending",
+      "proposal": "keep",
+      "reason": "当前检查项直接回答所问内容或约束不应出现的错误结论，建议保留。",
+      "original_checks": [
+        {
+          "id": "F1",
+          "text": "小样本量项目先受影响、而大样本量项目相对稳定时，教材把样本针轻微堵塞列为常见方向。",
+          "role": "core"
+        },
+        {
+          "id": "F2",
+          "text": "若所有项目都不好，教材提示转而检查冲洗头堵塞等共性问题，不应仍只盯小样本量项目。",
+          "role": "core"
+        }
+      ],
+      "proposed_checks": [
+        {
+          "id": "F1",
+          "text": "小样本量项目先受影响、而大样本量项目相对稳定时，教材把样本针轻微堵塞列为常见方向。",
+          "role": "core"
+        },
+        {
+          "id": "F2",
+          "text": "若所有项目都不好，教材提示转而检查冲洗头堵塞等共性问题，不应仍只盯小样本量项目。",
+          "role": "core"
+        }
+      ],
+      "evidence": [
+        {
+          "evidence_id": "rag-biz-040:positive:1",
+          "file": "E:\\生化免疫临床知识\\生化试剂应用及常见问题-SH-20190110.pptx",
+          "page": "14",
+          "quote": "样品针稍稍有些堵，那些项目最先受影响（重复性不好）？\n可能有很多种变现形式，最为常见的是低样品量的项目重复性不好，比\n如：ALB、GLU。相反一些样品量大的项目如ALT、AST、GGT受的影响小",
+          "indexed": true,
+          "confidence": "exact"
+        },
+        {
+          "evidence_id": "rag-biz-040:positive:2",
+          "file": "E:\\生化免疫临床知识\\生化试剂应用及常见问题-SH-20190110.pptx",
+          "page": "16",
+          "quote": "有可能的结果是标本针堵塞，如果项目都不好，那可能冲洗头堵了",
+          "indexed": true,
+          "confidence": "exact"
+        }
+      ],
+      "scope_note": "复用原已审核引文，本轮只核实其仍存在于当前AI索引；未重新打开全部原文件，未新增业务事实或引文。",
+      "check_review": [
+        {
+          "id": "F1",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        },
+        {
+          "id": "F2",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        }
+      ]
+    },
+    {
+      "id": "rag-biz-041",
+      "question": "生化项目中 Ca、Mg、Fe 先变差，而 LDH 明显偏低，分别该检查什么？",
+      "expected_behavior": "answer",
+      "missing_fields": [],
+      "source_review_status": "reviewed",
+      "review_status": "pending",
+      "proposal": "revise",
+      "reason": "问分别检查什么；水质和反应盘温度为必答，其他酶项目及其他项目正常等说明为背景。",
+      "original_checks": [
+        {
+          "id": "F1",
+          "text": "Ca、Mg、Fe 是水质异常较敏感的项目；其他项目正常而这些项目不好时先分析水质。",
+          "role": "core"
+        },
+        {
+          "id": "F2",
+          "text": "反应盘温度偏低时，教材举 LDH 结果明显偏低，并提示 ALP、ALT、AMY 等酶类也可受影响。",
+          "role": "core"
+        }
+      ],
+      "proposed_checks": [
+        {
+          "id": "F1",
+          "role": "core",
+          "text": "Ca、Mg、Fe先变差时检查水质。"
+        },
+        {
+          "id": "F2",
+          "role": "core",
+          "text": "LDH明显偏低时检查反应盘温度，尤其是否偏低。"
+        },
+        {
+          "id": "C1",
+          "role": "context",
+          "text": "Ca、Mg、Fe对水质较敏感；反应温度异常时ALP、ALT、AMY等酶类也可受影响。"
+        }
+      ],
+      "evidence": [
+        {
+          "evidence_id": "rag-biz-041:positive:1",
+          "file": "E:\\生化免疫临床知识\\生化试剂应用及常见问题-SH-20190110.pptx",
+          "page": "15",
+          "quote": "水有问题那些项目最先受影响？\n以下项目最为敏感：钙Ca  镁Mg  铁 Fe，如果其他项目都好，只有以上这\n些项目不好，应分析水的质量 。\n清洗剂出问题，那些项目受影响？\n通常情况：TBA/Mg等易受交叉污染的项目\nC反应蛋白(CRP)、抗链O（ASO）和铁蛋白这类比浊法的项目。\n反应盘的温度有问题（通常偏低),什么项目受影响？\nLDH结果明显偏低，其它一些受影响的酶类是ALP、ALT、AMY等等",
+          "indexed": true,
+          "confidence": "exact"
+        }
+      ],
+      "scope_note": "复用原已审核引文，本轮只核实其仍存在于当前AI索引；未重新打开全部原文件，未新增业务事实或引文。",
+      "check_review": [
+        {
+          "id": "F1",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        },
+        {
+          "id": "F2",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        },
+        {
+          "id": "C1",
+          "role": "context",
+          "decision": "optional",
+          "reason": "问分别检查什么；水质和反应盘温度为必答，其他酶项目及其他项目正常等说明为背景。"
+        }
+      ]
+    },
+    {
+      "id": "rag-biz-042",
+      "question": "TBIL 试剂 R1 60 mL×3、R2 45 mL×1，参数量分别设为 196 和 49 μL，为什么 R2 先用完？两者每测实际消耗量和可测人份各是多少？",
+      "expected_behavior": "answer",
+      "missing_fields": [],
+      "source_review_status": "reviewed",
+      "review_status": "pending",
+      "proposal": "keep",
+      "reason": "当前检查项直接回答所问内容或约束不应出现的错误结论，建议保留。",
+      "original_checks": [
+        {
+          "id": "F1",
+          "text": "每测试实际消耗量是参数设置量加试剂残余量，不能只按参数设置的 4:1 比例估算。",
+          "role": "core"
+        },
+        {
+          "id": "F2",
+          "text": "该 TBIL 表列 R1 每测试 224 μL、R2 每测试 62 μL；示例可测约 803 与 725 人份，因此 R2 先用完。",
+          "role": "core"
+        }
+      ],
+      "proposed_checks": [
+        {
+          "id": "F1",
+          "text": "每测试实际消耗量是参数设置量加试剂残余量，不能只按参数设置的 4:1 比例估算。",
+          "role": "core"
+        },
+        {
+          "id": "F2",
+          "text": "该 TBIL 表列 R1 每测试 224 μL、R2 每测试 62 μL；示例可测约 803 与 725 人份，因此 R2 先用完。",
+          "role": "core"
+        }
+      ],
+      "evidence": [
+        {
+          "evidence_id": "rag-biz-042:positive:1",
+          "file": "E:\\生化免疫临床知识\\生化试剂应用及常见问题-SH-20190110.pptx",
+          "page": "21",
+          "quote": "每个测试实际消耗量=参数设置量+试剂残余量",
+          "indexed": true,
+          "confidence": "exact"
+        },
+        {
+          "evidence_id": "rag-biz-042:positive:2",
+          "file": "E:\\生化免疫临床知识\\生化试剂应用及常见问题-SH-20190110.pptx",
+          "page": "22",
+          "quote": "TBIL项目\nR1试剂\nR2试剂\n厂家试剂装量\n60ml×3\n45ml×1\n参数设置样品量（ul）\n7\n参数设置量（ul）\n196\n49\n对应试剂残余量（ul）\n28\n13\n每测试试剂消耗量（ul）\n224\n62\n实际测定人份数\n803\n725",
+          "indexed": true,
+          "confidence": "exact"
+        }
+      ],
+      "scope_note": "复用原已审核引文，本轮只核实其仍存在于当前AI索引；未重新打开全部原文件，未新增业务事实或引文。",
+      "check_review": [
+        {
+          "id": "F1",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        },
+        {
+          "id": "F2",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        }
+      ]
+    },
+    {
+      "id": "rag-biz-043",
+      "question": "换用另一品牌质控品后，测得值与标示靶值不一致，是基质效应还是其他原因？基质效应和基质偏差各指什么？",
+      "expected_behavior": "answer",
+      "missing_fields": [],
+      "source_review_status": "reviewed",
+      "review_status": "pending",
+      "proposal": "keep",
+      "reason": "当前检查项直接回答所问内容或约束不应出现的错误结论，建议保留。",
+      "original_checks": [
+        {
+          "id": "F1",
+          "text": "基质效应指样本中分析物以外成分对测定值或方法准确测定能力的影响。",
+          "role": "core"
+        },
+        {
+          "id": "F2",
+          "text": "基质偏差是基质效应引起的分析结果偏差；跨厂家质控靶值差异还要考虑试剂、仪器、校准和测定原理等系统差异。",
+          "role": "core"
+        }
+      ],
+      "proposed_checks": [
+        {
+          "id": "F1",
+          "text": "基质效应指样本中分析物以外成分对测定值或方法准确测定能力的影响。",
+          "role": "core"
+        },
+        {
+          "id": "F2",
+          "text": "基质偏差是基质效应引起的分析结果偏差；跨厂家质控靶值差异还要考虑试剂、仪器、校准和测定原理等系统差异。",
+          "role": "core"
+        }
+      ],
+      "evidence": [
+        {
+          "evidence_id": "rag-biz-043:positive:1",
+          "file": "E:\\生化免疫临床知识\\生化试剂应用及常见问题-SH-20190110.pptx",
+          "page": "4",
+          "quote": "何为基质效应\n1）、基质：尚无统一解释，曾称为“一种分析物（analyte)的环境\n（milieu)”,即标本中除分析物以外的一切组成。以胆固醇为例（Chol)测定而言，就是指Chol以外血清中的一切成分及其物理、化学性质。\n2）、基质效应（matrix  effect) 按NCCLS文件的定义，指：\nA、标本中除分析物以外的其他成分对分析物测定值的影响。\nB、基质对分析方法准确测定分析物的能力干扰。\n3）、基质偏差（matrix  bias) ：基质效应所致分析结果的偏差称为基质偏差",
+          "indexed": true,
+          "confidence": "exact"
+        },
+        {
+          "evidence_id": "rag-biz-043:positive:2",
+          "file": "E:\\生化免疫临床知识\\生化试剂应用及常见问题-SH-20190110.pptx",
+          "page": "27",
+          "quote": "迈瑞试剂测定其它品牌质控品与其靶值有差异\n现  象\n迈瑞试剂测定其它品牌质控品，个别项目的结果与质控品标示的靶值有差异\n差异来源\n1、不同厂家之间体系的差异导致测定结果与靶值的差异(试剂、仪器、校准、测定原理等)\n2、厂家质控品定值的方法",
+          "indexed": true,
+          "confidence": "exact"
+        }
+      ],
+      "scope_note": "复用原已审核引文，本轮只核实其仍存在于当前AI索引；未重新打开全部原文件，未新增业务事实或引文。",
+      "check_review": [
+        {
+          "id": "F1",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        },
+        {
+          "id": "F2",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        }
+      ]
+    },
+    {
+      "id": "rag-biz-044",
+      "question": "A&T-ISE 模块定标时，H-STD 和 L-STD 依什么顺序判通过？3 mV 与 Cl Bias 条件分别在哪一步用？",
+      "expected_behavior": "answer",
+      "missing_fields": [],
+      "source_review_status": "reviewed",
+      "review_status": "pending",
+      "proposal": "keep",
+      "reason": "当前检查项直接回答所问内容或约束不应出现的错误结论，建议保留。",
+      "original_checks": [
+        {
+          "id": "F1",
+          "text": "先测一次 H-STD 活化电极，再比较后续相邻两次 H-STD 的 S-B，差值在 3 mV 以内才进入 L-STD，最多测 8 次。",
+          "role": "core"
+        },
+        {
+          "id": "F2",
+          "text": "L-STD 的第一次结果不参与计算，后续同样找 3 mV 内的两次测试，最多 8 次。",
+          "role": "core"
+        },
+        {
+          "id": "F3",
+          "text": "L-STD 通过后再追加一次；Cl 电极电压相对前两次均值的 Bias 必须在 -4～2 区间，否则定标失败。",
+          "role": "core"
+        }
+      ],
+      "proposed_checks": [
+        {
+          "id": "F1",
+          "text": "先测一次 H-STD 活化电极，再比较后续相邻两次 H-STD 的 S-B，差值在 3 mV 以内才进入 L-STD，最多测 8 次。",
+          "role": "core"
+        },
+        {
+          "id": "F2",
+          "text": "L-STD 的第一次结果不参与计算，后续同样找 3 mV 内的两次测试，最多 8 次。",
+          "role": "core"
+        },
+        {
+          "id": "F3",
+          "text": "L-STD 通过后再追加一次；Cl 电极电压相对前两次均值的 Bias 必须在 -4～2 区间，否则定标失败。",
+          "role": "core"
+        }
+      ],
+      "evidence": [
+        {
+          "evidence_id": "rag-biz-044:positive:1",
+          "file": "E:\\生化资料\\生化场景化培训教材-电解质V1.1.pptx",
+          "page": "20",
+          "quote": "先测试H-STD一次，以活化电极；\n第二次测试H-STD，记录S-B；\n第三次测试记录H-STD并与前次比较，差值（即定标容差，在参数设置界面可修改）在3(mV)以内即视为定标通过，继续执行L-STD测试；\n若差值大于3，则再进行H-STD测试，直到相邻两次的S-B差值不超过3为止，最多测试8次。\n若H-STD通过，进行L-STD测试时，同样第一次结果不参与计算，从第二次开始计算，同样寻找差值在3以内的两次测试，最多8次，若不成功则报定标失败；\n若成功则追加一次L-STD，此时Cl电极电压与前两次Cl电极电压（取均值）的差值（Bias），差值必须在-4~2区间之内，否则报警，定标失败，用于下一批测试的第一个Cl测试",
+          "indexed": true,
+          "confidence": "exact"
+        }
+      ],
+      "scope_note": "复用原已审核引文，本轮只核实其仍存在于当前AI索引；未重新打开全部原文件，未新增业务事实或引文。",
+      "check_review": [
+        {
+          "id": "F1",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        },
+        {
+          "id": "F2",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        },
+        {
+          "id": "F3",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        }
+      ]
+    },
+    {
+      "id": "rag-biz-045",
+      "question": "BS 生化仪 ISE 钠结果偏低，只凭这一项症状，能直接确定坏的是哪支电极并给出更换物料编码吗？",
+      "expected_behavior": "refuse",
+      "missing_fields": [],
+      "source_review_status": "reviewed",
+      "review_status": "pending",
+      "proposal": "keep",
+      "reason": "当前检查项直接回答所问内容或约束不应出现的错误结论，建议保留。",
+      "original_checks": [
+        {
+          "id": "C1",
+          "text": "仅有钠结果偏低，且未给出 ISE 模块类型、定标斜率、电压、质控与管路检查结果，资料不能确定唯一故障件。",
+          "role": "context"
+        }
+      ],
+      "proposed_checks": [
+        {
+          "id": "C1",
+          "text": "仅有钠结果偏低，且未给出 ISE 模块类型、定标斜率、电压、质控与管路检查结果，资料不能确定唯一故障件。",
+          "role": "context"
+        }
+      ],
+      "evidence": [],
+      "scope_note": "复用原已审核引文，本轮只核实其仍存在于当前AI索引；未重新打开全部原文件，未新增业务事实或引文。",
+      "check_review": [
+        {
+          "id": "C1",
+          "role": "context",
+          "decision": "optional",
+          "reason": "原检查项已标为可选背景，保持。"
+        }
+      ]
+    },
+    {
+      "id": "rag-biz-046",
+      "question": "免疫光度计暗计数诊断要检查多少个杯位？合格上限和通常正常值各是多少 CPS？",
+      "expected_behavior": "answer",
+      "missing_fields": [],
+      "source_review_status": "reviewed",
+      "review_status": "pending",
+      "proposal": "revise",
+      "reason": "只问杯位数及两个数值阈值；LED关闭及反应盘外圈属于诊断原理背景。",
+      "original_checks": [
+        {
+          "id": "F1",
+          "text": "诊断在无光、LED 不打开时测量反应盘外圈 53 个杯位。",
+          "role": "core"
+        },
+        {
+          "id": "F2",
+          "text": "每个杯位不得超过 300 CPS；资料说通常正常值一般不超过 200 CPS。",
+          "role": "core"
+        }
+      ],
+      "proposed_checks": [
+        {
+          "id": "F1",
+          "role": "core",
+          "text": "暗计数诊断检查53个杯位。"
+        },
+        {
+          "id": "F2",
+          "text": "每个杯位不得超过 300 CPS；资料说通常正常值一般不超过 200 CPS。",
+          "role": "core"
+        },
+        {
+          "id": "C1",
+          "role": "context",
+          "text": "在无光、LED关闭时测量反应盘外圈杯位。"
+        }
+      ],
+      "evidence": [
+        {
+          "evidence_id": "rag-biz-046:positive:1",
+          "file": "E:\\免疫资料\\免疫场景化培训教材-光学V1.1.pdf",
+          "page": "17",
+          "quote": "暗计数诊断：无光环境（LED不打开的情\n况）下，反应盘外圈依次转过53个杯位，\n测量53个杯位的暗计数值判断是否正常，\n通过标准：\na) 每个杯位的值不超过300CPS。\nb) 正常值一般不超过200",
+          "indexed": true,
+          "confidence": "exact"
+        }
+      ],
+      "scope_note": "复用原已审核引文，本轮只核实其仍存在于当前AI索引；未重新打开全部原文件，未新增业务事实或引文。",
+      "check_review": [
+        {
+          "id": "F1",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        },
+        {
+          "id": "F2",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        },
+        {
+          "id": "C1",
+          "role": "context",
+          "decision": "optional",
+          "reason": "只问杯位数及两个数值阈值；LED关闭及反应盘外圈属于诊断原理背景。"
+        }
+      ]
+    },
+    {
+      "id": "rag-biz-047",
+      "question": "免疫光度计做 DCF 诊断，测几次？相对极差和 DCF 因子的通过标准分别是多少？",
+      "expected_behavior": "answer",
+      "missing_fields": [],
+      "source_review_status": "reviewed",
+      "review_status": "pending",
+      "proposal": "revise",
+      "reason": "只问次数及通过标准；LED开启属于原理背景，不要求每次复述。",
+      "original_checks": [
+        {
+          "id": "F1",
+          "text": "参考模块 LED 开启后，PMT 重复测试 20 次计算 DCF 因子。",
+          "role": "core"
+        },
+        {
+          "id": "F2",
+          "text": "通过标准为 DCF 校准因子相对极差不超过 1.5%，且因子在 0.6～1.7 范围内。",
+          "role": "core"
+        }
+      ],
+      "proposed_checks": [
+        {
+          "id": "F1",
+          "role": "core",
+          "text": "PMT重复测试20次，计算DCF因子。"
+        },
+        {
+          "id": "F2",
+          "text": "通过标准为 DCF 校准因子相对极差不超过 1.5%，且因子在 0.6～1.7 范围内。",
+          "role": "core"
+        },
+        {
+          "id": "C1",
+          "role": "context",
+          "text": "诊断时参考模块LED开启。"
+        }
+      ],
+      "evidence": [
+        {
+          "evidence_id": "rag-biz-047:positive:1",
+          "file": "E:\\免疫资料\\免疫场景化培训教材-光学V1.1.pdf",
+          "page": "19",
+          "quote": "DCF诊断检测意义：参考模块的LED灯开启，\nPMT重复测试20次计算出校准因子DCF值，\n验证光度计模块自校准是否正常，通过标\n准：测得的DCF校准因子相对极差≤1.5%，\n0.6≤DCF因子≤1.7",
+          "indexed": true,
+          "confidence": "exact"
+        }
+      ],
+      "scope_note": "复用原已审核引文，本轮只核实其仍存在于当前AI索引；未重新打开全部原文件，未新增业务事实或引文。",
+      "check_review": [
+        {
+          "id": "F1",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        },
+        {
+          "id": "F2",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        },
+        {
+          "id": "C1",
+          "role": "context",
+          "decision": "optional",
+          "reason": "只问次数及通过标准；LED开启属于原理背景，不要求每次复述。"
+        }
+      ]
+    },
+    {
+      "id": "rag-biz-048",
+      "question": "CL-6000i 与 CL-8000i 的反应盘、磁分离盘温度采集板物料能通用吗？编码分别是什么？",
+      "expected_behavior": "answer",
+      "missing_fields": [],
+      "source_review_status": "reviewed",
+      "review_status": "pending",
+      "proposal": "revise",
+      "reason": "问机型间能否通用及编码；对应部件的编码和兼容关系必答，三块/两块的数量为背景。",
+      "original_checks": [
+        {
+          "id": "F1",
+          "text": "CL-6000i 的三块温度采集板均用 051-002415-00。",
+          "role": "core"
+        },
+        {
+          "id": "F2",
+          "text": "CL-8000i 反应盘板用 051-002415-00，两块磁分离盘板用 051-004328-01；这两种板卡不兼容。",
+          "role": "core"
+        }
+      ],
+      "proposed_checks": [
+        {
+          "id": "F1",
+          "role": "core",
+          "text": "CL-6000i反应盘和磁分离盘温度采集板编码均为051-002415-00。"
+        },
+        {
+          "id": "F2",
+          "role": "core",
+          "text": "CL-8000i反应盘板为051-002415-00，磁分离盘板为051-004328-01；不同编码的这两种板卡不兼容，不能一概通用。"
+        },
+        {
+          "id": "C1",
+          "role": "context",
+          "text": "原文CL-6000i为三块同编码板，CL-8000i有两块磁分离盘板。"
+        }
+      ],
+      "evidence": [
+        {
+          "evidence_id": "rag-biz-048:positive:1",
+          "file": "E:\\免疫资料\\免疫场景化培训教材-热工V1.1.pdf",
+          "page": "21",
+          "quote": "④CL-6000i三块温度采集板都是用同一个\n物料，物料编码是：051-002415-00",
+          "indexed": true,
+          "confidence": "exact"
+        },
+        {
+          "evidence_id": "rag-biz-048:positive:2",
+          "file": "E:\\免疫资料\\免疫场景化培训教材-热工V1.1.pdf",
+          "page": "21",
+          "quote": "⑤CL-8000i反应盘温度采集板使用物料编\n码是：051-002415-00",
+          "indexed": true,
+          "confidence": "exact"
+        },
+        {
+          "evidence_id": "rag-biz-048:positive:3",
+          "file": "E:\\免疫资料\\免疫场景化培训教材-热工V1.1.pdf",
+          "page": "21",
+          "quote": "⑥CL-8000i两个磁分离盘温度采集板使用",
+          "indexed": true,
+          "confidence": "exact"
+        },
+        {
+          "evidence_id": "rag-biz-048:positive:4",
+          "file": "E:\\免疫资料\\免疫场景化培训教材-热工V1.1.pdf",
+          "page": "21",
+          "quote": "物料编码是：051-004328-01",
+          "indexed": true,
+          "confidence": "exact"
+        },
+        {
+          "evidence_id": "rag-biz-048:positive:5",
+          "file": "E:\\免疫资料\\免疫场景化培训教材-热工V1.1.pdf",
+          "page": "21",
+          "quote": "051-002415-00、051-004328-01\n这两块温度采集板不兼容",
+          "indexed": true,
+          "confidence": "exact"
+        }
+      ],
+      "scope_note": "复用原已审核引文，本轮只核实其仍存在于当前AI索引；未重新打开全部原文件，未新增业务事实或引文。",
+      "check_review": [
+        {
+          "id": "F1",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        },
+        {
+          "id": "F2",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        },
+        {
+          "id": "C1",
+          "role": "context",
+          "decision": "optional",
+          "reason": "问机型间能否通用及编码；对应部件的编码和兼容关系必答，三块/两块的数量为背景。"
+        }
+      ]
+    },
+    {
+      "id": "rag-biz-049",
+      "question": "CL-6000i 的 SDM 非运动参数能不能一键备份和恢复？具体怎么做？",
+      "expected_behavior": "clarify",
+      "missing_fields": [
+        "SDM 版本或通讯方式（串口 SDM1.0／网口 SDM3.0）"
+      ],
+      "source_review_status": "reviewed",
+      "review_status": "pending",
+      "proposal": "revise",
+      "reason": "必须先确认版本或通讯方式；请求确认时可不展开全部备份恢复步骤。",
+      "original_checks": [
+        {
+          "id": "F1",
+          "text": "先请用户确认 SDM 版本或通讯方式：SDM1.0 串口还是 SDM3.0 网口，这决定能否一键处理。",
+          "role": "core"
+        },
+        {
+          "id": "F2",
+          "text": "串口模块需逐单元查询保存、逐单元读取配置；网口模块可一次保存和恢复模块下所有单元参数。",
+          "role": "core"
+        }
+      ],
+      "proposed_checks": [
+        {
+          "id": "F1",
+          "text": "先请用户确认 SDM 版本或通讯方式：SDM1.0 串口还是 SDM3.0 网口，这决定能否一键处理。",
+          "role": "core"
+        },
+        {
+          "id": "F2",
+          "text": "串口模块需逐单元查询保存、逐单元读取配置；网口模块可一次保存和恢复模块下所有单元参数。",
+          "role": "context"
+        }
+      ],
+      "evidence": [
+        {
+          "evidence_id": "rag-biz-049:positive:1",
+          "file": "E:\\免疫资料\\免疫场景化培训教材-软件V1.1.pdf",
+          "page": "35",
+          "quote": "一键保存功能取决于模块的通讯方式，网口通讯的模块可以\n一键保存数据，串口通讯的模块不可以一键保存数据，需要\n每个单元的参数分别进行保存。\n例如：CL-6000i的SDM分为SDM1.0（串口通讯）和SDM3.0\n（网口通讯）\n•\n串口通讯模块参数保存方法：在【非运动参数】下拉列表中\n选择第一个单元，点 【查询】，点【保存】，选择保持路\n径保存参数。 按照此方法在【非运动参数】内，逐个选择\n单元并查询保存每一个单元参数。\n•\n网口通讯模块参数保存方法：具有一键保存所有单元参数的\n功能。",
+          "indexed": true,
+          "confidence": "exact"
+        },
+        {
+          "evidence_id": "rag-biz-049:positive:2",
+          "file": "E:\\免疫资料\\免疫场景化培训教材-软件V1.1.pdf",
+          "page": "36",
+          "quote": "网口通讯模块与串口通讯模块的非运动参数恢复的方法不同。\n•\n串口通讯模块参数保存方法：点击【读取】，选择保存路径下的模块的一个参数，再点击【配置所有】即可恢\n复这一个单元的参数。按照此方法，逐一选择各单元读取并配置所有参数",
+          "indexed": true,
+          "confidence": "exact"
+        }
+      ],
+      "scope_note": "复用原已审核引文，本轮只核实其仍存在于当前AI索引；未重新打开全部原文件，未新增业务事实或引文。",
+      "check_review": [
+        {
+          "id": "F1",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        },
+        {
+          "id": "F2",
+          "role": "context",
+          "decision": "optional",
+          "reason": "必须先确认版本或通讯方式；请求确认时可不展开全部备份恢复步骤。"
+        }
+      ]
+    },
+    {
+      "id": "rag-biz-050",
+      "question": "CL-8000i 暗计数诊断失败，先检查哪些环节？目前能直接判定光度计损坏并确定更换件吗？",
+      "expected_behavior": "partial_answer",
+      "missing_fields": [],
+      "source_review_status": "reviewed",
+      "review_status": "pending",
+      "proposal": "keep",
+      "reason": "当前检查项直接回答所问内容或约束不应出现的错误结论，建议保留。",
+      "original_checks": [
+        {
+          "id": "F1",
+          "text": "资料列出 UPS 供电或零地电压不合要求、漏光、反应盘测光位发光异物以及光学异常等可能方向。",
+          "role": "core"
+        },
+        {
+          "id": "F2",
+          "text": "暗计数失败本身不能排除其他可能原因，不能据此直接确定光度计损坏或给出必须更换的物料编码。",
+          "role": "core"
+        }
+      ],
+      "proposed_checks": [
+        {
+          "id": "F1",
+          "text": "资料列出 UPS 供电或零地电压不合要求、漏光、反应盘测光位发光异物以及光学异常等可能方向。",
+          "role": "core"
+        },
+        {
+          "id": "F2",
+          "text": "暗计数失败本身不能排除其他可能原因，不能据此直接确定光度计损坏或给出必须更换的物料编码。",
+          "role": "core"
+        }
+      ],
+      "evidence": [
+        {
+          "evidence_id": "rag-biz-050:positive:1",
+          "file": "E:\\免疫资料\\免疫场景化培训教材-光学V1.1.pdf",
+          "page": "17",
+          "quote": "失败可能原因：\n1）UPS供电或者地线不符合要求（5V >零\n地电压>0V）；\n2）漏光；\n3）反应盘测光位有发光异物；\n4）光学异常",
+          "indexed": true,
+          "confidence": "exact"
+        }
+      ],
+      "scope_note": "复用原已审核引文，本轮只核实其仍存在于当前AI索引；未重新打开全部原文件，未新增业务事实或引文。",
+      "check_review": [
+        {
+          "id": "F1",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        },
+        {
+          "id": "F2",
+          "role": "core",
+          "decision": "required",
+          "reason": "直接回答问题或约束处理路径"
+        }
+      ]
+    }
+  ]
+}

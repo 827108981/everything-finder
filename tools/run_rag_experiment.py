@@ -118,7 +118,9 @@ def main() -> int:
         llm_stage = ["generation"]
 
         def record(event):
-            if event.get("stage") == "generating":
+            if event.get("stage") == "assessing_clarification":
+                llm_stage[0] = "clarification"
+            elif event.get("stage") == "generating":
                 llm_stage[0] = "generation"
             elif event.get("stage") == "reviewing":
                 llm_stage[0] = "review"

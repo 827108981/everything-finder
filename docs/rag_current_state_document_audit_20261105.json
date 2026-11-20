@@ -1,0 +1,66 @@
+{
+  "document": "E:\\code\\everything-finder\\docs\\RAG当前实现与问题全景说明_20261105.md",
+  "characters": 44197,
+  "lines": 1046,
+  "local_links_checked_before_audit_link": 76,
+  "broken_links": [],
+  "json_jsonl_pairs": [
+    {
+      "json": "E:\\code\\everything-finder\\tests\\rag\\fixtures\\rag_gold_v2_review.json",
+      "jsonl": "E:\\code\\everything-finder\\tests\\rag\\fixtures\\rag_gold_v2.jsonl",
+      "same_rows_same_order": true,
+      "json_rows": 18,
+      "jsonl_rows": 18
+    },
+    {
+      "json": "E:\\code\\everything-finder\\tests\\rag\\fixtures\\rag_gold_v3_review.json",
+      "jsonl": "E:\\code\\everything-finder\\tests\\rag\\fixtures\\rag_gold_v3.jsonl",
+      "same_rows_same_order": true,
+      "json_rows": 50,
+      "jsonl_rows": 50
+    },
+    {
+      "json": "E:\\code\\everything-finder\\tests\\rag\\fixtures\\rag_gold_v4_review.json",
+      "jsonl": "E:\\code\\everything-finder\\tests\\rag\\fixtures\\rag_gold_v4.jsonl",
+      "same_rows_same_order": true,
+      "json_rows": 50,
+      "jsonl_rows": 50
+    },
+    {
+      "json": "E:\\code\\everything-finder\\tests\\rag\\fixtures\\rag_gold_v4_1_review.json",
+      "jsonl": "E:\\code\\everything-finder\\tests\\rag\\fixtures\\rag_gold_v4_1.jsonl",
+      "same_rows_same_order": true,
+      "json_rows": 50,
+      "jsonl_rows": 50
+    },
+    {
+      "json": "E:\\code\\everything-finder\\tests\\rag\\fixtures\\rag_acceptance_v1_review.json",
+      "jsonl": "E:\\code\\everything-finder\\tests\\rag\\fixtures\\rag_acceptance_v1.jsonl",
+      "same_rows_same_order": true,
+      "json_rows": 10,
+      "jsonl_rows": 10
+    },
+    {
+      "json": "E:\\code\\everything-finder\\tests\\rag\\fixtures\\rag_row_holdout_v1_review.json",
+      "jsonl": "E:\\code\\everything-finder\\tests\\rag\\fixtures\\rag_row_holdout_v1.jsonl",
+      "same_rows_same_order": true,
+      "json_rows": 10,
+      "jsonl_rows": 10
+    },
+    {
+      "json": "E:\\code\\everything-finder\\tests\\rag\\fixtures\\rag_row_holdout_v2_review.json",
+      "jsonl": "E:\\code\\everything-finder\\tests\\rag\\fixtures\\rag_row_holdout_v2.jsonl",
+      "same_rows_same_order": true,
+      "json_rows": 10,
+      "jsonl_rows": 10
+    }
+  ],
+  "gold_hashes_unchanged": true,
+  "settings_unchanged": true,
+  "active_manifest_unchanged": true,
+  "lexical_component_validated": true,
+  "vector_component_validated": true,
+  "fresh_business_evaluation": false,
+  "previous_test_result": "302 passed,1 skipped; not rerun for documentation",
+  "scope": "Documentation and read-only snapshot only; no algorithm/config/Gold changes or git commit"
+}

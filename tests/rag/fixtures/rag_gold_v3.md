@@ -2,11 +2,11 @@
 
 ## 版本与范围
 
-- 本 v3 标注所依据的 AI 索引 `bundle_id`：`g000008-9f01fc283b`；清单 `E:/everythingfinder-db/rag/rag.manifest.json`，正文元数据 `E:\everythingfinder-db\rag\rag.g000008-9f01fc283b\metadata.db`。
-- 当前已发布的 AI 索引是 `g000033-71ec3c52f3`；本次仅改变审核状态，50 题的 `corpus_snapshot` 仍为旧包 `g000008-9f01fc283b`，用于当前索引前须重新核验。普通全文索引 generation 不能替代 AI `bundle_id`。
+- 本 v3 标注所依据的 AI 索引 `bundle_id`：`g000033-71ec3c52f3`；清单 `E:/everythingfinder-db/rag/rag.manifest.json`，正文元数据 `E:\everythingfinder-db\rag\rag.g000033-71ec3c52f3\metadata.db`。
+- 已比较旧包 `g000008-9f01fc283b` 与当前发布包 `g000033-71ec3c52f3` 的全部 11,769 个内容块，原始文件路径、页码或幻灯片位置及正文完全一致；50 题的 `corpus_snapshot` 均更新为当前 AI `bundle_id`。普通全文索引 generation 不能替代 AI 版本。
 - AI 索引有 8,843 个含位置的来源页面/幻灯片键，覆盖 405 个原始文件路径：直接文件 389 个、ZIP 成员 16 个。完整清单见 `rag_gold_v3_index_inventory.json`。
 - 原始资料位于 `E:/免疫资料`、`E:/生化资料`、`E:/生化免疫临床知识`。本批新增优先取三处已索引但 v2 几乎未覆盖的资料，引用路径与索引中的 `file_path` 一致。
-- 本次按用户要求将新增 32 题改为 `reviewed`；未改动 v1/v2、业务检索或生成逻辑，也未切换应用默认测试集。问题、证据、答案检查项和 `corpus_snapshot` 保持原样。
+- 50 题的审核状态均为 `reviewed`。本次仅更新 v3 的 AI 索引版本与说明；未改动 v1/v2、业务检索或生成逻辑，也未切换应用默认测试集。问题、证据、答案检查项保持原样。
 
 ## 覆盖矩阵
 
@@ -154,10 +154,10 @@ v2 的薄弱处是发光定标、临床结果、质控、生化校准与试剂�
 
 ## 数据与加载器校验
 
-- `rag_gold_v3_review.json` 的 50 条 `cases` 与 `rag_gold_v3.jsonl` 的 50 行逐对象一致；ID 唯一。v3 前 18 条与 v2 前 18 条逐对象一致，全部保持 `reviewed`。
+- `rag_gold_v3_review.json` 的 50 条 `cases` 与 `rag_gold_v3.jsonl` 的 50 行逐对象一致；ID 唯一。v3 前 18 条除 `corpus_snapshot` 更新外与 v2 前 18 条逐对象一致，全部保持 `reviewed`。
 - 新增 32 条现均为 `reviewed`；非 `refuse` 题有直接支持的 `gold_evidence` 且 `relevance=2`；两道 `refuse` 的正向证据为空。`required_facts` 与 `answer_checks` 中 `core`／`safety` 项逐条一致。
-- 新增引文 79 条（正向 45、强负例 34）全部在原件和该 AI 索引包同页正文核验通过。
-- 加载器 `reviewed_only=True`：v3 JSON 和 JSONL 均成功加载 50 条；v2 保持 18 条。状态变更使 v3 的 50 题均可进入针对旧索引快照的正式计分；应用到当前新索引前仍须复核索引正文与版本。
+- 新增引文 79 条（正向 45、强负例 34）全部在原件和当前 AI 索引包同页正文核验通过；全 50 题的 69 条正向证据和 54 条强负例也均在当前索引的指定原路径、位置与正文中找到。
+- 加载器 `reviewed_only=True`：v3 JSON 和 JSONL 均成功加载 50 条；v2 保持 18 条。当前 v3 的 `corpus_snapshot` 已与发布 AI 索引一致。
 - 后续若运行评测，固定原 18 题与新增 32 题分别出报告，并记录各自样本量；总体题数变化本身不能解释为检索或生成算法变化。当前没有把系统回答、召回名次或耗时写入 Gold，也没有运行新旧效果对比。
 
 ## 适用边界与复核要点

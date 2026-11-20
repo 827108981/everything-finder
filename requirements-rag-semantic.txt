@@ -1,0 +1,4 @@
+# Optional experimental in-process CPU semantic evidence judgement.
+# Keep out of default RAG installation; model weights are separately pinned.
+--extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
+llama-cpp-python==0.3.36

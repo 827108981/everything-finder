@@ -72,6 +72,7 @@ class HybridRetriever:
             key = item.chunk.stable_chunk_id
             target = merged.setdefault(key, EvidenceChunk(chunk=item.chunk))
             target.lexical_rank = item.lexical_rank
+            target.query_plan_diagnostics.update(item.query_plan_diagnostics)
             target.lexical_score = item.lexical_score
             target.lexical_score_kind = item.lexical_score_kind
             target.lexical_contributions = item.lexical_contributions
@@ -92,6 +93,8 @@ class HybridRetriever:
             merged.values(),
             key=lambda item: (-item.fused_score, item.chunk.stable_chunk_id),
         )
+        from local_full_text_search.rag.identifier_evidence import prioritize
+        ordered = prioritize(plan, ordered)
         for rank, item in enumerate(ordered, 1):
             item.fused_rank = rank
         # 留出空间给后续去重；否则高排名重复块会让去重后候选量不足。

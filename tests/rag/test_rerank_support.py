@@ -9,6 +9,12 @@ from local_full_text_search.rag.reranking.support import (
     infer_question_intent,
 )
 from local_full_text_search.rag.reranking.local_bge import LocalBgeReranker
+from local_full_text_search.core.task_manager import CancelToken
+from contextlib import nullcontext
+from dataclasses import replace
+from types import SimpleNamespace
+import math
+import sys
 
 
 def _candidate(text: str, chunk_id: str) -> EvidenceChunk:
@@ -51,20 +57,51 @@ def test_rerank_query_keeps_original_question_and_structured_intent() -> None:
     assert "回答关系：purpose" in query
 
 
-def test_rank_guard_limits_catastrophic_downward_move() -> None:
-    reranker = object.__new__(LocalBgeReranker)
-    reranker.max_rank_drop = 3
-    candidates = []
-    for rank, score in ((1, 0.99), (2, 0.98), (3, 0.97), (4, 0.96), (5, 0.95)):
-        item = _candidate(f"正文 {rank}", str(rank))
-        item.fused_rank = rank
-        item.rerank_score_combined = score
-        candidates.append(item)
-    # 模拟融合第 1 名被重排模型放到列表末尾。
-    candidates[0], candidates[-1] = candidates[-1], candidates[0]
-    guarded = reranker._apply_rank_guard(candidates)
-    assert guarded.index(candidates[0]) <= 3
-    assert all(
-        position <= int(item.fused_rank) + reranker.max_rank_drop
-        for position, item in enumerate(guarded, 1)
-    )
+def test_legacy_input_bge_ignores_weights_guard_and_document_quota(monkeypatch):
+    class Tensor:
+        def __init__(self, values): self.values=values
+        def reshape(self, *args): return self
+        def cpu(self): return self
+        def tolist(self): return self.values
+    class Model:
+        config=SimpleNamespace(num_labels=1)
+        def to(self, device): return self
+        def eval(self): pass
+        def __call__(self, **encoded):
+            return SimpleNamespace(logits=Tensor([float(text) for text in encoded['texts']]))
+    class Tokenizer:
+        def __call__(self, questions, texts, **kwargs): return {'texts':texts}
+    monkeypatch.setitem(sys.modules,'transformers',SimpleNamespace(
+        AutoTokenizer=SimpleNamespace(from_pretrained=lambda *a,**k:Tokenizer()),
+        AutoModelForSequenceClassification=SimpleNamespace(from_pretrained=lambda *a,**k:Model())))
+    monkeypatch.setitem(sys.modules,'torch',SimpleNamespace(inference_mode=nullcontext,
+        sigmoid=lambda tensor:Tensor([1/(1+math.exp(-x)) for x in tensor.values])))
+    ranker=LocalBgeReranker(None,repo_id='fixture',revision='fixed',
+        cross_encoder_weight=0,retrieval_prior_weight=10,answer_support_weight=100,max_rank_drop=1,input_mode='truncate')
+    candidates=[_candidate(str(n),str(n)) for n in range(6)]
+    for i,c in enumerate(candidates):
+        c.chunk=replace(c.chunk,document_key='same-document')
+        # All six have the same document_key; old per-file quota would lose three.
+        assert c.chunk.document_key==candidates[0].chunk.document_key
+        c.fused_rank=i+1
+        c.answer_support_score=1-i/6
+    result=ranker.rerank('普通问题',candidates,6,CancelToken())
+    assert [c.chunk.text for c in result]==['5','4','3','2','1','0']
+    assert tuple(result)==ranker.last_scored_candidates
+    assert all(c.rerank_score_combined==c.rerank_score for c in result)
+    assert all(c.rerank_diagnostics['strategy']=='bge_base' for c in result)
+    assert ranker.cross_encoder_weight==1 and ranker.max_rank_drop==0
+
+
+def test_bge_ties_use_fusion_score_then_stable_id_only():
+    ranker=object.__new__(LocalBgeReranker)
+    candidates=[_candidate('相同正文',key) for key in ('z','a','b')]
+    for c in candidates:
+        c.rerank_score=.5
+        c.fused_score=0
+        c.answer_support_score=1
+    candidates[0].fused_score=.1
+    expected=sorted(candidates,key=lambda c:(-c.fused_score,c.chunk.stable_chunk_id))
+    assert ranker._order_scored('问题',candidates,CancelToken())==expected
+
+

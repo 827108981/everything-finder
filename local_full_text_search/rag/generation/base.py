@@ -18,6 +18,8 @@ class GenerationRequest:
     timeout_seconds: int = 90
     max_output_tokens: int = 1000
     query_plan_summary: str = ""
+    # Explicit experimental override; normal callers retain the accepted prompt.
+    prompt_variant: str = "baseline"
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,6 +55,17 @@ class ModelAnswer:
     text: str
     provider_name: str
     model_name: str
+
+
+@dataclass(frozen=True, slots=True)
+class ClarificationAssessment:
+    needs_clarification: bool
+    question: str = ""
+    missing_fields: tuple[str, ...] = ()
+    evidence: tuple[tuple[str, str], ...] = ()
+    reason: str = ""
+    decision_type: str = ""
+    request_quote: str = ""
 
 
 class LLMGateway(Protocol):

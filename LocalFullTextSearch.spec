@@ -26,6 +26,7 @@ build_info_path.write_text(
 )
 
 datas = [
+    ("local_full_text_search/rag/domain_configs", "local_full_text_search/rag/domain_configs"),
     ("local_full_text_search/ui/resources", "local_full_text_search/ui/resources"),
     ("local_full_text_search/ui/styles", "local_full_text_search/ui/styles"),
     ("README.md", "."),

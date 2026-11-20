@@ -23,11 +23,18 @@ from local_full_text_search.rag.vector_store.chroma import ChromaVectorStore
 class VectorIndexBuilder:
     """为已发布 AI bundle 构建独立细粒度向量索引，不改写原 bundle。"""
 
-    def __init__(self, rag_store: RagIndexStore, embedding, settings, *, vector_root=None) -> None:
+    def __init__(self, rag_store: RagIndexStore, embedding, settings, *, vector_root=None,
+                 cache_path=None, unit_builder=None) -> None:
         self.rag_store = rag_store
         self.embedding = embedding
         self.settings = settings
         self.policy = VectorUnitPolicy.from_settings(settings)
+        self.unit_builder = unit_builder or VectorUnitBuilder(embedding.count_tokens, self.policy)
+        self.policy_fingerprint = self.unit_builder.fingerprint
+        self.cache_path = cache_path or (
+            (VectorIndexStore(vector_root).root if vector_root is not None else rag_store.root)
+            / "embedding_cache.db"
+        )
         # 验证候选模型时允许把向量索引写入隔离目录；默认路径保持原有
         # 生产行为。源 AI bundle 仍由 rag_store 读取，不会复制或改写正文索引。
         self.store = VectorIndexStore(vector_root or rag_store.root)
@@ -46,7 +53,7 @@ class VectorIndexBuilder:
             "embedding_repo_id": self.embedding.model_id,
             "embedding_revision": self.embedding.model_revision,
             "embedding_dimension": self.embedding.dimension,
-            "policy_fingerprint": self.policy.fingerprint,
+            "policy_fingerprint": self.policy_fingerprint,
         }, sort_keys=True).encode("utf-8")).hexdigest()
         if publish_pointer:
             try:
@@ -54,7 +61,7 @@ class VectorIndexBuilder:
                     bundle.bundle_id, embedding_repo_id=self.embedding.model_id,
                     embedding_revision=self.embedding.model_revision,
                     embedding_dimension=self.embedding.dimension,
-                    policy_fingerprint=self.policy.fingerprint,
+                    policy_fingerprint=self.policy_fingerprint,
                 )
                 if (
                     active.source_content_digest == source_digest
@@ -104,7 +111,7 @@ class VectorIndexBuilder:
                     "INSERT INTO vector_index_meta VALUES(1,?,?,?,?,?,?,?,?,?,?,0,0)",
                     (VECTOR_INDEX_SCHEMA_VERSION, "building", bundle.bundle_id, source_digest,
                      self.embedding.model_id, self.embedding.model_revision, self.embedding.dimension,
-                     self.policy.fingerprint, fingerprint, created_at),
+                     self.policy_fingerprint, fingerprint, created_at),
                 )
                 vectors = ChromaVectorStore(
                     final / "chroma", create=True,
@@ -143,7 +150,7 @@ class VectorIndexBuilder:
                 embedding_repo_id=self.embedding.model_id,
                 embedding_revision=self.embedding.model_revision,
                 embedding_dimension=self.embedding.dimension,
-                policy_fingerprint=self.policy.fingerprint, index_fingerprint=fingerprint,
+                policy_fingerprint=self.policy_fingerprint, index_fingerprint=fingerprint,
                 path=final, database_path=final / "vector_units.db", chroma_path=final / "chroma",
                 parent_chunk_count=parent_count, unit_count=unit_count, created_at=created_at,
             )
@@ -173,7 +180,8 @@ class VectorIndexBuilder:
         progress_callback: Callable[[dict[str, object]], None] | None,
     ) -> tuple[int, int]:
         source = self.rag_store.connect_read_only(bundle.metadata_path)
-        unit_builder = VectorUnitBuilder(self.embedding.count_tokens, self.policy)
+        unit_builder = self.unit_builder
+        target.execute("CREATE TABLE IF NOT EXISTS vector_unit_representation (unit_id TEXT PRIMARY KEY, metadata_json TEXT NOT NULL)")
         parent_count = 0
         unit_count = int(target.execute("SELECT COUNT(*) FROM vector_units").fetchone()[0])
         pending_units = []
@@ -187,7 +195,7 @@ class VectorIndexBuilder:
         )
         populate_started = time.perf_counter()
         cache = EmbeddingVectorCache(
-            self.rag_store.root / "embedding_cache.db",
+            self.cache_path,
             model_id=self.embedding.model_id,
             model_revision=self.embedding.model_revision,
             dimension=self.embedding.dimension,
@@ -226,6 +234,9 @@ class VectorIndexBuilder:
                     (item.unit_id, item.parent_chunk_id, item.ordinal, item.kind, item.text,
                      item.embedding_text, item.start_char, item.end_char, item.token_count),
                 )
+                if item.representation_metadata is not None:
+                    target.execute("INSERT OR REPLACE INTO vector_unit_representation VALUES (?,?)",
+                                   (item.unit_id, json.dumps(item.representation_metadata, ensure_ascii=False)))
                 records.append(VectorRecord(item.unit_id, tuple(embedding), {
                     "stable_chunk_id": item.parent_chunk_id, "unit_id": item.unit_id,
                     "unit_ordinal": item.ordinal, "unit_kind": item.kind,

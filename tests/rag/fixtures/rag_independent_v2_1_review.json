@@ -1,0 +1,551 @@
+{
+  "cases": [
+    {
+      "id": "evidence-flow-independent-01",
+      "group_id": "evidence-flow-independent-01",
+      "question": "BS-2800M 电脑开机后想进工程维护软件，先开哪个程序？从操作界面怎么进去？",
+      "expected_behavior": "answer",
+      "constraints": {
+        "scope": "",
+        "stage": "",
+        "direction": "",
+        "object": ""
+      },
+      "missing_fields": [],
+      "gold_evidence": [
+        {
+          "file": "E:\\生化资料\\生化场景化培训教材-软件V1.1.pptx",
+          "page": 12,
+          "quote": "启动工程维护软件之前，必须先打开操作软件。",
+          "relevance": 2
+        },
+        {
+          "file": "E:\\生化资料\\生化场景化培训教材-软件V1.1.pptx",
+          "page": 12,
+          "quote": "在操作软件维护界面下，点击【工程维护软件】进入",
+          "relevance": 2
+        }
+      ],
+      "hard_negatives": [],
+      "required_facts": [
+        "先打开操作软件。",
+        "进入操作软件的维护界面，点击工程维护软件。"
+      ],
+      "forbidden_claims": [
+        "无需打开操作软件"
+      ],
+      "corpus_snapshot": "g000033-71ec3c52f3",
+      "review_status": "pending",
+      "validation_category": "steps"
+    },
+    {
+      "id": "evidence-flow-independent-02",
+      "group_id": "evidence-flow-independent-02",
+      "question": "新平台生化仪还在测，我想暂停进样加样本架。点进样暂停后，什么时候才能加架？",
+      "expected_behavior": "answer",
+      "constraints": {
+        "scope": "",
+        "stage": "",
+        "direction": "",
+        "object": ""
+      },
+      "missing_fields": [],
+      "gold_evidence": [
+        {
+          "file": "E:\\生化资料\\生化场景化培训教材-软件V1.1.pptx",
+          "page": 11,
+          "quote": "当已经进入传送通道或常规通道的样本架上的测试完成后，系统进入进样暂停。这时可以往样本放入区添加新的样本架",
+          "relevance": 2
+        }
+      ],
+      "hard_negatives": [],
+      "required_facts": [
+        "点击进样暂停，等待已经进入传送通道或常规通道的样本架完成测试。",
+        "系统进入进样暂停后再往样本放入区加架。"
+      ],
+      "forbidden_claims": [
+        "点击后立即加架",
+        "按紧急停止才能加架"
+      ],
+      "corpus_snapshot": "g000033-71ec3c52f3",
+      "review_status": "pending",
+      "validation_category": "steps"
+    },
+    {
+      "id": "evidence-flow-independent-03",
+      "group_id": "evidence-flow-independent-03",
+      "question": "新平台生化仪状态按钮红色和黄色各是什么意思？",
+      "expected_behavior": "answer",
+      "constraints": {
+        "scope": "",
+        "stage": "",
+        "direction": "",
+        "object": ""
+      },
+      "missing_fields": [],
+      "gold_evidence": [
+        {
+          "file": "E:\\生化资料\\生化场景化培训教材-软件V1.1.pptx",
+          "page": 8,
+          "quote": "故障－红色：仪器出现严重报警。\n故障－黄色：仪器出现警告报警。",
+          "relevance": 2
+        }
+      ],
+      "hard_negatives": [],
+      "required_facts": [
+        "红色表示严重报警。",
+        "黄色表示警告报警。"
+      ],
+      "forbidden_claims": [
+        "红色仅表示警告",
+        "黄色表示正常"
+      ],
+      "corpus_snapshot": "g000033-71ec3c52f3",
+      "review_status": "pending",
+      "validation_category": "conditional"
+    },
+    {
+      "id": "evidence-flow-independent-04",
+      "group_id": "evidence-flow-independent-04",
+      "question": "A&T ISE 脱气膜气路里见到一点水气和有大量液体漏出，这两种情况都要判脱气膜坏了吗？",
+      "expected_behavior": "answer",
+      "constraints": {
+        "scope": "",
+        "stage": "",
+        "direction": "",
+        "object": ""
+      },
+      "missing_fields": [],
+      "gold_evidence": [
+        {
+          "file": "E:\\生化资料\\生化场景化培训教材-电解质V1.1.pptx",
+          "page": 13,
+          "quote": "有少量水气通过膜层进入气路系统，并最终可能通过气泵，不影响使用。如果脱气膜工作时，有大量的液体泄漏，则失效，不能使用。",
+          "relevance": 2
+        }
+      ],
+      "hard_negatives": [],
+      "required_facts": [
+        "少量水气通过进入气路可以出现，不影响使用。",
+        "工作时大量液体泄漏表明失效，不能使用。"
+      ],
+      "forbidden_claims": [
+        "少量水气即判失效",
+        "大量漏液仍正常"
+      ],
+      "corpus_snapshot": "g000033-71ec3c52f3",
+      "review_status": "pending",
+      "validation_category": "conditional"
+    },
+    {
+      "id": "evidence-flow-independent-05",
+      "group_id": "evidence-flow-independent-05",
+      "question": "A&T 和 Medica ISE 的测量原理有什么不同？如何判断这是哪种 ISE？",
+      "expected_behavior": "answer",
+      "constraints": {
+        "scope": "",
+        "stage": "",
+        "direction": "",
+        "object": "A&T/Medica ISE 测量原理与模块类型识别"
+      },
+      "missing_fields": [],
+      "gold_evidence": [
+        {
+          "file": "E:\\生化资料\\生化场景化培训教材-电解质V1.1.pptx",
+          "page": 5,
+          "quote": "直接法是指样本不需要稀释直接送达电极测量部位;\n间接法是指样本先用稀释液进行稀释后再送达电极测量部位。",
+          "relevance": 2
+        },
+        {
+          "file": "E:\\生化资料\\生化场景化培训教材-电解质V1.1.pptx",
+          "page": 6,
+          "quote": "A&T\n间接离子选择电极法",
+          "relevance": 2,
+          "alternative_sources": [
+            {
+              "file": "E:\\生化资料\\高速生化\\2-线上课程\\专业课\\场景化培训全线生化分析仪结构基础V1.0.pptx",
+              "page": 22,
+              "position": "原表头和同事实对应行/暗计数诊断原因列表",
+              "quote": "A&T\n间接离子选择电极法",
+              "relevance": 2,
+              "approved": true,
+              "approved_by": "user",
+              "approval_date": "2026-11-16",
+              "approval_basis": "用户明确要求将已核实的正确替代资料加入Gold；同一事实OR匹配，不增加必答项。",
+              "why_sufficient": "原PPT模块类型列、检测原理列明确对应A&T间接法、Medica直接法；不支持现场当前安装状态，也不能替代通用原理解释页。",
+              "source_sha256": "700ee4390eb32574174770b702445e6a60094d404e3f56a71dc1ebb6bc002b0a"
+            },
+            {
+              "file": "E:\\生化资料\\中低速生化\\2-线上课程\\专业课\\场景化培训中低速生化分析仪结构基础V1.1.pptx",
+              "page": 23,
+              "position": "原表头和同事实对应行/暗计数诊断原因列表",
+              "quote": "A&T\n间接离子选择电极法",
+              "relevance": 2,
+              "approved": true,
+              "approved_by": "user",
+              "approval_date": "2026-11-16",
+              "approval_basis": "用户明确要求将已核实的正确替代资料加入Gold；同一事实OR匹配，不增加必答项。",
+              "why_sufficient": "原PPT模块类型列、检测原理列明确对应A&T间接法、Medica直接法；不支持现场当前安装状态，也不能替代通用原理解释页。",
+              "source_sha256": "c69e6e452d1815e750487982626c9dbdc91fb99d36344dd4abed8ebff0e676bf"
+            }
+          ]
+        },
+        {
+          "file": "E:\\生化资料\\生化场景化培训教材-电解质V1.1.pptx",
+          "page": 6,
+          "quote": "Medica\n直接离子选择电极法。",
+          "relevance": 2,
+          "alternative_sources": [
+            {
+              "file": "E:\\生化资料\\高速生化\\2-线上课程\\专业课\\场景化培训全线生化分析仪结构基础V1.0.pptx",
+              "page": 22,
+              "position": "原表头和同事实对应行/暗计数诊断原因列表",
+              "quote": "Medica\n直接离子选择电极法。",
+              "relevance": 2,
+              "approved": true,
+              "approved_by": "user",
+              "approval_date": "2026-11-16",
+              "approval_basis": "用户明确要求将已核实的正确替代资料加入Gold；同一事实OR匹配，不增加必答项。",
+              "why_sufficient": "原PPT模块类型列、检测原理列明确对应A&T间接法、Medica直接法；不支持现场当前安装状态，也不能替代通用原理解释页。",
+              "source_sha256": "700ee4390eb32574174770b702445e6a60094d404e3f56a71dc1ebb6bc002b0a"
+            },
+            {
+              "file": "E:\\生化资料\\中低速生化\\2-线上课程\\专业课\\场景化培训中低速生化分析仪结构基础V1.1.pptx",
+              "page": 23,
+              "position": "原表头和同事实对应行/暗计数诊断原因列表",
+              "quote": "Medica\n直接离子选择电极法。",
+              "relevance": 2,
+              "approved": true,
+              "approved_by": "user",
+              "approval_date": "2026-11-16",
+              "approval_basis": "用户明确要求将已核实的正确替代资料加入Gold；同一事实OR匹配，不增加必答项。",
+              "why_sufficient": "原PPT模块类型列、检测原理列明确对应A&T间接法、Medica直接法；不支持现场当前安装状态，也不能替代通用原理解释页。",
+              "source_sha256": "c69e6e452d1815e750487982626c9dbdc91fb99d36344dd4abed8ebff0e676bf"
+            }
+          ]
+        }
+      ],
+      "hard_negatives": [],
+      "required_facts": [
+        "A&T采用间接离子选择电极法，样本先稀释再测量；Medica采用直接离子选择电极法。",
+        "区分时核对模块类型与对应的检测原理、适用产品信息；是否先稀释可区分直接法与间接法。"
+      ],
+      "forbidden_claims": [
+        "颠倒A&T与Medica的测量原理。",
+        "仅凭直接法就断定模块一定是Medica。",
+        "把某机型在不同模块或序列号条件下的适配说成唯一固定配置。"
+      ],
+      "corpus_snapshot": "g000033-71ec3c52f3",
+      "review_status": "pending",
+      "validation_category": "answer",
+      "answer_checks": [
+        {
+          "id": "F1",
+          "role": "core",
+          "text": "A&T采用间接离子选择电极法，样本先稀释再测量；Medica采用直接离子选择电极法。"
+        },
+        {
+          "id": "F2",
+          "role": "core",
+          "text": "区分时核对模块类型与对应的检测原理、适用产品信息；是否先稀释可区分直接法与间接法。"
+        }
+      ],
+      "identification_scope": "本题回答识别方法，不要求凭空判断一台未提供信息的现场仪器；不强制用户先补资料才解释。",
+      "annotation_revision": {
+        "version": "business-gold-v5.1-20261116",
+        "date": "2026-11-16",
+        "basis": "用户明确修正问题意图及批准同事实替代来源；原review_status不变。"
+      }
+    },
+    {
+      "id": "evidence-flow-independent-06",
+      "group_id": "evidence-flow-independent-06",
+      "question": "BS-2800M 和 BS-430 的分析部与电脑分别通过什么接口通信？",
+      "expected_behavior": "answer",
+      "constraints": {
+        "scope": "",
+        "stage": "",
+        "direction": "",
+        "object": "BS-2800M/BS-430 分析部与电脑通信接口"
+      },
+      "missing_fields": [],
+      "gold_evidence": [
+        {
+          "file": "E:\\生化资料\\生化场景化培训教材-板卡V1.1.pptx",
+          "page": 10,
+          "quote": "BS-2800M\n网口",
+          "relevance": 2
+        },
+        {
+          "file": "E:\\生化资料\\生化场景化培训教材-板卡V1.1.pptx",
+          "page": 10,
+          "quote": "BS-430\n串口",
+          "relevance": 2
+        }
+      ],
+      "hard_negatives": [],
+      "required_facts": [
+        "BS-2800M分析部通过网口与电脑通信。",
+        "BS-430分析部通过串口与电脑通信。"
+      ],
+      "forbidden_claims": [
+        "将BS-2800M与BS-430的通信接口互换。"
+      ],
+      "corpus_snapshot": "g000033-71ec3c52f3",
+      "review_status": "pending",
+      "validation_category": "answer",
+      "answer_checks": [
+        {
+          "id": "F1",
+          "role": "core",
+          "text": "BS-2800M分析部通过网口与电脑通信。"
+        },
+        {
+          "id": "F2",
+          "role": "core",
+          "text": "BS-430分析部通过串口与电脑通信。"
+        }
+      ],
+      "annotation_revision": {
+        "version": "business-gold-v5.1-20261116",
+        "date": "2026-11-16",
+        "basis": "用户明确修正问题意图及批准同事实替代来源；原review_status不变。"
+      }
+    },
+    {
+      "id": "evidence-flow-independent-07",
+      "group_id": "evidence-flow-independent-07",
+      "question": "A&T ISE 注射器密封圈的使用寿命是多少？物料编码是什么？",
+      "expected_behavior": "answer",
+      "constraints": {
+        "scope": "",
+        "stage": "",
+        "direction": "",
+        "object": "A&T ISE 注射器密封圈"
+      },
+      "missing_fields": [],
+      "gold_evidence": [
+        {
+          "file": "E:/生化资料/生化场景化培训教材-电解质V1.1.pptx",
+          "page": 12,
+          "position": "原文对应表格/正文；页码从1开始",
+          "quote": "ISE注射器的密封圈，物料编码是040-000765-00。",
+          "relevance": 2,
+          "why_sufficient": "原资料与已发布索引逐字核实；对象及字段/步骤对应本题。"
+        },
+        {
+          "file": "E:/生化资料/生化场景化培训教材-电解质V1.1.pptx",
+          "page": 27,
+          "position": "原文对应表格/正文；页码从1开始",
+          "quote": "注射器密封圈更换： ISE注射器密封圈寿命66000次测试（到寿命需更换）",
+          "relevance": 2,
+          "why_sufficient": "原资料与已发布索引逐字核实；对象及字段/步骤对应本题。"
+        }
+      ],
+      "hard_negatives": [],
+      "required_facts": [
+        "注射器密封圈使用寿命为66000次测试，到寿命需更换。",
+        "注射器密封圈物料编码为040-000765-00。"
+      ],
+      "forbidden_claims": [
+        "把密封圈的66000次寿命和物料编码说成整套注射器的参数。"
+      ],
+      "corpus_snapshot": "g000033-71ec3c52f3",
+      "review_status": "reviewed",
+      "validation_category": "numeric",
+      "answer_checks": [
+        {
+          "id": "F1",
+          "role": "core",
+          "text": "注射器密封圈使用寿命为66000次测试，到寿命需更换。"
+        },
+        {
+          "id": "F2",
+          "role": "core",
+          "text": "注射器密封圈物料编码为040-000765-00。"
+        }
+      ],
+      "annotation_provenance": {
+        "review_date": "2026-11-12",
+        "review_basis": "用户本轮明确确认业务结论；按原资料和当前AI索引核实，不依据系统答案改标。",
+        "source_version": "previous fixture",
+        "model_alias_policy": "不推断BS-2800与BS-2800M等价，电压题使用手册准确型号。"
+      }
+    },
+    {
+      "id": "evidence-flow-independent-08",
+      "group_id": "evidence-flow-independent-08",
+      "question": "生化仪整机水预热模块，去离子循环水的目标温度和正常范围各是多少？",
+      "expected_behavior": "answer",
+      "constraints": {
+        "scope": "",
+        "stage": "",
+        "direction": "",
+        "object": ""
+      },
+      "missing_fields": [],
+      "gold_evidence": [
+        {
+          "file": "E:\\生化资料\\生化场景化培训教材-热工V1.1.pptx",
+          "page": 13,
+          "quote": "去离子循环水\n220V/500W\n30℃\n21℃ ~ 35℃",
+          "relevance": 2
+        }
+      ],
+      "hard_negatives": [],
+      "required_facts": [
+        "目标温度 30℃。",
+        "正常范围 21～35℃。"
+      ],
+      "forbidden_claims": [
+        "目标温度 37℃ 或 40℃",
+        "把清洗水和清洗剂温度当作去离子循环水温度"
+      ],
+      "corpus_snapshot": "g000033-71ec3c52f3",
+      "review_status": "pending",
+      "validation_category": "numeric"
+    },
+    {
+      "id": "evidence-flow-independent-09",
+      "group_id": "evidence-flow-independent-09",
+      "question": "BS-2800 光源监测是用哪个波长的滤光片，靠什么器件接收？这一路是监测什么的？",
+      "expected_behavior": "answer",
+      "constraints": {
+        "scope": "",
+        "stage": "",
+        "direction": "",
+        "object": ""
+      },
+      "missing_fields": [],
+      "gold_evidence": [
+        {
+          "file": "E:\\生化资料\\生化场景化培训教材-光学V1.1.pptx",
+          "page": 7,
+          "quote": "光源经340nm滤光片后照射到光电二极管（PD），输出的光强信号用于监控光源的稳定性。",
+          "relevance": 2
+        }
+      ],
+      "hard_negatives": [],
+      "required_facts": [
+        "340 nm 滤光片。",
+        "光电二极管 PD 接收。",
+        "监测光源稳定性。"
+      ],
+      "forbidden_claims": [
+        "用主检测 PDA 替代参考光 PD",
+        "这一路用来测定样本吸光度"
+      ],
+      "corpus_snapshot": "g000033-71ec3c52f3",
+      "review_status": "pending",
+      "validation_category": "confusable"
+    },
+    {
+      "id": "evidence-flow-independent-10",
+      "group_id": "evidence-flow-independent-10",
+      "question": "生化仪的反应盘温度传感器直接量的是杯内反应液温度吗？软件显示的 37℃ 是怎么来的？",
+      "expected_behavior": "answer",
+      "constraints": {
+        "scope": "",
+        "stage": "",
+        "direction": "",
+        "object": ""
+      },
+      "missing_fields": [],
+      "gold_evidence": [
+        {
+          "file": "E:\\生化资料\\生化场景化培训教材-热工V1.1.pptx",
+          "page": 7,
+          "quote": "温度传感器感知的温度不是反应杯内反应液的温度，而是恒温槽组件的温度(此温度约为40 °C)，软件后台增加温度补偿的方法保证软件显示反应液温度为37°C。",
+          "relevance": 2
+        }
+      ],
+      "hard_negatives": [],
+      "required_facts": [
+        "测量恒温槽组件温度，不直接测反应液。",
+        "软件通过后台温度补偿显示反应液温度 37℃。"
+      ],
+      "forbidden_claims": [
+        "传感器直接测量反应液",
+        "恒温槽温度固定显示为 37℃"
+      ],
+      "corpus_snapshot": "g000033-71ec3c52f3",
+      "review_status": "pending",
+      "validation_category": "confusable"
+    },
+    {
+      "id": "evidence-flow-independent-11",
+      "group_id": "evidence-flow-independent-11",
+      "question": "一台 BS-430 要备电解质模块，序列号和模块标签都没记，这台该按 Medica 还是凯特备件？",
+      "expected_behavior": "clarify",
+      "constraints": {
+        "scope": "",
+        "stage": "",
+        "direction": "",
+        "object": ""
+      },
+      "missing_fields": [
+        "整机序列号或现装 ISE 模块标识"
+      ],
+      "gold_evidence": [
+        {
+          "file": "E:\\生化资料\\生化场景化培训教材-电解质V1.1.pptx",
+          "page": 6,
+          "quote": "BS-380系列、BS-430系列、",
+          "relevance": 2
+        },
+        {
+          "file": "E:\\生化资料\\生化场景化培训教材-电解质V1.1.pptx",
+          "page": 6,
+          "quote": "BS-430： YW-33007799",
+          "relevance": 2
+        }
+      ],
+      "hard_negatives": [],
+      "required_facts": [
+        "先询问整机序列号或现装 ISE 模块的标识，以区分 Medica 与凯特。"
+      ],
+      "forbidden_claims": [
+        "仅凭 BS-430 就直接选定模块"
+      ],
+      "corpus_snapshot": "g000033-71ec3c52f3",
+      "review_status": "pending",
+      "validation_category": "clarify"
+    },
+    {
+      "id": "evidence-flow-independent-12",
+      "group_id": "evidence-flow-independent-12",
+      "question": "西门子 ACUSON X700 超声主机，怎么进入工程菜单校准探头发射电压？",
+      "expected_behavior": "refuse",
+      "constraints": {
+        "scope": "",
+        "stage": "",
+        "direction": "",
+        "object": ""
+      },
+      "missing_fields": [],
+      "gold_evidence": [],
+      "hard_negatives": [
+        {
+          "file": "E:\\生化资料\\生化场景化培训教材-软件V1.1.pptx",
+          "page": 12,
+          "reason": "同样是工程维护菜单，但原文针对生化分析仪 BS-2800M，不适用于超声主机。",
+          "quote": "在操作软件维护界面下，点击【工程维护软件】进入"
+        }
+      ],
+      "required_facts": [],
+      "forbidden_claims": [
+        "使用生化或发光分析仪的工程维护入口作为该超声型号的操作方法"
+      ],
+      "corpus_snapshot": "g000033-71ec3c52f3",
+      "review_status": "pending",
+      "validation_category": "refuse"
+    }
+  ],
+  "_说明": {
+    "version": "business-gold-v5.1-20261116",
+    "previous_file": "tests/rag/fixtures/rag_independent_v2_review.json",
+    "cases": 12,
+    "review_policy": "逐题审核状态不变；用户批准的替代来源仅对登记事实按OR计分。"
+  },
+  "_替代证据说明": "gold_evidence每项是一条必需证据；alternative_sources为同项的已批准替代来源，任选一处完整覆盖即可；不得把所有替代都要求召回。"
+}

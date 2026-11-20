@@ -104,6 +104,9 @@ class EvidenceChunk:
     lexical_route_rrf_score: float | None = None
     vector_route_rrf_score: float | None = None
     vector_unit_hits: tuple[VectorUnitHit, ...] = ()
+    query_plan_diagnostics: dict[str, object] = field(default_factory=dict)
+    rerank_diagnostics: dict[str, object] = field(default_factory=dict)
+    rerank_raw_logit: float | None = None
 
     @property
     def all_sources(self) -> tuple[SourceRef, ...]:
@@ -155,6 +158,10 @@ class QueryConstraint:
     strength: ConstraintStrength = ConstraintStrength.HARD
     source: str = "rule"
     reason: str = ""
+    subject: str = ""
+    source_start: int | None = None
+    source_end: int | None = None
+    role: str = "observed"
 
     @property
     def is_hard(self) -> bool:
@@ -211,6 +218,39 @@ class VectorUnitHit:
     start_char: int = 0
     end_char: int = 0
     token_count: int = 0
+    embedding_text: str = ""
+    representation_metadata: dict | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class QueryEntity:
+    text: str
+    type: str
+    normalized_value: str
+    confidence: float
+    source: str
+    strength: str
+    reason: str
+    is_strong_constraint: bool = False
+    needs_scope_check: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class PlanSignal:
+    name: str
+    confidence: float
+    source: str
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class SubQuery:
+    text: str
+    focus: str
+    inherited_constraints: tuple[QueryConstraint, ...]
+    confidence: float
+    source: str
+    reason: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -230,6 +270,22 @@ class QueryPlan:
     transformations: tuple[QueryTransformation, ...] = ()
     lexical_variants: tuple[RetrievalQueryVariant, ...] = ()
     semantic_variants: tuple[RetrievalQueryVariant, ...] = ()
+    # entities stays tuple[str] for existing callers; rich records are additive.
+    entity_details: tuple[QueryEntity, ...] = ()
+    answer_requirements: tuple[PlanSignal, ...] = ()
+    sub_queries: tuple[SubQuery, ...] = ()
+    retrieval_hints: tuple[PlanSignal, ...] = ()
+    unknown_entities: tuple[QueryEntity, ...] = ()
+    domain_config: str = ""
+    plan_diagnostics: tuple[PlanSignal, ...] = ()
+    adapter_active: bool = False
+    strategies: tuple[PlanSignal, ...] = ()
+    scope_constraints: tuple[QueryEntity, ...] = ()
+    protected_evidence: tuple[PlanSignal, ...] = ()
+    method_branches: tuple[PlanSignal, ...] = ()
+    ambiguities: tuple[PlanSignal, ...] = ()
+    # Validated configuration, not retrieved facts or Gold labels.
+    adapter_policy: dict = field(default_factory=dict)
 
     # 兼容 RagIndexStore.lexical_search 当前使用的分析结果字段。
     @property
@@ -239,6 +295,12 @@ class QueryPlan:
     @property
     def fts_expression(self) -> str:
         return self.lexical_expression
+
+    @property
+    def parsed_request(self) -> dict:
+        """Canonical view; legacy intent/entities/constraints remain compatible."""
+        from local_full_text_search.rag.query_semantics import query_spec
+        return query_spec(self)
 
 
 @dataclass(frozen=True, slots=True)

@@ -1,0 +1,55 @@
+{
+  "version": "business-gold-v5-20261112",
+  "bundle_id": "g000033-71ec3c52f3",
+  "deleted_ids": [
+    "rag-biz-040"
+  ],
+  "comparison_policy": "仅相同新版题目集合可作算法比较；旧50题与新49题不可直接比较总分。",
+  "datasets": [
+    {
+      "path": "tests/rag/fixtures/rag_gold_v5.jsonl",
+      "count": 49,
+      "status_counts": {
+        "reviewed": 47,
+        "disputed": 1,
+        "pending": 1
+      },
+      "sha256": "0d2dafc199e26c8c2ddea3a12a1f2f6f7742d017d6fb615430b470a727e83b2d"
+    },
+    {
+      "path": "tests/rag/fixtures/rag_acceptance_v1_1.jsonl",
+      "count": 10,
+      "status_counts": {
+        "pending": 10
+      },
+      "sha256": "1101dbad9fff68ce5648f00a2fedb8a1053b2b24187d93654e4caec963f1af97"
+    },
+    {
+      "path": "tests/rag/fixtures/rag_row_holdout_v1_1.jsonl",
+      "count": 10,
+      "status_counts": {
+        "reviewed": 1,
+        "pending": 9
+      },
+      "sha256": "2e7ac79ecb3079a46e5d0a7d9fedc93bc6543df1bc1b2d9642731d7ed5cd6735"
+    },
+    {
+      "path": "tests/rag/fixtures/rag_row_holdout_v2_1.jsonl",
+      "count": 10,
+      "status_counts": {
+        "reviewed": 1,
+        "pending": 9
+      },
+      "sha256": "4ef914ac6bd3ba8138c3764fe66ed4efe50bdcc2b3f5db598d1002f114bf2a0c"
+    },
+    {
+      "path": "tests/rag/fixtures/rag_independent_v2.jsonl",
+      "count": 12,
+      "status_counts": {
+        "pending": 11,
+        "reviewed": 1
+      },
+      "sha256": "22b6049f7a9deda7700c6720f090ead6e044918b6155f56a58326b4dfcd33bdf"
+    }
+  ]
+}

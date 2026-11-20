@@ -1,0 +1,56 @@
+{
+  "version": "business-gold-v5.1-20261116",
+  "bundle_id": "g000033-71ec3c52f3",
+  "deleted_ids": [
+    "rag-biz-040"
+  ],
+  "comparison_policy": "来源登记变更是评测口径变化；三道改问法题必须重新检索，不可把旧结果重标当新问法运行；不称为算法收益。",
+  "datasets": [
+    {
+      "path": "tests/rag/fixtures/rag_gold_v5_1.jsonl",
+      "count": 49,
+      "status_counts": {
+        "reviewed": 47,
+        "disputed": 1,
+        "pending": 1
+      },
+      "sha256": "47fdb73c9a3401c72c674ff3ccb93e69920c7d229a9fae7b84b5eeabcc6b9cc7"
+    },
+    {
+      "path": "tests/rag/fixtures/rag_acceptance_v1_1.jsonl",
+      "count": 10,
+      "status_counts": {
+        "pending": 10
+      },
+      "sha256": "1101dbad9fff68ce5648f00a2fedb8a1053b2b24187d93654e4caec963f1af97"
+    },
+    {
+      "path": "tests/rag/fixtures/rag_row_holdout_v1_2.jsonl",
+      "count": 10,
+      "status_counts": {
+        "reviewed": 1,
+        "pending": 9
+      },
+      "sha256": "ebc8a441ba54b76af408549fba30dc4340b33069af2c42b5012802071cf8d29a"
+    },
+    {
+      "path": "tests/rag/fixtures/rag_row_holdout_v2_1.jsonl",
+      "count": 10,
+      "status_counts": {
+        "reviewed": 1,
+        "pending": 9
+      },
+      "sha256": "4ef914ac6bd3ba8138c3764fe66ed4efe50bdcc2b3f5db598d1002f114bf2a0c"
+    },
+    {
+      "path": "tests/rag/fixtures/rag_independent_v2_1.jsonl",
+      "count": 12,
+      "status_counts": {
+        "pending": 11,
+        "reviewed": 1
+      },
+      "sha256": "52300c1e82ff12d4293ed79ccd0d0640690025b9c1c0a859261cca427ab0062d"
+    }
+  ],
+  "previous_manifest": "tests/rag/fixtures/rag_active_suite_v5.json"
+}

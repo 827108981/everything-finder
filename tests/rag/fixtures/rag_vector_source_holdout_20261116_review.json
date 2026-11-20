@@ -1,0 +1,967 @@
+{
+  "_说明": "本文件为新增来源诊断集的便于审核JSON；全部pending，不改变当前活动测试集。",
+  "cases": [
+    {
+      "id": "vector-source-independent-001",
+      "group_id": "vector_source_01_condition_1",
+      "question": "CL-8000i报302340300超声频率异常，什么情况下会触发？",
+      "corpus_snapshot": "g000033-71ec3c52f3",
+      "expected_behavior": "answer",
+      "constraints": {
+        "scope": "",
+        "stage": "",
+        "direction": "",
+        "object": ""
+      },
+      "missing_fields": [],
+      "gold_evidence": [
+        {
+          "file": "E:\\免疫资料\\CL-8000i故障指引\\CL-8000i超声频率异常302340300.pdf",
+          "page": 1,
+          "position": "第 1 页",
+          "quote": "如果频率有效值在【正常空化频率下限，正常空化频率上限】区间外",
+          "relevance": 2,
+          "why_sufficient": "原资料及当前索引双重核对；具体对象、条件、数值在该位置。"
+        }
+      ],
+      "hard_negatives": [],
+      "required_facts": [
+        "混匀结束后，频率有效值超出正常空化频率上下限区间时报警。"
+      ],
+      "forbidden_claims": [
+        "将该来源局部示例、型号或操作条件无依据扩展为所有仪器。"
+      ],
+      "answer_checks": [
+        {
+          "id": "F1",
+          "role": "core",
+          "text": "混匀结束后，频率有效值超出正常空化频率上下限区间时报警。"
+        }
+      ],
+      "review_status": "pending",
+      "annotation_provenance": {
+        "source_group": "source-01",
+        "source_sha256": "887800585431f16a94884ea7ed10c354e62402ea8cac8262d61a41d9b1da4655",
+        "candidate_scores_seen": false,
+        "layout": "condition",
+        "original_verified": true,
+        "index_verified": true,
+        "independence": "来源未被当前91题Gold及批准替代来源引用；不声称与全部历史调试知识语义独立"
+      }
+    },
+    {
+      "id": "vector-source-independent-002",
+      "group_id": "vector_source_01_condition_2",
+      "question": "CL-8000i超声频率异常报警后，当前这次测试会作废吗？",
+      "corpus_snapshot": "g000033-71ec3c52f3",
+      "expected_behavior": "answer",
+      "constraints": {
+        "scope": "",
+        "stage": "",
+        "direction": "",
+        "object": ""
+      },
+      "missing_fields": [],
+      "gold_evidence": [
+        {
+          "file": "E:\\免疫资料\\CL-8000i故障指引\\CL-8000i超声频率异常302340300.pdf",
+          "page": 1,
+          "position": "第 1 页",
+          "quote": "警告，当前单个测试作废",
+          "relevance": 2,
+          "why_sufficient": "原资料及当前索引双重核对；具体对象、条件、数值在该位置。"
+        }
+      ],
+      "hard_negatives": [],
+      "required_facts": [
+        "报警为警告，当前单个测试作废。"
+      ],
+      "forbidden_claims": [
+        "将该来源局部示例、型号或操作条件无依据扩展为所有仪器。"
+      ],
+      "answer_checks": [
+        {
+          "id": "F1",
+          "role": "core",
+          "text": "报警为警告，当前单个测试作废。"
+        }
+      ],
+      "review_status": "pending",
+      "annotation_provenance": {
+        "source_group": "source-01",
+        "source_sha256": "887800585431f16a94884ea7ed10c354e62402ea8cac8262d61a41d9b1da4655",
+        "candidate_scores_seen": false,
+        "layout": "condition",
+        "original_verified": true,
+        "index_verified": true,
+        "independence": "来源未被当前91题Gold及批准替代来源引用；不声称与全部历史调试知识语义独立"
+      }
+    },
+    {
+      "id": "vector-source-independent-003",
+      "group_id": "vector_source_02_condition_3",
+      "question": "CL-8000i超声空化电压高报警是在什么情况下触发的？",
+      "corpus_snapshot": "g000033-71ec3c52f3",
+      "expected_behavior": "answer",
+      "constraints": {
+        "scope": "",
+        "stage": "",
+        "direction": "",
+        "object": ""
+      },
+      "missing_fields": [],
+      "gold_evidence": [
+        {
+          "file": "E:\\免疫资料\\CL-8000i超声空化电压高302340400.pdf",
+          "page": 1,
+          "position": "第 1 页",
+          "quote": "没有发生频率异常，空化电压个数正常，但空化电压高于报警内显示的阈值的个数多于预期",
+          "relevance": 2,
+          "why_sufficient": "原资料及当前索引双重核对；具体对象、条件、数值在该位置。"
+        }
+      ],
+      "hard_negatives": [],
+      "required_facts": [
+        "无频率异常且电压个数正常，但高于报警阈值的电压个数多于预期。"
+      ],
+      "forbidden_claims": [
+        "将该来源局部示例、型号或操作条件无依据扩展为所有仪器。"
+      ],
+      "answer_checks": [
+        {
+          "id": "F1",
+          "role": "core",
+          "text": "无频率异常且电压个数正常，但高于报警阈值的电压个数多于预期。"
+        }
+      ],
+      "review_status": "pending",
+      "annotation_provenance": {
+        "source_group": "source-02",
+        "source_sha256": "a852a3a9ad50bc7afefd10b77f5bc5e672ae7a76554538d50b15bb4d4886df08",
+        "candidate_scores_seen": false,
+        "layout": "condition",
+        "original_verified": true,
+        "index_verified": true,
+        "independence": "来源未被当前91题Gold及批准替代来源引用；不声称与全部历史调试知识语义独立"
+      }
+    },
+    {
+      "id": "vector-source-independent-004",
+      "group_id": "vector_source_02_table_4",
+      "question": "CL-8000i超声空化电压高，处理策略设为2时测试怎么处理、结果带什么标记？",
+      "corpus_snapshot": "g000033-71ec3c52f3",
+      "expected_behavior": "answer",
+      "constraints": {
+        "scope": "",
+        "stage": "",
+        "direction": "",
+        "object": ""
+      },
+      "missing_fields": [],
+      "gold_evidence": [
+        {
+          "file": "E:\\免疫资料\\CL-8000i超声空化电压高302340400.pdf",
+          "page": 1,
+          "position": "第 1 页",
+          "quote": "2：测试保留，日志标注Ult.NA，测试结果标记Ult.NA",
+          "relevance": 2,
+          "why_sufficient": "原资料及当前索引双重核对；具体对象、条件、数值在该位置。"
+        }
+      ],
+      "hard_negatives": [],
+      "required_facts": [
+        "测试保留；日志记录Ult.NA，结果带Ult.NA标志。"
+      ],
+      "forbidden_claims": [
+        "将该来源局部示例、型号或操作条件无依据扩展为所有仪器。"
+      ],
+      "answer_checks": [
+        {
+          "id": "F1",
+          "role": "core",
+          "text": "测试保留；日志记录Ult.NA，结果带Ult.NA标志。"
+        }
+      ],
+      "review_status": "pending",
+      "annotation_provenance": {
+        "source_group": "source-02",
+        "source_sha256": "a852a3a9ad50bc7afefd10b77f5bc5e672ae7a76554538d50b15bb4d4886df08",
+        "candidate_scores_seen": false,
+        "layout": "table",
+        "original_verified": true,
+        "index_verified": true,
+        "independence": "来源未被当前91题Gold及批准替代来源引用；不声称与全部历史调试知识语义独立"
+      }
+    },
+    {
+      "id": "vector-source-independent-005",
+      "group_id": "vector_source_03_numeric_5",
+      "question": "BS-2800M报光源灯不稳定，环境温度要检查什么？",
+      "corpus_snapshot": "g000033-71ec3c52f3",
+      "expected_behavior": "answer",
+      "constraints": {
+        "scope": "",
+        "stage": "",
+        "direction": "",
+        "object": ""
+      },
+      "missing_fields": [],
+      "gold_evidence": [
+        {
+          "file": "E:\\生化资料\\故障处理指引-生化\\BS-2800M\\BS-2800-213120802光源灯不稳定V0.2.docx",
+          "page": null,
+          "position": "正文第 1 段 - 正文第 3 段",
+          "quote": "检查环境温度，是否在15-30°，并且无明显波动",
+          "relevance": 2,
+          "why_sufficient": "原资料及当前索引双重核对；具体对象、条件、数值在该位置。"
+        }
+      ],
+      "hard_negatives": [],
+      "required_facts": [
+        "检查环境是否15～30℃且无明显温度波动。"
+      ],
+      "forbidden_claims": [
+        "将该来源局部示例、型号或操作条件无依据扩展为所有仪器。"
+      ],
+      "answer_checks": [
+        {
+          "id": "F1",
+          "role": "core",
+          "text": "检查环境是否15～30℃且无明显温度波动。"
+        }
+      ],
+      "review_status": "pending",
+      "annotation_provenance": {
+        "source_group": "source-03",
+        "source_sha256": "25b1db4395244d988efb8b2f596d81ce632ec29f54cdb5ab1b28130b674a809d",
+        "candidate_scores_seen": false,
+        "layout": "numeric",
+        "original_verified": true,
+        "index_verified": true,
+        "independence": "来源未被当前91题Gold及批准替代来源引用；不声称与全部历史调试知识语义独立"
+      }
+    },
+    {
+      "id": "vector-source-independent-006",
+      "group_id": "vector_source_03_table_6",
+      "question": "BS-2800M的50W光源灯组件，下单编码是什么？",
+      "corpus_snapshot": "g000033-71ec3c52f3",
+      "expected_behavior": "answer",
+      "constraints": {
+        "scope": "",
+        "stage": "",
+        "direction": "",
+        "object": ""
+      },
+      "missing_fields": [],
+      "gold_evidence": [
+        {
+          "file": "E:\\生化资料\\故障处理指引-生化\\BS-2800M\\BS-2800-213120802光源灯不稳定V0.2.docx",
+          "page": null,
+          "position": "正文第 1 段 - 正文第 3 段",
+          "quote": "50W光源灯组件 | 1 | 用于生化仪的光源 | 115-014942-00",
+          "relevance": 2,
+          "why_sufficient": "原资料及当前索引双重核对；具体对象、条件、数值在该位置。"
+        }
+      ],
+      "hard_negatives": [],
+      "required_facts": [
+        "50W光源灯组件编码115-014942-00。"
+      ],
+      "forbidden_claims": [
+        "将该来源局部示例、型号或操作条件无依据扩展为所有仪器。"
+      ],
+      "answer_checks": [
+        {
+          "id": "F1",
+          "role": "core",
+          "text": "50W光源灯组件编码115-014942-00。"
+        }
+      ],
+      "review_status": "pending",
+      "annotation_provenance": {
+        "source_group": "source-03",
+        "source_sha256": "25b1db4395244d988efb8b2f596d81ce632ec29f54cdb5ab1b28130b674a809d",
+        "candidate_scores_seen": false,
+        "layout": "table",
+        "original_verified": true,
+        "index_verified": true,
+        "independence": "来源未被当前91题Gold及批准替代来源引用；不声称与全部历史调试知识语义独立"
+      }
+    },
+    {
+      "id": "vector-source-independent-007",
+      "group_id": "vector_source_04_numeric_7",
+      "question": "BS-2800M主真空积液报警是检测到什么信号、持续多久触发的？",
+      "corpus_snapshot": "g000033-71ec3c52f3",
+      "expected_behavior": "answer",
+      "constraints": {
+        "scope": "",
+        "stage": "",
+        "direction": "",
+        "object": ""
+      },
+      "missing_fields": [],
+      "gold_evidence": [
+        {
+          "file": "E:\\生化资料\\故障处理指引-生化\\BS-2800M\\BS-2800-215050602主真空积液V0.2.docx",
+          "page": null,
+          "position": "正文第 1 段 - 正文第 3 段",
+          "quote": "连续10S检测到FL12的ON信号",
+          "relevance": 2,
+          "why_sufficient": "原资料及当前索引双重核对；具体对象、条件、数值在该位置。"
+        }
+      ],
+      "hard_negatives": [],
+      "required_facts": [
+        "连续10秒检测到FL12的ON信号时报警。"
+      ],
+      "forbidden_claims": [
+        "将该来源局部示例、型号或操作条件无依据扩展为所有仪器。"
+      ],
+      "answer_checks": [
+        {
+          "id": "F1",
+          "role": "core",
+          "text": "连续10秒检测到FL12的ON信号时报警。"
+        }
+      ],
+      "review_status": "pending",
+      "annotation_provenance": {
+        "source_group": "source-04",
+        "source_sha256": "750ef692e2874e6ab6068f9a54f3a4e3df6b9007b9843e995c0b0eb3ce0886db",
+        "candidate_scores_seen": false,
+        "layout": "numeric",
+        "original_verified": true,
+        "index_verified": true,
+        "independence": "来源未被当前91题Gold及批准替代来源引用；不声称与全部历史调试知识语义独立"
+      }
+    },
+    {
+      "id": "vector-source-independent-008",
+      "group_id": "vector_source_04_table_8",
+      "question": "BS-2800M主真空容器组件的下单编码是什么？",
+      "corpus_snapshot": "g000033-71ec3c52f3",
+      "expected_behavior": "answer",
+      "constraints": {
+        "scope": "",
+        "stage": "",
+        "direction": "",
+        "object": ""
+      },
+      "missing_fields": [],
+      "gold_evidence": [
+        {
+          "file": "E:\\生化资料\\故障处理指引-生化\\BS-2800M\\BS-2800-215050602主真空积液V0.2.docx",
+          "page": null,
+          "position": "正文第 1 段 - 正文第 3 段",
+          "quote": "主真空容器组件 | 1 | 用于真空压力的保持 | 115-074333-00",
+          "relevance": 2,
+          "why_sufficient": "原资料及当前索引双重核对；具体对象、条件、数值在该位置。"
+        }
+      ],
+      "hard_negatives": [],
+      "required_facts": [
+        "主真空容器组件编码115-074333-00。"
+      ],
+      "forbidden_claims": [
+        "将该来源局部示例、型号或操作条件无依据扩展为所有仪器。"
+      ],
+      "answer_checks": [
+        {
+          "id": "F1",
+          "role": "core",
+          "text": "主真空容器组件编码115-074333-00。"
+        }
+      ],
+      "review_status": "pending",
+      "annotation_provenance": {
+        "source_group": "source-04",
+        "source_sha256": "750ef692e2874e6ab6068f9a54f3a4e3df6b9007b9843e995c0b0eb3ce0886db",
+        "candidate_scores_seen": false,
+        "layout": "table",
+        "original_verified": true,
+        "index_verified": true,
+        "independence": "来源未被当前91题Gold及批准替代来源引用；不声称与全部历史调试知识语义独立"
+      }
+    },
+    {
+      "id": "vector-source-independent-009",
+      "group_id": "vector_source_05_numeric_9",
+      "question": "BS-1000M反应杯清洗水温度报警，清洗水应保持在什么温度范围？",
+      "corpus_snapshot": "g000033-71ec3c52f3",
+      "expected_behavior": "answer",
+      "constraints": {
+        "scope": "",
+        "stage": "",
+        "direction": "",
+        "object": ""
+      },
+      "missing_fields": [],
+      "gold_evidence": [
+        {
+          "file": "E:\\生化资料\\故障处理指引-生化\\BS-1000M\\BS-1000M-235150702-反应杯清洗水温度超出范围，原因：温度过低.docx",
+          "page": null,
+          "position": "正文第 9 段 - 正文第 87 段",
+          "quote": "清洗水温度可以保持在35.5-45.5℃",
+          "relevance": 2,
+          "why_sufficient": "原资料及当前索引双重核对；具体对象、条件、数值在该位置。"
+        }
+      ],
+      "hard_negatives": [],
+      "required_facts": [
+        "清洗水温度应保持35.5～45.5℃。"
+      ],
+      "forbidden_claims": [
+        "将该来源局部示例、型号或操作条件无依据扩展为所有仪器。"
+      ],
+      "answer_checks": [
+        {
+          "id": "F1",
+          "role": "core",
+          "text": "清洗水温度应保持35.5～45.5℃。"
+        }
+      ],
+      "review_status": "pending",
+      "annotation_provenance": {
+        "source_group": "source-05",
+        "source_sha256": "bc77d5fcb8b0b7f4fe988e98b7d52c64d949efc4d9d8af5bc432894d0cf59201",
+        "candidate_scores_seen": false,
+        "layout": "numeric",
+        "original_verified": true,
+        "index_verified": true,
+        "independence": "来源未被当前91题Gold及批准替代来源引用；不声称与全部历史调试知识语义独立",
+        "source_discrepancy": "文件名报警码235150702与正文235150202不一致；本题只问已明确的型号和参数，不使用报警码判断。"
+      }
+    },
+    {
+      "id": "vector-source-independent-010",
+      "group_id": "vector_source_05_numeric_10",
+      "question": "BS-1000M清洗水温度采集板VPP测试点的正常电压范围是多少？",
+      "corpus_snapshot": "g000033-71ec3c52f3",
+      "expected_behavior": "answer",
+      "constraints": {
+        "scope": "",
+        "stage": "",
+        "direction": "",
+        "object": ""
+      },
+      "missing_fields": [],
+      "gold_evidence": [
+        {
+          "file": "E:\\生化资料\\故障处理指引-生化\\BS-1000M\\BS-1000M-235150702-反应杯清洗水温度超出范围，原因：温度过低.docx",
+          "page": null,
+          "position": "正文第 1 段 - 正文第 3 段",
+          "quote": "正常范围：12V±5%，即11.4~12.6V",
+          "relevance": 2,
+          "why_sufficient": "原资料及当前索引双重核对；具体对象、条件、数值在该位置。"
+        }
+      ],
+      "hard_negatives": [],
+      "required_facts": [
+        "VPP正常12V±5%，即11.4～12.6V。"
+      ],
+      "forbidden_claims": [
+        "将该来源局部示例、型号或操作条件无依据扩展为所有仪器。"
+      ],
+      "answer_checks": [
+        {
+          "id": "F1",
+          "role": "core",
+          "text": "VPP正常12V±5%，即11.4～12.6V。"
+        }
+      ],
+      "review_status": "pending",
+      "annotation_provenance": {
+        "source_group": "source-05",
+        "source_sha256": "bc77d5fcb8b0b7f4fe988e98b7d52c64d949efc4d9d8af5bc432894d0cf59201",
+        "candidate_scores_seen": false,
+        "layout": "numeric",
+        "original_verified": true,
+        "index_verified": true,
+        "independence": "来源未被当前91题Gold及批准替代来源引用；不声称与全部历史调试知识语义独立",
+        "source_discrepancy": "文件名报警码235150702与正文235150202不一致；本题只问已明确的型号和参数，不使用报警码判断。"
+      }
+    },
+    {
+      "id": "vector-source-independent-011",
+      "group_id": "vector_source_06_table_11",
+      "question": "用服工具的跑水测试，维护、维修和装机样本编号怎么区分？",
+      "corpus_snapshot": "g000033-71ec3c52f3",
+      "expected_behavior": "answer",
+      "constraints": {
+        "scope": "",
+        "stage": "",
+        "direction": "",
+        "object": ""
+      },
+      "missing_fields": [],
+      "gold_evidence": [
+        {
+          "file": "E:\\生化资料\\用服工具使用说明.pdf",
+          "page": 7,
+          "position": "第 7 页",
+          "quote": "维护：WATER-M-**  (如：WATER-M-01） \n维修：WATER-R-** \n装机：WATER-S-**",
+          "relevance": 2,
+          "why_sufficient": "原资料及当前索引双重核对；具体对象、条件、数值在该位置。"
+        }
+      ],
+      "hard_negatives": [],
+      "required_facts": [
+        "维护WATER-M-**；维修WATER-R-**；装机WATER-S-**。"
+      ],
+      "forbidden_claims": [
+        "将该来源局部示例、型号或操作条件无依据扩展为所有仪器。"
+      ],
+      "answer_checks": [
+        {
+          "id": "F1",
+          "role": "core",
+          "text": "维护WATER-M-**；维修WATER-R-**；装机WATER-S-**。"
+        }
+      ],
+      "review_status": "pending",
+      "annotation_provenance": {
+        "source_group": "source-06",
+        "source_sha256": "6bb59c8c20dd921d9decaf2e47ee6a7b77de59989ee8b3ecb38b30bdf83c6dad",
+        "candidate_scores_seen": false,
+        "layout": "table",
+        "original_verified": true,
+        "index_verified": true,
+        "independence": "来源未被当前91题Gold及批准替代来源引用；不声称与全部历史调试知识语义独立"
+      }
+    },
+    {
+      "id": "vector-source-independent-012",
+      "group_id": "vector_source_06_identifier_12",
+      "question": "跑水测试失败，应该查哪个日志、搜索哪个字段看失败原因？",
+      "corpus_snapshot": "g000033-71ec3c52f3",
+      "expected_behavior": "answer",
+      "constraints": {
+        "scope": "",
+        "stage": "",
+        "direction": "",
+        "object": ""
+      },
+      "missing_fields": [],
+      "gold_evidence": [
+        {
+          "file": "E:\\生化资料\\用服工具使用说明.pdf",
+          "page": 7,
+          "position": "第 7 页",
+          "quote": "打开Log->TraceLog00.csv, 查找“WaterTestJudgeHelper”字段",
+          "relevance": 2,
+          "why_sufficient": "原资料及当前索引双重核对；具体对象、条件、数值在该位置。"
+        }
+      ],
+      "hard_negatives": [],
+      "required_facts": [
+        "打开Log下TraceLog00.csv，搜索WaterTestJudgeHelper字段。"
+      ],
+      "forbidden_claims": [
+        "将该来源局部示例、型号或操作条件无依据扩展为所有仪器。"
+      ],
+      "answer_checks": [
+        {
+          "id": "F1",
+          "role": "core",
+          "text": "打开Log下TraceLog00.csv，搜索WaterTestJudgeHelper字段。"
+        }
+      ],
+      "review_status": "pending",
+      "annotation_provenance": {
+        "source_group": "source-06",
+        "source_sha256": "6bb59c8c20dd921d9decaf2e47ee6a7b77de59989ee8b3ecb38b30bdf83c6dad",
+        "candidate_scores_seen": false,
+        "layout": "identifier",
+        "original_verified": true,
+        "index_verified": true,
+        "independence": "来源未被当前91题Gold及批准替代来源引用；不声称与全部历史调试知识语义独立"
+      }
+    },
+    {
+      "id": "vector-source-independent-013",
+      "group_id": "vector_source_07_table_13",
+      "question": "去离子水加热保护开关和反应盘加热保护开关，断开与闭合温度分别是多少？",
+      "corpus_snapshot": "g000033-71ec3c52f3",
+      "expected_behavior": "answer",
+      "constraints": {
+        "scope": "",
+        "stage": "",
+        "direction": "",
+        "object": ""
+      },
+      "missing_fields": [],
+      "gold_evidence": [
+        {
+          "file": "E:\\免疫资料\\中低速免疫\\2-课件PPT-线上\\公共\\IVD工程师基础技能-热工-有声V1.1.pptx",
+          "page": 6,
+          "position": "第 6 张幻灯片",
+          "quote": "温度保护开关\n温度保护开关\n断开温度\n闭合温度\n去离子水加热保护开关\n60℃\n< 30℃.\n稀释清洗剂加热保护开关\n60℃\n< 30℃.\n温度保护开关\n断开温度\n闭合温度\n反应盘加热保护开关\n50℃\n< 30℃.",
+          "relevance": 2,
+          "why_sufficient": "原资料及当前索引双重核对；具体对象、条件、数值在该位置。"
+        }
+      ],
+      "hard_negatives": [],
+      "required_facts": [
+        "示例中去离子水开关60℃断开，反应盘开关50℃断开；两者低于30℃闭合。"
+      ],
+      "forbidden_claims": [
+        "将该来源局部示例、型号或操作条件无依据扩展为所有仪器。"
+      ],
+      "answer_checks": [
+        {
+          "id": "F1",
+          "role": "core",
+          "text": "示例中去离子水开关60℃断开，反应盘开关50℃断开；两者低于30℃闭合。"
+        }
+      ],
+      "review_status": "pending",
+      "annotation_provenance": {
+        "source_group": "source-07",
+        "source_sha256": "a35623b524b3d7799e256a13821cc3cd710e1a32453160721cdf169c49f3201e",
+        "candidate_scores_seen": false,
+        "layout": "table",
+        "original_verified": true,
+        "index_verified": true,
+        "independence": "来源未被当前91题Gold及批准替代来源引用；不声称与全部历史调试知识语义独立"
+      }
+    },
+    {
+      "id": "vector-source-independent-014",
+      "group_id": "vector_source_07_condition_14",
+      "question": "风扇有三根线，就一定有转速反馈吗？",
+      "corpus_snapshot": "g000033-71ec3c52f3",
+      "expected_behavior": "answer",
+      "constraints": {
+        "scope": "",
+        "stage": "",
+        "direction": "",
+        "object": ""
+      },
+      "missing_fields": [],
+      "gold_evidence": [
+        {
+          "file": "E:\\免疫资料\\中低速免疫\\2-课件PPT-线上\\公共\\IVD工程师基础技能-热工-有声V1.1.pptx",
+          "page": 7,
+          "position": "第 7 张幻灯片",
+          "quote": "不是所有三根线的都具有反馈信号，要看最终接到板卡上的是几根线才能确定",
+          "relevance": 2,
+          "why_sufficient": "原资料及当前索引双重核对；具体对象、条件、数值在该位置。"
+        }
+      ],
+      "hard_negatives": [],
+      "required_facts": [
+        "不一定，要检查最终接到板卡的线数。"
+      ],
+      "forbidden_claims": [
+        "将该来源局部示例、型号或操作条件无依据扩展为所有仪器。"
+      ],
+      "answer_checks": [
+        {
+          "id": "F1",
+          "role": "core",
+          "text": "不一定，要检查最终接到板卡的线数。"
+        }
+      ],
+      "review_status": "pending",
+      "annotation_provenance": {
+        "source_group": "source-07",
+        "source_sha256": "a35623b524b3d7799e256a13821cc3cd710e1a32453160721cdf169c49f3201e",
+        "candidate_scores_seen": false,
+        "layout": "condition",
+        "original_verified": true,
+        "index_verified": true,
+        "independence": "来源未被当前91题Gold及批准替代来源引用；不声称与全部历史调试知识语义独立"
+      }
+    },
+    {
+      "id": "vector-source-independent-015",
+      "group_id": "vector_source_08_identifier_15",
+      "question": "仪器电脑自带的系统还原镜像一般放哪个盘，文件后缀是什么？",
+      "corpus_snapshot": "g000033-71ec3c52f3",
+      "expected_behavior": "answer",
+      "constraints": {
+        "scope": "",
+        "stage": "",
+        "direction": "",
+        "object": ""
+      },
+      "missing_fields": [],
+      "gold_evidence": [
+        {
+          "file": "E:\\免疫资料\\中低速免疫\\2-课件PPT-线上\\公共\\IVD工程师基础技能-电脑-有声V1.1.pptx",
+          "page": 5,
+          "position": "第 5 张幻灯片",
+          "quote": "仪器操作电脑自带的系统通常会放在操作电脑的E盘，文件后缀为.gho",
+          "relevance": 2,
+          "why_sufficient": "原资料及当前索引双重核对；具体对象、条件、数值在该位置。"
+        }
+      ],
+      "hard_negatives": [],
+      "required_facts": [
+        "通常放E盘，后缀.gho。"
+      ],
+      "forbidden_claims": [
+        "将该来源局部示例、型号或操作条件无依据扩展为所有仪器。"
+      ],
+      "answer_checks": [
+        {
+          "id": "F1",
+          "role": "core",
+          "text": "通常放E盘，后缀.gho。"
+        }
+      ],
+      "review_status": "pending",
+      "annotation_provenance": {
+        "source_group": "source-08",
+        "source_sha256": "c4f6a62fcd7c9a5739bb4a9e12b8081421b452c4230a0f81ef4d1b43d3b751e6",
+        "candidate_scores_seen": false,
+        "layout": "identifier",
+        "original_verified": true,
+        "index_verified": true,
+        "independence": "来源未被当前91题Gold及批准替代来源引用；不声称与全部历史调试知识语义独立"
+      }
+    },
+    {
+      "id": "vector-source-independent-016",
+      "group_id": "vector_source_08_procedure_16",
+      "question": "还原仪器电脑系统时，目标磁盘该选什么类型，通常还原哪个分区？",
+      "corpus_snapshot": "g000033-71ec3c52f3",
+      "expected_behavior": "answer",
+      "constraints": {
+        "scope": "",
+        "stage": "",
+        "direction": "",
+        "object": ""
+      },
+      "missing_fields": [],
+      "gold_evidence": [
+        {
+          "file": "E:\\免疫资料\\中低速免疫\\2-课件PPT-线上\\公共\\IVD工程师基础技能-电脑-有声V1.1.pptx",
+          "page": 5,
+          "position": "第 5 张幻灯片",
+          "quote": "系统还原\n4.选择需要还原的系统（仪器操作电脑自带的系统通常会放在操作电脑的E盘，文件后缀为.gho）\n5.选择需要还原的目标磁盘（必须选择本地磁盘）。\n6.选择需要还原的分区（一般都为C盘）\n5",
+          "relevance": 2,
+          "why_sufficient": "原资料及当前索引双重核对；具体对象、条件、数值在该位置。"
+        }
+      ],
+      "hard_negatives": [],
+      "required_facts": [
+        "目标选本地磁盘，分区通常为C盘。"
+      ],
+      "forbidden_claims": [
+        "将该来源局部示例、型号或操作条件无依据扩展为所有仪器。"
+      ],
+      "answer_checks": [
+        {
+          "id": "F1",
+          "role": "core",
+          "text": "目标选本地磁盘，分区通常为C盘。"
+        }
+      ],
+      "review_status": "pending",
+      "annotation_provenance": {
+        "source_group": "source-08",
+        "source_sha256": "c4f6a62fcd7c9a5739bb4a9e12b8081421b452c4230a0f81ef4d1b43d3b751e6",
+        "candidate_scores_seen": false,
+        "layout": "procedure",
+        "original_verified": true,
+        "index_verified": true,
+        "independence": "来源未被当前91题Gold及批准替代来源引用；不声称与全部历史调试知识语义独立"
+      }
+    },
+    {
+      "id": "vector-source-independent-017",
+      "group_id": "vector_source_09_condition_17",
+      "question": "光耦与板卡断开和接好时，红黑供电线之间的正常电压分别是多少？",
+      "corpus_snapshot": "g000033-71ec3c52f3",
+      "expected_behavior": "answer",
+      "constraints": {
+        "scope": "",
+        "stage": "",
+        "direction": "",
+        "object": ""
+      },
+      "missing_fields": [],
+      "gold_evidence": [
+        {
+          "file": "E:\\免疫资料\\中低速免疫\\2-课件PPT-线上\\公共\\IVD工程师基础技能-硬件-有声V1.1.pptx",
+          "page": 5,
+          "position": "第 5 张幻灯片",
+          "quote": "光耦传感器\n使用万用表测量光耦传感器好坏\n通常光耦传感器一共有4根线，如原理图所示的输入端2根线1和2，输出端2根线3和4。\n测量步骤：\n1. 在仪器上电状态下，断开光耦与板卡之间的接线，万用表打到直流电压档，测量板卡这一侧的接线，用表笔测试红黑供电线间电压（1和2之间的电压），此时电压正常为5V左右，证明供电正常；\n2. 将光耦与板卡间的接线连接，测试红黑供电线间电压（1和2之间的电压），此时电压应为1.2V-1.3V；",
+          "relevance": 2,
+          "why_sufficient": "原资料及当前索引双重核对；具体对象、条件、数值在该位置。"
+        }
+      ],
+      "hard_negatives": [],
+      "required_facts": [
+        "断开时板卡侧约5V，接好后约1.2～1.3V。"
+      ],
+      "forbidden_claims": [
+        "将该来源局部示例、型号或操作条件无依据扩展为所有仪器。"
+      ],
+      "answer_checks": [
+        {
+          "id": "F1",
+          "role": "core",
+          "text": "断开时板卡侧约5V，接好后约1.2～1.3V。"
+        }
+      ],
+      "review_status": "pending",
+      "annotation_provenance": {
+        "source_group": "source-09",
+        "source_sha256": "c387ad133c54d10abe0526c3dacc814175dc83243793bc1e61dc6ad8c6de19a2",
+        "candidate_scores_seen": false,
+        "layout": "condition",
+        "original_verified": true,
+        "index_verified": true,
+        "independence": "来源未被当前91题Gold及批准替代来源引用；不声称与全部历史调试知识语义独立"
+      }
+    },
+    {
+      "id": "vector-source-independent-018",
+      "group_id": "vector_source_09_table_18",
+      "question": "DB44串口线的44针端和25针端，分别接电脑还是生化仪？",
+      "corpus_snapshot": "g000033-71ec3c52f3",
+      "expected_behavior": "answer",
+      "constraints": {
+        "scope": "",
+        "stage": "",
+        "direction": "",
+        "object": ""
+      },
+      "missing_fields": [],
+      "gold_evidence": [
+        {
+          "file": "E:\\免疫资料\\中低速免疫\\2-课件PPT-线上\\公共\\IVD工程师基础技能-硬件-有声V1.1.pptx",
+          "page": 6,
+          "position": "第 6 张幻灯片",
+          "quote": "接电脑端-串口公头（44针）\n接生化仪端-串口公头（25针）",
+          "relevance": 2,
+          "why_sufficient": "原资料及当前索引双重核对；具体对象、条件、数值在该位置。"
+        }
+      ],
+      "hard_negatives": [],
+      "required_facts": [
+        "44针接电脑，25针接生化仪。"
+      ],
+      "forbidden_claims": [
+        "将该来源局部示例、型号或操作条件无依据扩展为所有仪器。"
+      ],
+      "answer_checks": [
+        {
+          "id": "F1",
+          "role": "core",
+          "text": "44针接电脑，25针接生化仪。"
+        }
+      ],
+      "review_status": "pending",
+      "annotation_provenance": {
+        "source_group": "source-09",
+        "source_sha256": "c387ad133c54d10abe0526c3dacc814175dc83243793bc1e61dc6ad8c6de19a2",
+        "candidate_scores_seen": false,
+        "layout": "table",
+        "original_verified": true,
+        "index_verified": true,
+        "independence": "来源未被当前91题Gold及批准替代来源引用；不声称与全部历史调试知识语义独立"
+      }
+    },
+    {
+      "id": "vector-source-independent-019",
+      "group_id": "vector_source_10_procedure_19",
+      "question": "浮子传感器怎么用万用表判断好坏？",
+      "corpus_snapshot": "g000033-71ec3c52f3",
+      "expected_behavior": "answer",
+      "constraints": {
+        "scope": "",
+        "stage": "",
+        "direction": "",
+        "object": ""
+      },
+      "missing_fields": [],
+      "gold_evidence": [
+        {
+          "file": "E:\\免疫资料\\中低速免疫\\2-课件PPT-线上\\公共\\IVD工程师基础技能-液路及气路-有声V1.1 .pptx",
+          "page": 7,
+          "position": "第 7 张幻灯片",
+          "quote": "浮子传感器\n如何判断浮子传感器的好坏\n可通过万用表测量通断的方式测量浮子传感器\n1、万用表打到蜂鸣档，一个表笔接触接头外壁，另一个表笔接触内芯\n2、浮子在原位置时，万用表蜂鸣器不响\n3、手动抬起浮子，此时万用表蜂鸣器响起，说明正常，如不响则异常",
+          "relevance": 2,
+          "why_sufficient": "原资料及当前索引双重核对；具体对象、条件、数值在该位置。"
+        }
+      ],
+      "hard_negatives": [],
+      "required_facts": [
+        "蜂鸣档测接头外壁和内芯；原位置不响，抬起后响为正常。"
+      ],
+      "forbidden_claims": [
+        "将该来源局部示例、型号或操作条件无依据扩展为所有仪器。"
+      ],
+      "answer_checks": [
+        {
+          "id": "F1",
+          "role": "core",
+          "text": "蜂鸣档测接头外壁和内芯；原位置不响，抬起后响为正常。"
+        }
+      ],
+      "review_status": "pending",
+      "annotation_provenance": {
+        "source_group": "source-10",
+        "source_sha256": "321ec21d2f3d9e4ce9f1f2ac90cd3d7bf05f9c3f0dbb8c126ea3e3d82f301242",
+        "candidate_scores_seen": false,
+        "layout": "procedure",
+        "original_verified": true,
+        "index_verified": true,
+        "independence": "来源未被当前91题Gold及批准替代来源引用；不声称与全部历史调试知识语义独立"
+      }
+    },
+    {
+      "id": "vector-source-independent-020",
+      "group_id": "vector_source_10_condition_20",
+      "question": "三通电磁阀断电和通电时，COM分别与NO还是NC相通？",
+      "corpus_snapshot": "g000033-71ec3c52f3",
+      "expected_behavior": "answer",
+      "constraints": {
+        "scope": "",
+        "stage": "",
+        "direction": "",
+        "object": ""
+      },
+      "missing_fields": [],
+      "gold_evidence": [
+        {
+          "file": "E:\\免疫资料\\中低速免疫\\2-课件PPT-线上\\公共\\IVD工程师基础技能-液路及气路-有声V1.1 .pptx",
+          "page": 9,
+          "position": "第 9 张幻灯片",
+          "quote": "常开端（NO）：表示非通电状态下，公共端（COM）与其相通；\n常闭端（NC）：表示非通电状态下，公共端（COM）与其不相通；\n电磁阀通电：NO与COM不相通，NC与COM相通；但是在任何情况下NO与NC都是不会相通。",
+          "relevance": 2,
+          "why_sufficient": "原资料及当前索引双重核对；具体对象、条件、数值在该位置。"
+        }
+      ],
+      "hard_negatives": [],
+      "required_facts": [
+        "断电COM通NO不通NC；通电COM通NC不通NO；NO与NC不相通。"
+      ],
+      "forbidden_claims": [
+        "将该来源局部示例、型号或操作条件无依据扩展为所有仪器。"
+      ],
+      "answer_checks": [
+        {
+          "id": "F1",
+          "role": "core",
+          "text": "断电COM通NO不通NC；通电COM通NC不通NO；NO与NC不相通。"
+        }
+      ],
+      "review_status": "pending",
+      "annotation_provenance": {
+        "source_group": "source-10",
+        "source_sha256": "321ec21d2f3d9e4ce9f1f2ac90cd3d7bf05f9c3f0dbb8c126ea3e3d82f301242",
+        "candidate_scores_seen": false,
+        "layout": "condition",
+        "original_verified": true,
+        "index_verified": true,
+        "independence": "来源未被当前91题Gold及批准替代来源引用；不声称与全部历史调试知识语义独立"
+      }
+    }
+  ]
+}

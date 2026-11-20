@@ -5,7 +5,6 @@ from pathlib import Path
 
 from local_full_text_search.rag.errors import RagModelMissingError, RagModelValidationError
 from local_full_text_search.rag.models import EvidenceChunk
-from local_full_text_search.rag.reranking.support import retrieval_prior
 
 
 class LocalBgeReranker:
@@ -18,10 +17,13 @@ class LocalBgeReranker:
         batch_size: int = 4,
         max_length: int = 512,
         device: str = "cpu",
-        cross_encoder_weight: float = 0.65,
-        retrieval_prior_weight: float = 0.05,
-        answer_support_weight: float = 0.30,
-        max_rank_drop: int = 3,
+        cross_encoder_weight: float = 1.0,
+        retrieval_prior_weight: float = 0.0,
+        answer_support_weight: float = 0.0,
+        max_rank_drop: int = 0,
+        ordering_policy=None,
+        input_mode: str = "window_max",
+        window_overlap: int = 64,
     ) -> None:
         try:
             from transformers import AutoModelForSequenceClassification, AutoTokenizer
@@ -35,16 +37,19 @@ class LocalBgeReranker:
         self.revision = revision
         self.batch_size = max(1, int(batch_size))
         self.max_length = max(32, int(max_length))
-        weights = [
-            max(0.0, float(cross_encoder_weight)),
-            max(0.0, float(retrieval_prior_weight)),
-            max(0.0, float(answer_support_weight)),
-        ]
-        total_weight = sum(weights) or 1.0
-        self.cross_encoder_weight = weights[0] / total_weight
-        self.retrieval_prior_weight = weights[1] / total_weight
-        self.answer_support_weight = weights[2] / total_weight
-        self.max_rank_drop = max(0, int(max_rank_drop))
+        # Legacy keyword arguments remain accepted for saved configurations and
+        # older callers. They cannot re-enable mixed scoring or rank protection.
+        self.cross_encoder_weight = 1.0
+        self.retrieval_prior_weight = 0.0
+        self.answer_support_weight = 0.0
+        self.max_rank_drop = 0
+        self.ordering_policy = ordering_policy
+        if input_mode not in {"truncate", "window_max", "window_top2_mean"}:
+            raise ValueError(f"Unknown BGE input mode: {input_mode}")
+        if window_overlap < 0:
+            raise ValueError("window_overlap must be nonnegative")
+        self.input_mode = input_mode
+        self.window_overlap = int(window_overlap)
         try:
             self.tokenizer = AutoTokenizer.from_pretrained(
                 str(model_path), local_files_only=True
@@ -66,6 +71,8 @@ class LocalBgeReranker:
         top_n: int,
         token,
     ) -> list[EvidenceChunk]:
+        if self.input_mode != "truncate":
+            return self._rerank_windows(question, candidates, top_n, token)
         scored: list[EvidenceChunk] = []
         for start in range(0, len(candidates), self.batch_size):
             token.throw_if_cancelled()
@@ -81,69 +88,120 @@ class LocalBgeReranker:
             with self._torch.inference_mode():
                 logits = self.model(**encoded).logits.reshape(-1)
                 scores = self._torch.sigmoid(logits).cpu().tolist()
-            for item, score in zip(batch, scores, strict=True):
+                raw_logits = logits.cpu().tolist()
+            for item, score, raw_logit in zip(batch, scores, raw_logits, strict=True):
+                item.rerank_raw_logit = float(raw_logit)
                 item.rerank_score = float(score)
-                if item.answer_support_score is None and item.fused_rank is None:
-                    # 兼容旧调用方：没有辅助信号时保持原始 Cross-Encoder 排序。
-                    item.rerank_score_combined = float(score)
-                else:
-                    item.rerank_score_combined = (
-                        self.cross_encoder_weight * float(score)
-                        + self.retrieval_prior_weight * retrieval_prior(item)
-                        + self.answer_support_weight * float(item.answer_support_score or 0.0)
-                    )
+                item.rerank_diagnostics = {"input_mode": "truncate", "max_length": self.max_length}
                 scored.append(item)
+        scored = self._order_scored(question, scored, token)
+        # Preserve the complete order for diagnostics and downstream selection.
+        self.last_scored_candidates = tuple(scored)
+        return scored[:max(1, int(top_n))]
+
+    def _windows(self, question: str, text: str):
+        """Token-aligned overlapping windows; every window repeats the query.
+
+        Offsets refer to the unchanged source text. No filename, Gold, query
+        expansion or business rules are involved. An overlong query is reported
+        explicitly rather than silently shortening it or dropping body tokens.
+        """
+        limit = min(self.max_length, int(self.tokenizer.model_max_length))
+        query_tokens = len(self.tokenizer(question, add_special_tokens=False)["input_ids"])
+        budget = limit - query_tokens - self.tokenizer.num_special_tokens_to_add(pair=True)
+        if budget <= 0:
+            raise RagModelValidationError("问题超过 BGE 输入预算，无法保留问题并读取证据")
+        encoded = self.tokenizer(
+            question, text, truncation="only_second", max_length=limit,
+            stride=min(self.window_overlap, budget - 1),
+            return_overflowing_tokens=True, return_offsets_mapping=True,
+        )
+        windows = []
+        for i, ids in enumerate(encoded["input_ids"]):
+            spans = [span for span, side in zip(encoded["offset_mapping"][i], encoded.sequence_ids(i))
+                     if side == 1 and span[1] > span[0]]
+            windows.append((
+                {key: encoded[key][i] for key in self.tokenizer.model_input_names if key in encoded},
+                {"start_char": min((a for a, _ in spans), default=0),
+                 "end_char": max((b for _, b in spans), default=0), "tokens": len(ids)},
+            ))
+        return windows
+
+    def _score_window_inputs(self, inputs, token):
+        results = []
+        for start in range(0, len(inputs), self.batch_size):
+            token.throw_if_cancelled()
+            encoded = self.tokenizer.pad(inputs[start:start+self.batch_size], padding=True, return_tensors="pt")
+            encoded = {key: value.to(self.model.device) for key, value in encoded.items()}
+            with self._torch.inference_mode():
+                logits = self.model(**encoded).logits.reshape(-1)
+                scores = self._torch.sigmoid(logits).cpu().tolist()
+                raw = logits.cpu().tolist()
+            results.extend(zip(scores, raw, strict=True))
+        return results
+
+    @staticmethod
+    def _aggregate_windows(scores, mode):
+        if not scores:
+            raise ValueError("Cannot aggregate empty BGE windows")
+        ordered = sorted(scores, reverse=True)
+        if mode == "window_max":
+            return ordered[0]
+        if mode == "window_top2_mean":
+            top = ordered[:2]
+            return sum(top) / len(top)
+        raise ValueError(f"Unknown window aggregation: {mode}")
+
+    def _rerank_windows(self, question, candidates, top_n, token):
+        import math
+        inputs, owners, windows = [], [], [[] for _ in candidates]
+        for index, item in enumerate(candidates):
+            token.throw_if_cancelled()
+            for encoded, metadata in self._windows(question, item.chunk.text):
+                inputs.append(encoded)
+                owners.append(index)
+                windows[index].append(metadata)
+        scored = self._score_window_inputs(inputs, token)
+        assert len(scored) == len(inputs)
+        offsets = [0] * len(candidates)
+        for owner, (score, logit) in zip(owners, scored, strict=True):
+            windows[owner][offsets[owner]].update(score=float(score), raw_logit=float(logit))
+            offsets[owner] += 1
+        for item, pieces in zip(candidates, windows, strict=True):
+            item.rerank_score = self._aggregate_windows([p["score"] for p in pieces], self.input_mode)
+            # A mean probability has no single model logit; record that distinction.
+            if self.input_mode == "window_max" or len(pieces) == 1:
+                item.rerank_raw_logit = max(pieces, key=lambda p: p["score"])["raw_logit"]
+            else:
+                p = min(1-1e-12, max(1e-12, item.rerank_score))
+                item.rerank_raw_logit = math.log(p / (1-p))
+            item.rerank_diagnostics = {
+                "input_mode": self.input_mode, "window_overlap": self.window_overlap,
+                "window_count": len(pieces), "body_chars": len(item.chunk.text),
+                "windows": pieces,
+                "logit_kind": "aggregate_probability_logit" if self.input_mode == "window_top2_mean" and len(pieces)>1 else "model_logit",
+            }
+        ordered = self._order_scored(question, candidates, token)
+        self.last_scored_candidates = tuple(ordered)
+        return ordered[:max(1, int(top_n))]
+
+    def _order_scored(self, question, candidates, token) -> list[EvidenceChunk]:
+        """BGE-only default; fusion is a deterministic tie breaker, not a bonus."""
+        scored = list(candidates)
+        for item in scored:
+            item.rerank_score_combined = item.rerank_score
+            item.rerank_diagnostics = {
+                **(item.rerank_diagnostics or {}),
+                'strategy': 'bge_base',
+                'reason': 'BGE score descending; no support bonus or fused-rank guard',
+            }
         scored.sort(
             key=lambda item: (
-                -float(item.rerank_score_combined if item.rerank_score_combined is not None
-                       else item.rerank_score or 0.0),
+                -float(item.rerank_score or 0.0),
                 -float(item.fused_score),
                 item.chunk.stable_chunk_id,
             )
         )
-        scored = self._apply_rank_guard(scored)
-        # 在同一次问答中保留完整重排顺序，供界面展示最终截断前的候选。
-        self.last_scored_candidates = tuple(scored)
-        return self._apply_document_diversity(scored, max(1, int(top_n)))
-
-    def _apply_rank_guard(self, candidates: Sequence[EvidenceChunk]) -> list[EvidenceChunk]:
-        """限制重排相对融合名次的最大后移，保持前置检索证据可追溯。"""
-
-        if self.max_rank_drop <= 0 or not candidates:
-            return list(candidates)
-        remaining = list(candidates)
-        output: list[EvidenceChunk] = []
-        for position in range(1, len(candidates) + 1):
-            due = [
-                item for item in remaining
-                if item.fused_rank is not None
-                and int(item.fused_rank) + self.max_rank_drop <= position
-            ]
-            if due:
-                pool = due
-            else:
-                pool = [
-                    item for item in remaining
-                    if item.fused_rank is None
-                    or int(item.fused_rank) + self.max_rank_drop >= position
-                ] or remaining
-            selected = pool[0]
-            output.append(selected)
-            remaining.remove(selected)
-        return output
-
-    @staticmethod
-    def _apply_document_diversity(
-        candidates: Sequence[EvidenceChunk], top_n: int, max_per_document: int = 3
-    ) -> list[EvidenceChunk]:
-        counts: dict[str, int] = {}
-        output: list[EvidenceChunk] = []
-        for item in candidates:
-            key = item.chunk.document_key
-            if counts.get(key, 0) >= max_per_document:
-                continue
-            counts[key] = counts.get(key, 0) + 1
-            output.append(item)
-            if len(output) >= top_n:
-                break
-        return output
+        if getattr(self, "ordering_policy", None) is not None:
+            scored = self.ordering_policy.order(question, scored, token)
+        return scored

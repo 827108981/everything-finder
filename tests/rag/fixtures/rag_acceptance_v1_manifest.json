@@ -1,0 +1,362 @@
+{
+  "bundle_id": "g000033-71ec3c52f3",
+  "gold_jsonl_sha256": "1101dbad9fff68ce5648f00a2fedb8a1053b2b24187d93654e4caec963f1af97",
+  "review_json_sha256": "7a8c51b029af5f63edf2899f9391dc10edd6e11e2ff95173a13f5aeedae9d7dd",
+  "original_50_sha256": "a56594cb13900105ffc16aef3d9091858d2cec4db1baa87e6aab959edc74ce27",
+  "case_count": 10,
+  "group_count": 10,
+  "review_counts": {
+    "pending": 10,
+    "reviewed": 0,
+    "disputed": 0
+  },
+  "behavior_counts": {
+    "answer": 10
+  },
+  "formal_eligible_count": 0,
+  "source_files": [
+    {
+      "file": "E:\\生化资料\\生化场景化培训教材-条码V1.1.pptx",
+      "sha256": "80a6cc52c28eacc115f8d019694fe55c2c2a64a13824b4ff074a832099f25082"
+    },
+    {
+      "file": "E:\\免疫资料\\中低速免疫\\2-课件PPT-线上\\公共\\LIS信息转运流程讲解.pptx",
+      "sha256": "64b9bbd06747f4002f9ed130530cd348bd77c1f04a21d4d0b7b66a1877c6cb85"
+    },
+    {
+      "file": "E:\\免疫资料\\中低速免疫\\2-课件PPT-线上\\公共\\检验科样本检测流程讲解.pptx",
+      "sha256": "5abf7e8e74528dd6b381e6944751c5f2eedef1398c7f05476f2470d67cc40bed"
+    },
+    {
+      "file": "E:\\免疫资料\\中低速免疫\\2-课件PPT-线上\\公共\\IVD安全防护培训教材_工程师.pptx",
+      "sha256": "566adc33ec549e12bf9314be43468b01def25a1efabf58e53793d4f90b341311"
+    },
+    {
+      "file": "E:\\生化资料\\M1000【LA22】常见问题处理指南V1.6.pptx",
+      "sha256": "67717eef19b8fe09bb780142531a7ad80031de7deb05eda9360ce68d7ef97153"
+    },
+    {
+      "file": "E:\\生化免疫临床知识\\免疫基础知识及市场潜力分析-麻攀.pptx",
+      "sha256": "f8101eebadcf51359e971df7944c8968cbf2d829d81902935dd0c6fc449d6814"
+    },
+    {
+      "file": "E:\\生化资料\\BS5000\\BS-5000系列_工程师品培训PPT_V1.0_CH\\A-CMSH-26001-BS-5000系列_工程师品培训PPT_V1.0_CH\\IVD_生化_BS-5000系列_04 样本分注子系统.pptx",
+      "sha256": "41f4a5afd612ec1bf07527fc02c949a4fee23e2bdf0fbc745e2d80fc71c5a7b5"
+    },
+    {
+      "file": "E:\\生化资料\\BS5000\\BS-5000系列_工程师品培训PPT_V1.0_CH\\A-CMSH-26001-BS-5000系列_工程师品培训PPT_V1.0_CH\\IVD_生化_BS-5000系列_05 试剂子系统.pptx",
+      "sha256": "74610fcc60272b653aebfc93dfe7ea0556c09f3a3ded85f742b9585f1cdee932"
+    },
+    {
+      "file": "E:\\生化资料\\BS5000\\BS-5000系列_工程师品培训PPT_V1.0_CH\\A-CMSH-26001-BS-5000系列_工程师品培训PPT_V1.0_CH\\IVD_生化_BS-5000系列_07 搅拌与自动清洗子系统.pptx",
+      "sha256": "119747ac1b8fbd866731193a2c59ba66660b6d6552cfb1092679083940a5c178"
+    },
+    {
+      "file": "E:\\生化资料\\BS5000\\BS-5000系列_工程师品培训PPT_V1.0_CH\\A-CMSH-26001-BS-5000系列_工程师品培训PPT_V1.0_CH\\IVD_生化_BS-5000系列_10 热工系统.pptx",
+      "sha256": "0811ea07aff8c39484e00c0c5abce8c8a7a2ff64ec9d2c75b095cbaef640c0f1"
+    }
+  ],
+  "checks": {
+    "json_jsonl_same_cases": true,
+    "loader_reviewed_only_false": 10,
+    "loader_reviewed_only_true": "rejected_pending_as_expected",
+    "positive_quotes_original_and_index_exact": 16,
+    "negative_quotes_original_and_index_exact": 10,
+    "source_slides_rendered_and_viewed": 21,
+    "source_files_unchanged_after_readonly_render": true,
+    "old_50_evidence_filename_families_disjoint": true,
+    "rag_system_answers_or_rankings_used": false,
+    "reference_answers_independent_of_figures": true
+  },
+  "usage": "人工逐题审核后冻结；在固定方案上进行验收，不能用本批选择参数后继续宣称独立验收。审核修改会改变SHA256，正式冻结时重新记录。",
+  "evidence_audit": "E:\\code\\everything-finder\\reports\\rag_acceptance_v1_source_audit\\evidence_audit.json",
+  "evidence_checks": [
+    {
+      "file": "E:\\生化资料\\生化场景化培训教材-条码V1.1.pptx",
+      "page": 16,
+      "quote": "最大条形码标签宽度\n55mm\n条码打印宽度A\n≥10mm\n条码打印宽度B\n≤45mm\n条码两侧静区C\n≥5mm\n最小条形码高度\n10mm",
+      "kind": "positive",
+      "original_slide_xml": "exact_whitespace_normalized",
+      "published_index_body": "exact_whitespace_normalized",
+      "chunk_id": "a4ceed9dc3df38bb3c980770596adbd5c9a3d16711fb55352ad094e767355d37",
+      "source_sha256": "80a6cc52c28eacc115f8d019694fe55c2c2a64a13824b4ff074a832099f25082",
+      "render_visual_check": "对应幻灯片已导出并查看；尚未经业务人员审核"
+    },
+    {
+      "file": "E:\\生化资料\\生化场景化培训教材-条码V1.1.pptx",
+      "page": 19,
+      "quote": "迈瑞仪器默认Code128码；\n勾选码制越多条码解析速度越慢；",
+      "kind": "hard_negative",
+      "original_slide_xml": "exact_whitespace_normalized",
+      "published_index_body": "exact_whitespace_normalized",
+      "chunk_id": "630b5d49b739dc265b7e37131eb171e783a117931f4cd1ff82a1390e9575af12",
+      "source_sha256": "80a6cc52c28eacc115f8d019694fe55c2c2a64a13824b4ff074a832099f25082",
+      "render_visual_check": "对应幻灯片已导出并查看；尚未经业务人员审核"
+    },
+    {
+      "file": "E:\\免疫资料\\中低速免疫\\2-课件PPT-线上\\公共\\LIS信息转运流程讲解.pptx",
+      "page": 8,
+      "quote": "单向LIS，仪器单方面向LIS发送结果，测试项目操作医生指定\n双向LIS，仪器条码扫描→查询LIS获取检测模式/项目→按LIS信息测试，测试项目受LIS信息控制",
+      "kind": "positive",
+      "original_slide_xml": "exact_whitespace_normalized",
+      "published_index_body": "exact_whitespace_normalized",
+      "chunk_id": "43f0a57cef8e49667ad5f6dfe902be09291b896ba726dffa92a133601d432090",
+      "source_sha256": "64b9bbd06747f4002f9ed130530cd348bd77c1f04a21d4d0b7b66a1877c6cb85",
+      "render_visual_check": "对应幻灯片已导出并查看；尚未经业务人员审核"
+    },
+    {
+      "file": "E:\\免疫资料\\中低速免疫\\2-课件PPT-线上\\公共\\LIS信息转运流程讲解.pptx",
+      "page": 10,
+      "quote": "IP同网段不同IP\n仪器软件与LIS软件，一个为LIS服务器，另一个为LIS客户端，不能同身份",
+      "kind": "hard_negative",
+      "original_slide_xml": "exact_whitespace_normalized",
+      "published_index_body": "exact_whitespace_normalized",
+      "chunk_id": "16d775c2031cab60b1747401cc293424cf198cf7a6b69a866d2026736522110b",
+      "source_sha256": "64b9bbd06747f4002f9ed130530cd348bd77c1f04a21d4d0b7b66a1877c6cb85",
+      "render_visual_check": "对应幻灯片已导出并查看；尚未经业务人员审核"
+    },
+    {
+      "file": "E:\\免疫资料\\中低速免疫\\2-课件PPT-线上\\公共\\检验科样本检测流程讲解.pptx",
+      "page": 5,
+      "quote": "TAT时间即检测周转时间（turn-around time，TAT），是指临床科室提出检验申请到患者得到检验报告的时间",
+      "kind": "positive",
+      "original_slide_xml": "exact_whitespace_normalized",
+      "published_index_body": "exact_whitespace_normalized",
+      "chunk_id": "fe8702051b4b12a5e81c97bf2168f4ce9f3006ec86bba9f58fb6b0cd8b653af8",
+      "source_sha256": "5abf7e8e74528dd6b381e6944751c5f2eedef1398c7f05476f2470d67cc40bed",
+      "render_visual_check": "对应幻灯片已导出并查看；尚未经业务人员审核"
+    },
+    {
+      "file": "E:\\免疫资料\\中低速免疫\\2-课件PPT-线上\\公共\\检验科样本检测流程讲解.pptx",
+      "page": 5,
+      "quote": "实验室内TAT（从实验室收到标本到发送报告的时间‌）",
+      "kind": "positive",
+      "original_slide_xml": "exact_whitespace_normalized",
+      "published_index_body": "exact_whitespace_normalized",
+      "chunk_id": "fe8702051b4b12a5e81c97bf2168f4ce9f3006ec86bba9f58fb6b0cd8b653af8",
+      "source_sha256": "5abf7e8e74528dd6b381e6944751c5f2eedef1398c7f05476f2470d67cc40bed",
+      "render_visual_check": "对应幻灯片已导出并查看；尚未经业务人员审核"
+    },
+    {
+      "file": "E:\\免疫资料\\中低速免疫\\2-课件PPT-线上\\公共\\检验科样本检测流程讲解.pptx",
+      "page": 5,
+      "quote": "检验前TAT（从标本采集到实验室接收标本的时间）",
+      "kind": "positive",
+      "original_slide_xml": "exact_whitespace_normalized",
+      "published_index_body": "exact_whitespace_normalized",
+      "chunk_id": "fe8702051b4b12a5e81c97bf2168f4ce9f3006ec86bba9f58fb6b0cd8b653af8",
+      "source_sha256": "5abf7e8e74528dd6b381e6944751c5f2eedef1398c7f05476f2470d67cc40bed",
+      "render_visual_check": "对应幻灯片已导出并查看；尚未经业务人员审核"
+    },
+    {
+      "file": "E:\\免疫资料\\中低速免疫\\2-课件PPT-线上\\公共\\LIS信息转运流程讲解.pptx",
+      "page": 9,
+      "quote": "根据复检规则，审核规则，临床要求等进行结果审核，避免误检",
+      "kind": "hard_negative",
+      "original_slide_xml": "exact_whitespace_normalized",
+      "published_index_body": "exact_whitespace_normalized",
+      "chunk_id": "3b6a4288cf351945f3fdb0d4207d63eb3cb211a139a1a6c91a3cf3fc4e51f6a0",
+      "source_sha256": "64b9bbd06747f4002f9ed130530cd348bd77c1f04a21d4d0b7b66a1877c6cb85",
+      "render_visual_check": "对应幻灯片已导出并查看；尚未经业务人员审核"
+    },
+    {
+      "file": "E:\\免疫资料\\中低速免疫\\2-课件PPT-线上\\公共\\IVD安全防护培训教材_工程师.pptx",
+      "page": 10,
+      "quote": "棉纱手套：\n使用场景：现场安装搬运、移动设备时，拆卸或打包物料 时需佩戴。\n防滑、耐磨、防划伤。",
+      "kind": "positive",
+      "original_slide_xml": "exact_whitespace_normalized",
+      "published_index_body": "exact_whitespace_normalized",
+      "chunk_id": "e606c2c093013fec2e3c2a2a04bfcf463c225d2682f35adb88f8c300937c12e4",
+      "source_sha256": "566adc33ec549e12bf9314be43468b01def25a1efabf58e53793d4f90b341311",
+      "render_visual_check": "对应幻灯片已导出并查看；尚未经业务人员审核"
+    },
+    {
+      "file": "E:\\免疫资料\\中低速免疫\\2-课件PPT-线上\\公共\\IVD安全防护培训教材_工程师.pptx",
+      "page": 10,
+      "quote": "乳胶手套：\n使用场景：检验科进行设备维修、维护时佩戴；对仪器进行操作时佩戴\n防止有毒或有生物风险液体溅到手上或手部划伤；\n防止药液，消毒剂对手部产生的伤害及生物污染。",
+      "kind": "positive",
+      "original_slide_xml": "exact_whitespace_normalized",
+      "published_index_body": "exact_whitespace_normalized",
+      "chunk_id": "e606c2c093013fec2e3c2a2a04bfcf463c225d2682f35adb88f8c300937c12e4",
+      "source_sha256": "566adc33ec549e12bf9314be43468b01def25a1efabf58e53793d4f90b341311",
+      "render_visual_check": "对应幻灯片已导出并查看；尚未经业务人员审核"
+    },
+    {
+      "file": "E:\\免疫资料\\中低速免疫\\2-课件PPT-线上\\公共\\IVD安全防护培训教材_工程师.pptx",
+      "page": 9,
+      "quote": "防砸鞋：\n使用场景：涉及TLA等大型设备安装，搬运重物时，用叉车搬运整机部件穿着。",
+      "kind": "hard_negative",
+      "original_slide_xml": "exact_whitespace_normalized",
+      "published_index_body": "exact_whitespace_normalized",
+      "chunk_id": "f5516ab09715bce921324f7b0e849c6dc114c6b6e58e211b2976e36e005f02ca",
+      "source_sha256": "566adc33ec549e12bf9314be43468b01def25a1efabf58e53793d4f90b341311",
+      "render_visual_check": "对应幻灯片已导出并查看；尚未经业务人员审核"
+    },
+    {
+      "file": "E:\\生化资料\\M1000【LA22】常见问题处理指南V1.6.pptx",
+      "page": 10,
+      "quote": "原因：标准白板上血清，影响到相机的高度识别；去盖功能没有做去盖动作。\n去盖模块在使用时一定要保证标准白板干净，不能有划痕。",
+      "kind": "positive",
+      "original_slide_xml": "exact_whitespace_normalized",
+      "published_index_body": "exact_whitespace_normalized",
+      "chunk_id": "be3d8e0f70828c14b4d9e164b7b196dd45ee1addfa9dbe94eef6d1e884187b89",
+      "source_sha256": "67717eef19b8fe09bb780142531a7ad80031de7deb05eda9360ce68d7ef97153",
+      "render_visual_check": "对应幻灯片已导出并查看；尚未经业务人员审核"
+    },
+    {
+      "file": "E:\\生化资料\\M1000【LA22】常见问题处理指南V1.6.pptx",
+      "page": 11,
+      "quote": "相机的标准板是白板，白色试管帽容易使相机识别错误，",
+      "kind": "hard_negative",
+      "original_slide_xml": "exact_whitespace_normalized",
+      "published_index_body": "exact_whitespace_normalized",
+      "chunk_id": "600c918fb3dca0b2b32456414943351ef4bab2abca49da13362a5cc467a3e487",
+      "source_sha256": "67717eef19b8fe09bb780142531a7ad80031de7deb05eda9360ce68d7ef97153",
+      "render_visual_check": "对应幻灯片已导出并查看；尚未经业务人员审核"
+    },
+    {
+      "file": "E:\\生化免疫临床知识\\免疫基础知识及市场潜力分析-麻攀.pptx",
+      "page": 8,
+      "quote": "Fab区域:  包括抗原 (Ag) 结合位点，不同的抗体间此位点也不同。\nFc区域:   在同一种属抗体中，结构恒定的区域。",
+      "kind": "positive",
+      "original_slide_xml": "exact_whitespace_normalized",
+      "published_index_body": "exact_whitespace_normalized",
+      "chunk_id": "70b33c835691b9e9a6d6dfb52bb6639ee67904cf326179746f86bd9bba334201",
+      "source_sha256": "f8101eebadcf51359e971df7944c8968cbf2d829d81902935dd0c6fc449d6814",
+      "render_visual_check": "对应幻灯片已导出并查看；尚未经业务人员审核"
+    },
+    {
+      "file": "E:\\生化免疫临床知识\\免疫基础知识及市场潜力分析-麻攀.pptx",
+      "page": 7,
+      "quote": "特异性：抗原抗体特异性反应——抗原决定簇（抗原表位）。",
+      "kind": "hard_negative",
+      "original_slide_xml": "exact_whitespace_normalized",
+      "published_index_body": "exact_whitespace_normalized",
+      "chunk_id": "793ca9ea428197d007db0602455076ded5dfba054ee8dfcfa3a8a38e63c9f7fb",
+      "source_sha256": "f8101eebadcf51359e971df7944c8968cbf2d829d81902935dd0c6fc449d6814",
+      "render_visual_check": "对应幻灯片已导出并查看；尚未经业务人员审核"
+    },
+    {
+      "file": "E:\\生化资料\\BS5000\\BS-5000系列_工程师品培训PPT_V1.0_CH\\A-CMSH-26001-BS-5000系列_工程师品培训PPT_V1.0_CH\\IVD_生化_BS-5000系列_04 样本分注子系统.pptx",
+      "page": 9,
+      "quote": "因需要吸全血样本，糖化样本针与普通样本针相比，连接针尖未做保护层的细部较长，超过5cm，普通针这部分则较短",
+      "kind": "positive",
+      "original_slide_xml": "exact_whitespace_normalized",
+      "published_index_body": "exact_whitespace_normalized",
+      "chunk_id": "5d649c72690b1fa1db6768f1c3dbaea7ed294b71e03c5a9a43f60b3219eff9e7",
+      "source_sha256": "41f4a5afd612ec1bf07527fc02c949a4fee23e2bdf0fbc745e2d80fc71c5a7b5",
+      "render_visual_check": "对应幻灯片已导出并查看；尚未经业务人员审核"
+    },
+    {
+      "file": "E:\\生化资料\\BS5000\\BS-5000系列_工程师品培训PPT_V1.0_CH\\A-CMSH-26001-BS-5000系列_工程师品培训PPT_V1.0_CH\\IVD_生化_BS-5000系列_04 样本分注子系统.pptx",
+      "page": 8,
+      "quote": "ISE样本针驱动",
+      "kind": "hard_negative",
+      "original_slide_xml": "exact_whitespace_normalized",
+      "published_index_body": "exact_whitespace_normalized",
+      "chunk_id": "9a424d07c3c07991f750858ac8e4b65f3a63fe785ee5665dfd664174f1383fd2",
+      "source_sha256": "41f4a5afd612ec1bf07527fc02c949a4fee23e2bdf0fbc745e2d80fc71c5a7b5",
+      "render_visual_check": "对应幻灯片已导出并查看；尚未经业务人员审核"
+    },
+    {
+      "file": "E:\\生化资料\\BS5000\\BS-5000系列_工程师品培训PPT_V1.0_CH\\A-CMSH-26001-BS-5000系列_工程师品培训PPT_V1.0_CH\\IVD_生化_BS-5000系列_05 试剂子系统.pptx",
+      "page": 12,
+      "quote": "试剂装载缓存盘：支持最多同时装载20个试剂瓶；支持测试中不停机装载。",
+      "kind": "positive",
+      "original_slide_xml": "exact_whitespace_normalized",
+      "published_index_body": "exact_whitespace_normalized",
+      "chunk_id": "30c931014acc07b6f123ffb8b3e42165db731d06ff9fb1f0c7fc66a9a6a2d761",
+      "source_sha256": "74610fcc60272b653aebfc93dfe7ea0556c09f3a3ded85f742b9585f1cdee932",
+      "render_visual_check": "对应幻灯片已导出并查看；尚未经业务人员审核"
+    },
+    {
+      "file": "E:\\生化资料\\BS5000\\BS-5000系列_工程师品培训PPT_V1.0_CH\\A-CMSH-26001-BS-5000系列_工程师品培训PPT_V1.0_CH\\IVD_生化_BS-5000系列_05 试剂子系统.pptx",
+      "page": 13,
+      "quote": "当用户关闭仓门后自动执行装载盘扫描，检查是否存在待装载试剂。仓门在装载过程中锁紧，避免用户夹伤或意外开启影响试剂装载。",
+      "kind": "positive",
+      "original_slide_xml": "exact_whitespace_normalized",
+      "published_index_body": "exact_whitespace_normalized",
+      "chunk_id": "66e8ace294a9a9ade990bd9ec5b97236fae369f0919056af6f23e72be4a20c01",
+      "source_sha256": "74610fcc60272b653aebfc93dfe7ea0556c09f3a3ded85f742b9585f1cdee932",
+      "render_visual_check": "对应幻灯片已导出并查看；尚未经业务人员审核"
+    },
+    {
+      "file": "E:\\生化资料\\BS5000\\BS-5000系列_工程师品培训PPT_V1.0_CH\\A-CMSH-26001-BS-5000系列_工程师品培训PPT_V1.0_CH\\IVD_生化_BS-5000系列_05 试剂子系统.pptx",
+      "page": 13,
+      "quote": "每次触发按键试剂盘旋转1个扇区，按键滤波时间0.2s防止误触。扇区按照A→B→C→D→A顺序切换",
+      "kind": "positive",
+      "original_slide_xml": "exact_whitespace_normalized",
+      "published_index_body": "exact_whitespace_normalized",
+      "chunk_id": "66e8ace294a9a9ade990bd9ec5b97236fae369f0919056af6f23e72be4a20c01",
+      "source_sha256": "74610fcc60272b653aebfc93dfe7ea0556c09f3a3ded85f742b9585f1cdee932",
+      "render_visual_check": "对应幻灯片已导出并查看；尚未经业务人员审核"
+    },
+    {
+      "file": "E:\\生化资料\\BS5000\\BS-5000系列_工程师品培训PPT_V1.0_CH\\A-CMSH-26001-BS-5000系列_工程师品培训PPT_V1.0_CH\\IVD_生化_BS-5000系列_05 试剂子系统.pptx",
+      "page": 11,
+      "quote": "每个试剂盘有70个试剂位，总共140个试剂位",
+      "kind": "hard_negative",
+      "original_slide_xml": "exact_whitespace_normalized",
+      "published_index_body": "exact_whitespace_normalized",
+      "chunk_id": "dd1df313adf5570386c20973185f8a6459e5b46ea8cecddbfa8a790b7d257d2c",
+      "source_sha256": "74610fcc60272b653aebfc93dfe7ea0556c09f3a3ded85f742b9585f1cdee932",
+      "render_visual_check": "对应幻灯片已导出并查看；尚未经业务人员审核"
+    },
+    {
+      "file": "E:\\生化资料\\BS5000\\BS-5000系列_工程师品培训PPT_V1.0_CH\\A-CMSH-26001-BS-5000系列_工程师品培训PPT_V1.0_CH\\IVD_生化_BS-5000系列_07 搅拌与自动清洗子系统.pptx",
+      "page": 8,
+      "quote": "基材采用316L材质，桨叶表面采用疏水特氟龙涂层；\n样本搅拌杆采用螺旋浆片结构，混匀小体积样本和高粘R1试剂；\n试剂搅拌杆采用偏心浆片结构，保证混匀的一致性",
+      "kind": "positive",
+      "original_slide_xml": "exact_whitespace_normalized",
+      "published_index_body": "exact_whitespace_normalized",
+      "chunk_id": "60dc0ee8b0c87e4ea25f3af2f2b8d15765b9a6db15b6d4618f06a7c1c1b1e43c",
+      "source_sha256": "119747ac1b8fbd866731193a2c59ba66660b6d6552cfb1092679083940a5c178",
+      "render_visual_check": "对应幻灯片已导出并查看；尚未经业务人员审核"
+    },
+    {
+      "file": "E:\\生化资料\\BS5000\\BS-5000系列_工程师品培训PPT_V1.0_CH\\A-CMSH-26001-BS-5000系列_工程师品培训PPT_V1.0_CH\\IVD_生化_BS-5000系列_07 搅拌与自动清洗子系统.pptx",
+      "page": 4,
+      "quote": "样本搅拌组件和试剂搅拌相同，都是3组6根搅拌",
+      "kind": "hard_negative",
+      "original_slide_xml": "exact_whitespace_normalized",
+      "published_index_body": "exact_whitespace_normalized",
+      "chunk_id": "5c98847a31919465e891463fa09783cb0b0104f1c0508c90423f17fbd1fd9bce",
+      "source_sha256": "119747ac1b8fbd866731193a2c59ba66660b6d6552cfb1092679083940a5c178",
+      "render_visual_check": "对应幻灯片已导出并查看；尚未经业务人员审核"
+    },
+    {
+      "file": "E:\\生化资料\\BS5000\\BS-5000系列_工程师品培训PPT_V1.0_CH\\A-CMSH-26001-BS-5000系列_工程师品培训PPT_V1.0_CH\\IVD_生化_BS-5000系列_10 热工系统.pptx",
+      "page": 10,
+      "quote": "试剂制冷全天候24小时工作，为试剂盘提供制冷，冷藏温度2~8℃。",
+      "kind": "positive",
+      "original_slide_xml": "exact_whitespace_normalized",
+      "published_index_body": "exact_whitespace_normalized",
+      "chunk_id": "21cab0e4c4e527febaff346344e9c74f7c700c1de8d9636470fc97c957493645",
+      "source_sha256": "0811ea07aff8c39484e00c0c5abce8c8a7a2ff64ec9d2c75b095cbaef640c0f1",
+      "render_visual_check": "对应幻灯片已导出并查看；尚未经业务人员审核"
+    },
+    {
+      "file": "E:\\生化资料\\BS5000\\BS-5000系列_工程师品培训PPT_V1.0_CH\\A-CMSH-26001-BS-5000系列_工程师品培训PPT_V1.0_CH\\IVD_生化_BS-5000系列_10 热工系统.pptx",
+      "page": 10,
+      "quote": "制冷液：循环于制冷管道中的液体主要成分为乙二醇，具有较低的冰点。\n制冷循环泵：提供制冷液循环的动力",
+      "kind": "positive",
+      "original_slide_xml": "exact_whitespace_normalized",
+      "published_index_body": "exact_whitespace_normalized",
+      "chunk_id": "21cab0e4c4e527febaff346344e9c74f7c700c1de8d9636470fc97c957493645",
+      "source_sha256": "0811ea07aff8c39484e00c0c5abce8c8a7a2ff64ec9d2c75b095cbaef640c0f1",
+      "render_visual_check": "对应幻灯片已导出并查看；尚未经业务人员审核"
+    },
+    {
+      "file": "E:\\生化资料\\BS5000\\BS-5000系列_工程师品培训PPT_V1.0_CH\\A-CMSH-26001-BS-5000系列_工程师品培训PPT_V1.0_CH\\IVD_生化_BS-5000系列_10 热工系统.pptx",
+      "page": 6,
+      "quote": "反应盘温度范围： 37. 0±0.3°C",
+      "kind": "hard_negative",
+      "original_slide_xml": "exact_whitespace_normalized",
+      "published_index_body": "exact_whitespace_normalized",
+      "chunk_id": "de73f6c18286be171c465b96fd734dfb97062654f124794eed036b21e3a88db2",
+      "source_sha256": "0811ea07aff8c39484e00c0c5abce8c8a7a2ff64ec9d2c75b095cbaef640c0f1",
+      "render_visual_check": "对应幻灯片已导出并查看；尚未经业务人员审核"
+    }
+  ],
+  "revision_notes": "2026-11-01：第007题截取可独立支持答案的原文短句，去掉图示指代；全部10题新增完整reference_answer，区分原文证据与参考答案，审核状态仍pending。"
+}

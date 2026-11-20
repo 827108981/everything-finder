@@ -33,6 +33,74 @@ def _of(plan, kind: ConstraintKind, value: str):
     return next(item for item in plan.constraints if item.kind is kind and item.value == value)
 
 
+@pytest.mark.parametrize("question", [
+    "这个项目需要进行哪些处理步骤？", "项目怎么复测？", "项目如何复测？",
+])
+def test_generic_project_noun_stays_searchable_without_applicability_gate(question):
+    plan = QueryInterpreter().interpret(question)
+    assert "项目" in plan.entities
+    assert plan.semantic_query == question
+    assert not any(c.value == "项目" and c.kind in {ConstraintKind.OBJECT, ConstraintKind.TOPIC}
+                   for c in plan.constraints)
+    direct = _candidate("direct", "先复测两次。", score=0.9)
+    background = _candidate("background", "项目的背景介绍。", score=0.5)
+    ranked = ConstraintMatcher().evaluate(plan, [direct, background])
+    result = EvidencePolicy().evaluate(RagQuery(text=question, final_top_k=1), ranked, plan=plan)
+    assert result.accepted == (direct,)
+
+
+@pytest.mark.parametrize(("phrase", "value"), [
+    ("单个项目", "single"), ("多个项目", "multiple"), ("所有项目", "all"),
+])
+def test_project_scope_and_material_objects_remain_required(phrase, value):
+    plan = QueryInterpreter().interpret(f"CL-8000i {phrase}样本检测发光值偏低怎么办？")
+    assert _of(plan, ConstraintKind.SCOPE, value).is_hard
+    assert _of(plan, ConstraintKind.STAGE, "sample_test").is_hard
+    assert _of(plan, ConstraintKind.DIRECTION, "low").is_hard
+    assert _of(plan, ConstraintKind.OBJECT, "样本").is_hard
+    assert _of(plan, ConstraintKind.OBJECT, "发光值").is_hard
+    assert any("cl-8000i" in value.casefold() for value in plan.entities)
+
+
+@pytest.mark.parametrize("phrase", ["几乎所有项目", "大部分项目", "大多数项目"])
+def test_nearly_all_scope_is_preserved_as_distinct_condition(phrase):
+    plan = QueryInterpreter(bound_conditions=True).interpret(f"{phrase}定标失败，发光值偏低，怎么处理？")
+    scope = _of(plan, ConstraintKind.SCOPE, "most")
+    assert scope.is_hard
+    assert scope.source_text == phrase
+    assert scope.value != "all"
+
+
+def test_scope_checker_rejects_single_project_for_nearly_all_question():
+    plan = QueryInterpreter(bound_conditions=True).interpret("几乎所有发光项目定标失败，发光值低于1000，先查哪里？")
+    wrong = _candidate("wrong", "故障：个别项目定标失败，报DEV。解决思路：更换试剂后重新定标。", score=.99)
+    right = _candidate("right", "故障：几乎所有项目发光值普遍偏低。可能原因：底物管路问题。", score=.7)
+    ranked = ConstraintMatcher(local_conditions=True).evaluate(plan, [wrong, right])
+    assert wrong.constraint_decision.required_conflict_count == 1
+    decision = EvidencePolicy(min_rerank_score=.1).evaluate(
+        RagQuery(text=plan.original_text, final_top_k=2), ranked, plan=plan,
+    )
+    assert [item.chunk.stable_chunk_id for item in decision.accepted] == ["right"]
+
+
+def test_multi_scope_branches_remain_unknown_instead_of_whole_chunk_rejection():
+    plan = QueryInterpreter(bound_conditions=True).interpret("几乎所有项目定标失败时怎么排查？")
+    mixed = _candidate("mixed", "个别项目定标失败报DEV；几乎所有项目发光值普遍偏低时检查底物。")
+    checked = ConstraintMatcher(local_conditions=True).evaluate(plan, [mixed])[0]
+    assert checked.constraint_decision.required_conflict_count == 0
+
+
+def test_named_project_remains_in_search_and_scope_conflicts_still_reject():
+    plan = QueryInterpreter().interpret("只有一个项目 ALT 样本检测发光值偏低怎么办？")
+    assert any("alt" in t.casefold() for t in plan.lexical_terms)
+    right = _candidate("right", "单个项目样本检测发光值偏低，应复测。")
+    wrong = _candidate("wrong", "所有项目样本检测发光值偏低，应检查底物。", score=0.99)
+    ranked = ConstraintMatcher().evaluate(plan, [wrong, right])
+    decision = EvidencePolicy().evaluate(RagQuery(text=plan.original_text), ranked, plan=plan)
+    assert decision.accepted == (right,)
+    assert any(cid == "wrong" and "冲突" in why for cid, why in decision.rejected)
+
+
 def test_equal_condition_decisions_keep_rerank_order() -> None:
     plan = QueryInterpreter().interpret("BS-2800M 生化分析仪的试剂盘采用什么制冷方式？")
     first = _candidate("first", "BS-2800M 生化分析仪试剂盘采用压缩机制冷。", score=0.7)

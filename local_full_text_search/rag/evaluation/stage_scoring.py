@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 from typing import Any
+import hashlib
 
 from local_full_text_search.rag.content_identity import canonical_content
 from local_full_text_search.rag.evaluation.evidence_matcher import GoldEvidenceMatch
 
 
-def _part_rank(part, quote: str, candidates: list[dict[str, Any]], stage: str) -> int | None:
+SCORER_VERSION = "source-quote-v3"
+
+def _part_rank(part, quote: str, candidates: list[dict[str, Any]], stage: str, *, require_text: bool = False) -> int | None:
     expected = canonical_content(quote)[part.quote_start:part.quote_end]
     for rank, candidate in enumerate(candidates, 1):
         ids = {str(candidate.get("chunk_id") or "")}
@@ -16,9 +19,15 @@ def _part_rank(part, quote: str, candidates: list[dict[str, Any]], stage: str) -
         if part.chunk_id not in ids:
             continue
         actual = candidate.get("included_text") if stage == "context" else candidate.get("text")
+        if require_text and not isinstance(actual, str):
+            continue
         # 旧运行没有保存正文时只能回退 ID；新版运行必须核对实际文字。
         if actual is not None and expected and expected not in canonical_content(str(actual)):
             continue
+        if require_text and getattr(part, "source_quote_occurrences", 1) > 1:
+            # A shared number in a projected row does not locate its source row.
+            if hashlib.sha256(canonical_content(actual).encode("utf-8")).hexdigest() != part.source_canonical_hash:
+                continue
         return rank
     return None
 
@@ -37,7 +46,8 @@ def score_stage(
         for alternative in evidence.alternatives:
             if not alternative.confirmed:
                 continue
-            part_ranks = [_part_rank(part, evidence.quote, candidates, stage) for part in alternative.parts]
+            part_ranks = [_part_rank(part, evidence.quote, candidates, stage,
+                                     require_text=stage == "context") for part in alternative.parts]
             present_ranks = [rank for rank in part_ranks if rank is not None]
             if present_ranks:
                 first_fragment_ranks[evidence.evidence_id] = min(
@@ -55,18 +65,43 @@ def score_stage(
             ids = {str(candidate.get("chunk_id") or "")}
             ids.update(str(value) for value in candidate.get("member_chunk_ids", []))
             if ids.intersection(evidence.chunk_ids):
+                if stage == "context":
+                    actual = candidate.get("included_text")
+                    if not isinstance(actual, str) or not canonical_content(evidence.quote) or canonical_content(evidence.quote) not in canonical_content(actual):
+                        continue
                 complete_ranks[evidence.evidence_id] = rank
                 first_fragment_ranks[evidence.evidence_id] = rank
-                match_types[evidence.evidence_id] = "legacy_id_only"
+                match_types[evidence.evidence_id] = "legacy_quote_source" if stage == "context" else "legacy_id_only"
                 break
     negative_ids: list[str] = []
+    page_only_ids: list[str] = []
+    unresolved_ids: list[str] = []
+    negative_ranks: dict[str, int] = {}
     for evidence in negatives:
-        if any(
+        source_hit = any(
             {str(item.get("chunk_id") or ""), *map(str, item.get("member_chunk_ids", []))}
             .intersection(evidence.chunk_ids)
             for item in candidates
-        ):
+        )
+        confirmed = [a for a in evidence.alternatives if a.confirmed]
+        completion_ranks = []
+        for alternative in confirmed:
+            ranks = [_part_rank(part, evidence.quote, candidates, stage, require_text=True)
+                     for part in alternative.parts]
+            if ranks and all(rank is not None for rank in ranks):
+                completion_ranks.append(max(ranks))
+        complete = bool(completion_ranks)
+        if complete:
             negative_ids.append(evidence.evidence_id)
+            negative_ranks[evidence.evidence_id] = min(completion_ranks)
+        elif source_hit:
+            page_only_ids.append(evidence.evidence_id)
+            if not confirmed or any(getattr(p, "source_quote_occurrences", 1) > 1 for a in confirmed for p in a.parts) or not any(
+                isinstance(c.get("included_text") if stage == "context" else c.get("text"), str)
+                for c in candidates
+                if {str(c.get("chunk_id") or ""), *map(str, c.get("member_chunk_ids", []))}.intersection(evidence.chunk_ids)
+            ):
+                unresolved_ids.append(evidence.evidence_id)
     first_gold = min(complete_ranks.values()) if complete_ranks else None
     total = len(positives)
     return {
@@ -83,4 +118,8 @@ def score_stage(
         "gold_match_types": match_types,
         "hard_negative_found": len(negative_ids),
         "hard_negative_ids": negative_ids,
+        "hard_negative_completion_ranks": negative_ranks,
+        "hard_negative_page_only_ids": page_only_ids,
+        "hard_negative_unresolved_ids": unresolved_ids,
+        "scorer_version": SCORER_VERSION,
     }

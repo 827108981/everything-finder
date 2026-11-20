@@ -1,0 +1,771 @@
+{
+  "_阅读说明": {
+    "用途": "独立验收候选集：10个新业务问题；不是v3扩充或替换；审核后冻结，禁止据验收结果调参再宣称独立通过。",
+    "状态": "全部pending，仅做来源核验与加载校验；未执行RAG检索、重排、模型回答或答案判分。",
+    "索引": "g000033-71ec3c52f3",
+    "适用性": "本批为answer类新主题验收，不能单独代表澄清、拒答、部分回答能力；10题不支持总体泛化的统计结论。",
+    "独立性": "10个主证据文件均未用于旧50题正反例；不是旧题改写。共用原索引，允许资料仍存在于搜索库；医工词汇和部分机型不可避免有交集。",
+    "审核": "先核验事实、页码和适用机型，再设reviewed；使用与开发题不重叠的业务组。",
+    "答案独立性": "reference_answer是参考答案，gold_evidence.quote是逐字证据引文。答案应直接说明事实，不能只用“如下图所示”“见图”等指代代替事实；需要看图才能作答的题目不纳入本批纯文本验收。"
+  },
+  "_字段说明": {
+    "id": "题目唯一编号，不随问法或排序改变。",
+    "group_id": "同一业务问题的不同问法共用组名；不同业务问题使用不同组名。",
+    "question": "拟真的用户原话；未明确的条件不得从问题外补入。",
+    "corpus_snapshot": "当前发布AI包bundle_id，本批为g000033-71ec3c52f3，不是普通全文索引代数。",
+    "expected_behavior": "期望系统采取的回答方式；具体取值见 _取值说明.expected_behavior。",
+    "constraints": {
+      "说明": "只记录问题中明确的限制条件；未明确一律为空字符串。",
+      "scope": "涉及单个、多个还是全部项目。",
+      "stage": "样本检测、定标、质控等发生阶段。",
+      "direction": "偏低、偏高或异常等变化方向。",
+      "object": "用户询问的指标、部件或操作对象。",
+      "model": "问题中明确出现的机型或模块；未明确留空。"
+    },
+    "gold_evidence": {
+      "说明": "一条记录是一个来源片段，可承载连续的完整操作流程；并非每个操作步骤都要单列一条证据。required_facts 把答案拆成可核对的步骤或要点。超出当前语料范围的拒答题没有正面证据，使用空数组。",
+      "file": "当前AI索引记录的原始资料绝对路径；按此路径打开，不按同名文件猜测。",
+      "page": "PDF 为阅读器 1 起始页码，PPTX 为 1 起始幻灯片序号。",
+      "position": "从1开始的幻灯片序号及页内位置；page不是幻灯片自身印刷页号。",
+      "quote": "原文件及发布 AI 索引正文均可逐字定位的引文（忽略换行空白差异）。",
+      "relevance": "与本题事实的相关性等级；具体取值见 _取值说明.relevance。",
+      "why_sufficient": "新增题额外说明本片段为何足以支持对应答案事实；旧题保持原样。"
+    },
+    "hard_negatives": {
+      "说明": "可能被错误召回或误用的相似证据。",
+      "file": "当前AI索引记录的原始资料绝对路径。",
+      "page": "PDF 页码或 PPTX 幻灯片序号，均从 1 开始。",
+      "position": "页内标题或位置。",
+      "quote": "容易误用的原文短句。",
+      "reason": "为什么不能用此片段回答本题。"
+    },
+    "required_facts": "合格回答必须包含的事实或必要的证据不足说明；这是审核答案的要点，不是系统运行结果。",
+    "forbidden_claims": "回答中不得出现的错误、跨场景或无依据结论。",
+    "missing_fields": "若需澄清，必须向用户补充询问的条件；无缺失则为空数组。",
+    "review_status": "业务审核状态；具体取值见 _取值说明.review_status。",
+    "answer_checks": {
+      "说明": "v3 新增题按问题实际要求标 core；仅实际适用的维修安全要求标 safety；可选背景标 context。原 18 题检查项原样保留。",
+      "id": "本题内唯一编号。",
+      "text": "一条可独立判断的事实或安全要求。",
+      "role": "core=题目必答；safety=实际维修操作必须说明的安全要求；context=相关背景，缺失不扣分但说错仍报错。"
+    },
+    "coverage_topic": "仅新增题使用的覆盖主题标签，便于审核统计；旧题原样保留。",
+    "acceptance_topic": "验收业务主题。",
+    "independence_note": "与旧50题的业务边界区别。",
+    "review_notes": "需人工关注的范围或原文问题。",
+    "reference_answer": "供人工审核的完整文字参考答案，须脱离原图也可理解；不要求系统逐字复述，正式答案检查使用answer_checks。"
+  },
+  "cases": [
+    {
+      "id": "rag-acc-001",
+      "group_id": "acc_barcode_label_geometry",
+      "question": "生化仪样本条码标签两侧至少留白多少？标签最大宽度和条码最小高度分别是多少？",
+      "corpus_snapshot": "g000033-71ec3c52f3",
+      "expected_behavior": "answer",
+      "constraints": {
+        "scope": "",
+        "stage": "",
+        "direction": "",
+        "object": "样本条码标签",
+        "model": ""
+      },
+      "gold_evidence": [
+        {
+          "file": "E:\\生化资料\\生化场景化培训教材-条码V1.1.pptx",
+          "page": 16,
+          "position": "第 16 张幻灯片",
+          "quote": "最大条形码标签宽度\n55mm\n条码打印宽度A\n≥10mm\n条码打印宽度B\n≤45mm\n条码两侧静区C\n≥5mm\n最小条形码高度\n10mm",
+          "relevance": 2,
+          "why_sufficient": "同一表明确区分标签宽度、打印宽度、静区和高度，支持三个必答数值。"
+        }
+      ],
+      "hard_negatives": [
+        {
+          "file": "E:\\生化资料\\生化场景化培训教材-条码V1.1.pptx",
+          "page": 19,
+          "position": "第 19 张幻灯片",
+          "quote": "迈瑞仪器默认Code128码；\n勾选码制越多条码解析速度越慢；",
+          "reason": "讨论码制和解析速度，不能替代标签尺寸要求。"
+        }
+      ],
+      "required_facts": [
+        "条码两侧静区至少5 mm。",
+        "条码标签最大宽度55 mm。",
+        "条码最小高度10 mm。"
+      ],
+      "forbidden_claims": [
+        "两侧静区可小于5 mm。",
+        "55 mm是条码打印内容的最大宽度。",
+        "条码最小高度为5 mm。"
+      ],
+      "missing_fields": [],
+      "answer_checks": [
+        {
+          "id": "acc-001-core-1",
+          "role": "core",
+          "text": "条码两侧静区至少5 mm。"
+        },
+        {
+          "id": "acc-001-core-2",
+          "role": "core",
+          "text": "条码标签最大宽度55 mm。"
+        },
+        {
+          "id": "acc-001-core-3",
+          "role": "core",
+          "text": "条码最小高度10 mm。"
+        }
+      ],
+      "review_status": "pending",
+      "acceptance_topic": "条码打印几何要求",
+      "independence_note": "原50题没有条码打印规格；不同于交换机通信或板卡故障。",
+      "review_notes": [],
+      "reference_answer": "条码两侧静区至少5 mm。条码标签最大宽度55 mm。条码最小高度10 mm。"
+    },
+    {
+      "id": "rag-acc-002",
+      "group_id": "acc_lis_direction",
+      "question": "单向LIS和双向LIS有什么区别？仪器扫码后自动取得待测项目，是哪一种方式？",
+      "corpus_snapshot": "g000033-71ec3c52f3",
+      "expected_behavior": "answer",
+      "constraints": {
+        "scope": "",
+        "stage": "样本检测",
+        "direction": "",
+        "object": "LIS通信方式",
+        "model": ""
+      },
+      "gold_evidence": [
+        {
+          "file": "E:\\免疫资料\\中低速免疫\\2-课件PPT-线上\\公共\\LIS信息转运流程讲解.pptx",
+          "page": 8,
+          "position": "第 8 张幻灯片",
+          "quote": "单向LIS，仪器单方面向LIS发送结果，测试项目操作医生指定\n双向LIS，仪器条码扫描→查询LIS获取检测模式/项目→按LIS信息测试，测试项目受LIS信息控制",
+          "relevance": 2,
+          "why_sufficient": "直接对照两种方式及项目来源。"
+        }
+      ],
+      "hard_negatives": [
+        {
+          "file": "E:\\免疫资料\\中低速免疫\\2-课件PPT-线上\\公共\\LIS信息转运流程讲解.pptx",
+          "page": 10,
+          "position": "第 10 张幻灯片",
+          "quote": "IP同网段不同IP\n仪器软件与LIS软件，一个为LIS服务器，另一个为LIS客户端，不能同身份",
+          "reason": "网络和客户端/服务器角色不等于单向/双向的业务流程定义。"
+        }
+      ],
+      "required_facts": [
+        "单向LIS由仪器向LIS发送结果，测试项目由操作医生指定。",
+        "双向LIS由仪器扫描条码、查询LIS取得检测模式或项目，再按LIS信息测试。",
+        "扫码后自动取得待测项目属于双向LIS。"
+      ],
+      "forbidden_claims": [
+        "单向LIS也会自动从LIS取得待测项目。",
+        "双向LIS只上传结果，不查询项目。"
+      ],
+      "missing_fields": [],
+      "answer_checks": [
+        {
+          "id": "acc-002-core-1",
+          "role": "core",
+          "text": "单向LIS由仪器向LIS发送结果，测试项目由操作医生指定。"
+        },
+        {
+          "id": "acc-002-core-2",
+          "role": "core",
+          "text": "双向LIS由仪器扫描条码、查询LIS取得检测模式或项目，再按LIS信息测试。"
+        },
+        {
+          "id": "acc-002-core-3",
+          "role": "core",
+          "text": "扫码后自动取得待测项目属于双向LIS。"
+        }
+      ],
+      "review_status": "pending",
+      "acceptance_topic": "LIS工作流",
+      "independence_note": "原50题未涉及检验申请与结果在LIS中的传输方向。",
+      "review_notes": [],
+      "reference_answer": "单向LIS由仪器向LIS发送结果，测试项目由操作医生指定。双向LIS由仪器扫描条码、查询LIS取得检测模式或项目，再按LIS信息测试。扫码后自动取得待测项目属于双向LIS。"
+    },
+    {
+      "id": "rag-acc-003",
+      "group_id": "acc_tat_boundaries",
+      "question": "统计检验TAT时，总TAT、检验前TAT和实验室内TAT各从什么时候算到什么时候？",
+      "corpus_snapshot": "g000033-71ec3c52f3",
+      "expected_behavior": "answer",
+      "constraints": {
+        "scope": "",
+        "stage": "",
+        "direction": "",
+        "object": "TAT统计口径",
+        "model": ""
+      },
+      "gold_evidence": [
+        {
+          "file": "E:\\免疫资料\\中低速免疫\\2-课件PPT-线上\\公共\\检验科样本检测流程讲解.pptx",
+          "page": 5,
+          "position": "第 5 张幻灯片",
+          "quote": "TAT时间即检测周转时间（turn-around time，TAT），是指临床科室提出检验申请到患者得到检验报告的时间",
+          "relevance": 2,
+          "why_sufficient": "明确总TAT的起终点。"
+        },
+        {
+          "file": "E:\\免疫资料\\中低速免疫\\2-课件PPT-线上\\公共\\检验科样本检测流程讲解.pptx",
+          "page": 5,
+          "position": "第 5 张幻灯片",
+          "quote": "实验室内TAT（从实验室收到标本到发送报告的时间‌）",
+          "relevance": 2,
+          "why_sufficient": "直接支持实验室内口径。"
+        },
+        {
+          "file": "E:\\免疫资料\\中低速免疫\\2-课件PPT-线上\\公共\\检验科样本检测流程讲解.pptx",
+          "page": 5,
+          "position": "第 5 张幻灯片",
+          "quote": "检验前TAT（从标本采集到实验室接收标本的时间）",
+          "relevance": 2,
+          "why_sufficient": "直接支持检验前口径；这三条在同一页，评分应允许同一块同时覆盖。"
+        }
+      ],
+      "hard_negatives": [
+        {
+          "file": "E:\\免疫资料\\中低速免疫\\2-课件PPT-线上\\公共\\LIS信息转运流程讲解.pptx",
+          "page": 9,
+          "position": "第 9 张幻灯片",
+          "quote": "根据复检规则，审核规则，临床要求等进行结果审核，避免误检",
+          "reason": "结果审核是流程中的一个节点，不能当成完整TAT起终点。"
+        }
+      ],
+      "required_facts": [
+        "总TAT从临床科室提出检验申请，到患者得到检验报告。",
+        "检验前TAT从标本采集，到实验室接收标本。",
+        "实验室内TAT从实验室收到标本，到发送报告。"
+      ],
+      "forbidden_claims": [
+        "总TAT只计算仪器开始检测到结束的时间。",
+        "检验前TAT从实验室收到标本开始。",
+        "实验室内TAT必须计算到患者取到报告。"
+      ],
+      "missing_fields": [],
+      "answer_checks": [
+        {
+          "id": "acc-003-core-1",
+          "role": "core",
+          "text": "总TAT从临床科室提出检验申请，到患者得到检验报告。"
+        },
+        {
+          "id": "acc-003-core-2",
+          "role": "core",
+          "text": "检验前TAT从标本采集，到实验室接收标本。"
+        },
+        {
+          "id": "acc-003-core-3",
+          "role": "core",
+          "text": "实验室内TAT从实验室收到标本，到发送报告。"
+        }
+      ],
+      "review_status": "pending",
+      "acceptance_topic": "检验流程时间口径",
+      "independence_note": "原50题讨论检测结果、质控和定标，没有TAT起止定义。",
+      "review_notes": [
+        "TAT起止口径请由检验科审核；本题依据本地课件，不推定所有机构采用同一SOP。"
+      ],
+      "reference_answer": "总TAT从临床科室提出检验申请，到患者得到检验报告。检验前TAT从标本采集，到实验室接收标本。实验室内TAT从实验室收到标本，到发送报告。"
+    },
+    {
+      "id": "rag-acc-004",
+      "group_id": "acc_glove_tasks",
+      "question": "搬运仪器和进入检验科维修时，棉纱手套与乳胶手套分别适用于什么场景？",
+      "corpus_snapshot": "g000033-71ec3c52f3",
+      "expected_behavior": "answer",
+      "constraints": {
+        "scope": "",
+        "stage": "搬运/维修",
+        "direction": "",
+        "object": "手套",
+        "model": ""
+      },
+      "gold_evidence": [
+        {
+          "file": "E:\\免疫资料\\中低速免疫\\2-课件PPT-线上\\公共\\IVD安全防护培训教材_工程师.pptx",
+          "page": 10,
+          "position": "第 10 张幻灯片",
+          "quote": "棉纱手套：\n使用场景：现场安装搬运、移动设备时，拆卸或打包物料 时需佩戴。\n防滑、耐磨、防划伤。",
+          "relevance": 2,
+          "why_sufficient": "给出棉纱手套适用作业和作用。"
+        },
+        {
+          "file": "E:\\免疫资料\\中低速免疫\\2-课件PPT-线上\\公共\\IVD安全防护培训教材_工程师.pptx",
+          "page": 10,
+          "position": "第 10 张幻灯片",
+          "quote": "乳胶手套：\n使用场景：检验科进行设备维修、维护时佩戴；对仪器进行操作时佩戴\n防止有毒或有生物风险液体溅到手上或手部划伤；\n防止药液，消毒剂对手部产生的伤害及生物污染。",
+          "relevance": 2,
+          "why_sufficient": "给出乳胶手套适用作业与防护对象。"
+        }
+      ],
+      "hard_negatives": [
+        {
+          "file": "E:\\免疫资料\\中低速免疫\\2-课件PPT-线上\\公共\\IVD安全防护培训教材_工程师.pptx",
+          "page": 9,
+          "position": "第 9 张幻灯片",
+          "quote": "防砸鞋：\n使用场景：涉及TLA等大型设备安装，搬运重物时，用叉车搬运整机部件穿着。",
+          "reason": "同样出现安装搬运，但描述的是足部防护，不能替代手套选择。"
+        }
+      ],
+      "required_facts": [
+        "棉纱手套适用于现场安装搬运、移动设备、拆卸或打包物料，作用包括防滑、耐磨、防划伤。",
+        "乳胶手套适用于检验科设备维修维护或仪器操作，防护药液、消毒剂和生物污染等接触风险。"
+      ],
+      "forbidden_claims": [
+        "棉纱手套是防护生物污染液体的专用手套。",
+        "乳胶手套的主要适用场景是搬运重物防滑。"
+      ],
+      "missing_fields": [],
+      "answer_checks": [
+        {
+          "id": "acc-004-core-1",
+          "role": "core",
+          "text": "棉纱手套适用于现场安装搬运、移动设备、拆卸或打包物料，作用包括防滑、耐磨、防划伤。"
+        },
+        {
+          "id": "acc-004-core-2",
+          "role": "core",
+          "text": "乳胶手套适用于检验科设备维修维护或仪器操作，防护药液、消毒剂和生物污染等接触风险。"
+        }
+      ],
+      "review_status": "pending",
+      "acceptance_topic": "工程师个人防护用品选择",
+      "independence_note": "原50题没有个人防护用品选择；与具体仪器维修排查不同。",
+      "review_notes": [
+        "仅考本地培训材料的场景区分，不把该页作为全部PPE规范，也不考过敏人群等页外要求。"
+      ],
+      "reference_answer": "棉纱手套适用于现场安装搬运、移动设备、拆卸或打包物料，作用包括防滑、耐磨、防划伤。乳胶手套适用于检验科设备维修维护或仪器操作，防护药液、消毒剂和生物污染等接触风险。"
+    },
+    {
+      "id": "rag-acc-005",
+      "group_id": "acc_la22_reference_board",
+      "question": "M1000的LA22去盖模块出现漏去盖，检查发现标准白板上沾了血清。这为什么会影响去盖，白板应保持什么状态？",
+      "corpus_snapshot": "g000033-71ec3c52f3",
+      "expected_behavior": "answer",
+      "constraints": {
+        "scope": "",
+        "stage": "去盖",
+        "direction": "异常",
+        "object": "标准白板",
+        "model": "M1000/LA22"
+      },
+      "gold_evidence": [
+        {
+          "file": "E:\\生化资料\\M1000【LA22】常见问题处理指南V1.6.pptx",
+          "page": 10,
+          "position": "第10张幻灯片／“标准白板污染”原因框和红底提示；原图印刷页号36",
+          "quote": "原因：标准白板上血清，影响到相机的高度识别；去盖功能没有做去盖动作。\n去盖模块在使用时一定要保证标准白板干净，不能有划痕。",
+          "relevance": 2,
+          "why_sufficient": "明确污染、高度识别与漏去盖的因果及白板要求。"
+        }
+      ],
+      "hard_negatives": [
+        {
+          "file": "E:\\生化资料\\M1000【LA22】常见问题处理指南V1.6.pptx",
+          "page": 11,
+          "position": "第 11 张幻灯片",
+          "quote": "相机的标准板是白板，白色试管帽容易使相机识别错误，",
+          "reason": "是白色试管帽引起的识别分支，不能把已确认的白板污染改写成试管帽颜色问题。"
+        }
+      ],
+      "required_facts": [
+        "标准白板上的血清污染会影响相机的高度识别，从而造成没有执行去盖动作。",
+        "标准白板应保持干净且不能有划痕。"
+      ],
+      "forbidden_claims": [
+        "白板污染可以直接确定相机硬件损坏。",
+        "白板允许有划痕，只要能看到颜色即可。"
+      ],
+      "missing_fields": [],
+      "answer_checks": [
+        {
+          "id": "acc-005-core-1",
+          "role": "core",
+          "text": "标准白板上的血清污染会影响相机的高度识别，从而造成没有执行去盖动作。"
+        },
+        {
+          "id": "acc-005-core-2",
+          "role": "core",
+          "text": "标准白板应保持干净且不能有划痕。"
+        }
+      ],
+      "review_status": "pending",
+      "acceptance_topic": "样本前处理去盖视觉识别",
+      "independence_note": "原50题没有M1000/LA22去盖模块或白板高度识别问题。",
+      "review_notes": [
+        "正例是阅读器从1计数的第10张幻灯片，原图右下角印刷页号为36；反例是第11张。"
+      ],
+      "reference_answer": "标准白板上的血清污染会影响相机的高度识别，从而造成没有执行去盖动作。标准白板应保持干净且不能有划痕。"
+    },
+    {
+      "id": "rag-acc-006",
+      "group_id": "acc_antibody_fab_fc",
+      "question": "抗体的Fab和Fc分别是哪一部分？抗原结合位点在哪个区域？",
+      "corpus_snapshot": "g000033-71ec3c52f3",
+      "expected_behavior": "answer",
+      "constraints": {
+        "scope": "",
+        "stage": "",
+        "direction": "",
+        "object": "Fab/Fc",
+        "model": ""
+      },
+      "gold_evidence": [
+        {
+          "file": "E:\\生化免疫临床知识\\免疫基础知识及市场潜力分析-麻攀.pptx",
+          "page": 8,
+          "position": "第 8 张幻灯片",
+          "quote": "Fab区域:  包括抗原 (Ag) 结合位点，不同的抗体间此位点也不同。\nFc区域:   在同一种属抗体中，结构恒定的区域。",
+          "relevance": 2,
+          "why_sufficient": "直接区分两个区域，非由临床结果推断结构。"
+        }
+      ],
+      "hard_negatives": [
+        {
+          "file": "E:\\生化免疫临床知识\\免疫基础知识及市场潜力分析-麻攀.pptx",
+          "page": 7,
+          "position": "第 7 张幻灯片",
+          "quote": "特异性：抗原抗体特异性反应——抗原决定簇（抗原表位）。",
+          "reason": "抗原表位属于抗原侧概念，不是抗体Fc的定义。"
+        }
+      ],
+      "required_facts": [
+        "Fab区域包括抗原结合位点，不同抗体的该结合位点不同。",
+        "Fc是在同一种属抗体中结构恒定的区域。"
+      ],
+      "forbidden_claims": [
+        "抗原结合位点位于Fc区域。",
+        "Fab在所有抗体中都是相同的恒定区域。"
+      ],
+      "missing_fields": [],
+      "answer_checks": [
+        {
+          "id": "acc-006-core-1",
+          "role": "core",
+          "text": "Fab区域包括抗原结合位点，不同抗体的该结合位点不同。"
+        },
+        {
+          "id": "acc-006-core-2",
+          "role": "core",
+          "text": "Fc是在同一种属抗体中结构恒定的区域。"
+        }
+      ],
+      "review_status": "pending",
+      "acceptance_topic": "抗体结构基础",
+      "independence_note": "原50题没有抗体分区结构；不同于免疫结果换算、校准或传染病结果解释。",
+      "review_notes": [],
+      "reference_answer": "Fab区域包括抗原结合位点，不同抗体的该结合位点不同。Fc是在同一种属抗体中结构恒定的区域。"
+    },
+    {
+      "id": "rag-acc-007",
+      "group_id": "acc_bs5000_glycation_needle",
+      "question": "BS-5000的糖化样本针和普通样本针，外观上可以怎样区分？这种差别与吸取的样本有什么关系？",
+      "corpus_snapshot": "g000033-71ec3c52f3",
+      "expected_behavior": "answer",
+      "constraints": {
+        "scope": "",
+        "stage": "",
+        "direction": "",
+        "object": "糖化样本针/普通样本针",
+        "model": "BS-5000"
+      },
+      "gold_evidence": [
+        {
+          "file": "E:\\生化资料\\BS5000\\BS-5000系列_工程师品培训PPT_V1.0_CH\\A-CMSH-26001-BS-5000系列_工程师品培训PPT_V1.0_CH\\IVD_生化_BS-5000系列_04 样本分注子系统.pptx",
+          "page": 9,
+          "position": "第 9 张幻灯片",
+          "quote": "因需要吸全血样本，糖化样本针与普通样本针相比，连接针尖未做保护层的细部较长，超过5cm，普通针这部分则较短",
+          "relevance": 2,
+          "why_sufficient": "原文文字已经明确全血用途、糖化针未保护细部较长、普通针对应细部较短，足以独立支持答案，不需要依赖图片识别。"
+        }
+      ],
+      "hard_negatives": [
+        {
+          "file": "E:\\生化资料\\BS5000\\BS-5000系列_工程师品培训PPT_V1.0_CH\\A-CMSH-26001-BS-5000系列_工程师品培训PPT_V1.0_CH\\IVD_生化_BS-5000系列_04 样本分注子系统.pptx",
+          "page": 8,
+          "position": "第 8 张幻灯片",
+          "quote": "ISE样本针驱动",
+          "reason": "该页是ISE针驱动组件，不是普通针与糖化针的比较。"
+        }
+      ],
+      "required_facts": [
+        "糖化样本针用于吸取全血样本。",
+        "比较与针尖相连、未做保护层的细长部分：糖化针该部分较长，普通针对应部分较短。"
+      ],
+      "forbidden_claims": [
+        "糖化针未做保护层部分比普通针短。",
+        "糖化样本针仅吸血清，不吸全血。"
+      ],
+      "missing_fields": [],
+      "answer_checks": [
+        {
+          "id": "acc-007-core-1",
+          "role": "core",
+          "text": "糖化样本针用于吸取全血样本。"
+        },
+        {
+          "id": "acc-007-core-2",
+          "role": "core",
+          "text": "比较与针尖相连、未做保护层的细长部分：糖化针该部分较长，普通针对应部分较短。"
+        }
+      ],
+      "review_status": "pending",
+      "acceptance_topic": "糖化专用针型识别",
+      "independence_note": "原50题没有BS-5000糖化专用样本针识别；不考旧题的临床结果重复性。",
+      "review_notes": [
+        "原文有“超过5cm”；本题不把该数值设为必答，尺寸适用性仍请业务人员复核。不得据本题推导针型可互换。"
+      ],
+      "reference_answer": "糖化样本针用于吸取全血样本。比较与针尖相连、未做保护层的细长部分：糖化针该部分较长，普通针对应部分较短。"
+    },
+    {
+      "id": "rag-acc-008",
+      "group_id": "acc_bs5000_reagent_loader",
+      "question": "BS-5000试剂装载缓存盘一次最多放多少瓶？旋转按键每按一次怎样切换扇区？关仓门后会做什么，装载时仓门是什么状态？",
+      "corpus_snapshot": "g000033-71ec3c52f3",
+      "expected_behavior": "answer",
+      "constraints": {
+        "scope": "",
+        "stage": "试剂装载",
+        "direction": "",
+        "object": "装载缓存盘/仓门",
+        "model": "BS-5000"
+      },
+      "gold_evidence": [
+        {
+          "file": "E:\\生化资料\\BS5000\\BS-5000系列_工程师品培训PPT_V1.0_CH\\A-CMSH-26001-BS-5000系列_工程师品培训PPT_V1.0_CH\\IVD_生化_BS-5000系列_05 试剂子系统.pptx",
+          "page": 12,
+          "position": "第 12 张幻灯片",
+          "quote": "试剂装载缓存盘：支持最多同时装载20个试剂瓶；支持测试中不停机装载。",
+          "relevance": 2,
+          "why_sufficient": "明确缓存盘容量，不能用试剂盘总容量替代。"
+        },
+        {
+          "file": "E:\\生化资料\\BS5000\\BS-5000系列_工程师品培训PPT_V1.0_CH\\A-CMSH-26001-BS-5000系列_工程师品培训PPT_V1.0_CH\\IVD_生化_BS-5000系列_05 试剂子系统.pptx",
+          "page": 13,
+          "position": "第 13 张幻灯片",
+          "quote": "当用户关闭仓门后自动执行装载盘扫描，检查是否存在待装载试剂。仓门在装载过程中锁紧，避免用户夹伤或意外开启影响试剂装载。",
+          "relevance": 2,
+          "why_sufficient": "支持关门扫描与装载锁门两个动作。"
+        },
+        {
+          "file": "E:\\生化资料\\BS5000\\BS-5000系列_工程师品培训PPT_V1.0_CH\\A-CMSH-26001-BS-5000系列_工程师品培训PPT_V1.0_CH\\IVD_生化_BS-5000系列_05 试剂子系统.pptx",
+          "page": 13,
+          "position": "第 13 张幻灯片",
+          "quote": "每次触发按键试剂盘旋转1个扇区，按键滤波时间0.2s防止误触。扇区按照A→B→C→D→A顺序切换",
+          "relevance": 2,
+          "why_sufficient": "支持单次动作和先后顺序；0.2秒不是问题所问，不设必答。"
+        }
+      ],
+      "hard_negatives": [
+        {
+          "file": "E:\\生化资料\\BS5000\\BS-5000系列_工程师品培训PPT_V1.0_CH\\A-CMSH-26001-BS-5000系列_工程师品培训PPT_V1.0_CH\\IVD_生化_BS-5000系列_05 试剂子系统.pptx",
+          "page": 11,
+          "position": "第 11 张幻灯片",
+          "quote": "每个试剂盘有70个试剂位，总共140个试剂位",
+          "reason": "描述内部试剂盘容量，不是装载缓存盘容量。"
+        }
+      ],
+      "required_facts": [
+        "装载缓存盘最多同时装载20个试剂瓶。",
+        "旋转按键每次触发切换一个扇区，顺序为A→B→C→D→A。",
+        "关闭仓门后自动扫描装载盘，检查待装载试剂。",
+        "装载过程中仓门锁紧。"
+      ],
+      "forbidden_claims": [
+        "装载缓存盘可同时放70瓶或140瓶。",
+        "每按一次旋转按键，装载盘转一整圈。",
+        "关闭仓门后不会自动扫描。",
+        "装载过程中仓门保持解锁。"
+      ],
+      "missing_fields": [],
+      "answer_checks": [
+        {
+          "id": "acc-008-core-1",
+          "role": "core",
+          "text": "装载缓存盘最多同时装载20个试剂瓶。"
+        },
+        {
+          "id": "acc-008-core-2",
+          "role": "core",
+          "text": "旋转按键每次触发切换一个扇区，顺序为A→B→C→D→A。"
+        },
+        {
+          "id": "acc-008-core-3",
+          "role": "core",
+          "text": "关闭仓门后自动扫描装载盘，检查待装载试剂。"
+        },
+        {
+          "id": "acc-008-core-4",
+          "role": "core",
+          "text": "装载过程中仓门锁紧。"
+        }
+      ],
+      "review_status": "pending",
+      "acceptance_topic": "不停机试剂装载操作",
+      "independence_note": "原50题没有自动装载缓存盘、仓门联锁和扇区操作；不同于试剂临床消耗量计算。",
+      "review_notes": [],
+      "reference_answer": "装载缓存盘最多同时装载20个试剂瓶。旋转按键每次触发切换一个扇区，顺序为A→B→C→D→A。关闭仓门后自动扫描装载盘，检查待装载试剂。装载过程中仓门锁紧。"
+    },
+    {
+      "id": "rag-acc-009",
+      "group_id": "acc_bs5000_stirrer_geometry",
+      "question": "BS-5000样本搅拌杆与试剂搅拌杆的桨叶结构有什么区别？基材和表面涂层是什么？",
+      "corpus_snapshot": "g000033-71ec3c52f3",
+      "expected_behavior": "answer",
+      "constraints": {
+        "scope": "",
+        "stage": "",
+        "direction": "",
+        "object": "样本搅拌杆/试剂搅拌杆",
+        "model": "BS-5000"
+      },
+      "gold_evidence": [
+        {
+          "file": "E:\\生化资料\\BS5000\\BS-5000系列_工程师品培训PPT_V1.0_CH\\A-CMSH-26001-BS-5000系列_工程师品培训PPT_V1.0_CH\\IVD_生化_BS-5000系列_07 搅拌与自动清洗子系统.pptx",
+          "page": 8,
+          "position": "第 8 张幻灯片",
+          "quote": "基材采用316L材质，桨叶表面采用疏水特氟龙涂层；\n样本搅拌杆采用螺旋浆片结构，混匀小体积样本和高粘R1试剂；\n试剂搅拌杆采用偏心浆片结构，保证混匀的一致性",
+          "relevance": 2,
+          "why_sufficient": "同页直接支持两种桨叶及基材/涂层，桨/浆字形不作为答案判错依据。"
+        }
+      ],
+      "hard_negatives": [
+        {
+          "file": "E:\\生化资料\\BS5000\\BS-5000系列_工程师品培训PPT_V1.0_CH\\A-CMSH-26001-BS-5000系列_工程师品培训PPT_V1.0_CH\\IVD_生化_BS-5000系列_07 搅拌与自动清洗子系统.pptx",
+          "page": 4,
+          "position": "第 4 张幻灯片",
+          "quote": "样本搅拌组件和试剂搅拌相同，都是3组6根搅拌",
+          "reason": "组件数量相同不等于两种杆的桨叶结构相同，不能跨层级推断。"
+        }
+      ],
+      "required_facts": [
+        "样本搅拌杆采用螺旋桨片结构。",
+        "试剂搅拌杆采用偏心桨片结构。",
+        "搅拌杆基材为316L，桨叶表面采用疏水特氟龙涂层。"
+      ],
+      "forbidden_claims": [
+        "样本杆是偏心桨片，试剂杆是螺旋桨片。",
+        "搅拌杆基材是特氟龙，表面镀316L。"
+      ],
+      "missing_fields": [],
+      "answer_checks": [
+        {
+          "id": "acc-009-core-1",
+          "role": "core",
+          "text": "样本搅拌杆采用螺旋桨片结构。"
+        },
+        {
+          "id": "acc-009-core-2",
+          "role": "core",
+          "text": "试剂搅拌杆采用偏心桨片结构。"
+        },
+        {
+          "id": "acc-009-core-3",
+          "role": "core",
+          "text": "搅拌杆基材为316L，桨叶表面采用疏水特氟龙涂层。"
+        }
+      ],
+      "review_status": "pending",
+      "acceptance_topic": "搅拌杆结构与材料",
+      "independence_note": "原50题没有搅拌杆的结构与材料；不复用板卡或定标故障的答案。",
+      "review_notes": [],
+      "reference_answer": "样本搅拌杆采用螺旋桨片结构。试剂搅拌杆采用偏心桨片结构。搅拌杆基材为316L，桨叶表面采用疏水特氟龙涂层。"
+    },
+    {
+      "id": "rag-acc-010",
+      "group_id": "acc_bs5000_reagent_refrigeration",
+      "question": "BS-5000试剂制冷是全天工作的吗？冷藏温度是多少？制冷液主要成分和循环动力分别是什么？",
+      "corpus_snapshot": "g000033-71ec3c52f3",
+      "expected_behavior": "answer",
+      "constraints": {
+        "scope": "",
+        "stage": "",
+        "direction": "",
+        "object": "试剂制冷系统",
+        "model": "BS-5000"
+      },
+      "gold_evidence": [
+        {
+          "file": "E:\\生化资料\\BS5000\\BS-5000系列_工程师品培训PPT_V1.0_CH\\A-CMSH-26001-BS-5000系列_工程师品培训PPT_V1.0_CH\\IVD_生化_BS-5000系列_10 热工系统.pptx",
+          "page": 10,
+          "position": "第 10 张幻灯片",
+          "quote": "试剂制冷全天候24小时工作，为试剂盘提供制冷，冷藏温度2~8℃。",
+          "relevance": 2,
+          "why_sufficient": "明确工作时间与适用对象的温度。"
+        },
+        {
+          "file": "E:\\生化资料\\BS5000\\BS-5000系列_工程师品培训PPT_V1.0_CH\\A-CMSH-26001-BS-5000系列_工程师品培训PPT_V1.0_CH\\IVD_生化_BS-5000系列_10 热工系统.pptx",
+          "page": 10,
+          "position": "第 10 张幻灯片",
+          "quote": "制冷液：循环于制冷管道中的液体主要成分为乙二醇，具有较低的冰点。\n制冷循环泵：提供制冷液循环的动力",
+          "relevance": 2,
+          "why_sufficient": "明确液体成分和动力部件。"
+        }
+      ],
+      "hard_negatives": [
+        {
+          "file": "E:\\生化资料\\BS5000\\BS-5000系列_工程师品培训PPT_V1.0_CH\\A-CMSH-26001-BS-5000系列_工程师品培训PPT_V1.0_CH\\IVD_生化_BS-5000系列_10 热工系统.pptx",
+          "page": 6,
+          "position": "第 6 张幻灯片",
+          "quote": "反应盘温度范围： 37. 0±0.3°C",
+          "reason": "该温度属于反应盘恒温，不是试剂冷藏，不能跨对象套用。"
+        }
+      ],
+      "required_facts": [
+        "试剂制冷全天候24小时工作，冷藏温度2～8℃。",
+        "制冷液主要成分为乙二醇。",
+        "制冷循环泵提供制冷液循环动力。"
+      ],
+      "forbidden_claims": [
+        "试剂冷藏温度为37℃。",
+        "制冷液主要成分是底物液。",
+        "压缩机直接替代循环泵驱动制冷液循环。"
+      ],
+      "missing_fields": [],
+      "answer_checks": [
+        {
+          "id": "acc-010-core-1",
+          "role": "core",
+          "text": "试剂制冷全天候24小时工作，冷藏温度2～8℃。"
+        },
+        {
+          "id": "acc-010-core-2",
+          "role": "core",
+          "text": "制冷液主要成分为乙二醇。"
+        },
+        {
+          "id": "acc-010-core-3",
+          "role": "core",
+          "text": "制冷循环泵提供制冷液循环动力。"
+        }
+      ],
+      "review_status": "pending",
+      "acceptance_topic": "试剂冷藏与制冷循环",
+      "independence_note": "原50题的温度问题是免疫温度板采集位置与兼容性；本题是新机型试剂冷藏及循环原理，没有相同必答事实。",
+      "review_notes": [],
+      "reference_answer": "试剂制冷全天候24小时工作，冷藏温度2～8℃。制冷液主要成分为乙二醇。制冷循环泵提供制冷液循环动力。"
+    }
+  ],
+  "_取值说明": {
+    "expected_behavior": {
+      "answer": "现有证据足以回答问题，应完整回答。",
+      "partial_answer": "只回答资料直接支持的部分，并明确剩余部分缺少依据。",
+      "clarify": "缺少决定答案的关键条件，应先询问。",
+      "refuse": "资料不足，不能给出用户要求的具体判断、部件或操作。"
+    },
+    "relevance": {
+      "0": "不相关。",
+      "1": "相关但不足以支持该条事实或整题结论。",
+      "2": "直接支持该条事实。"
+    },
+    "review_status": {
+      "pending": "待业务人员审核。",
+      "reviewed": "人工核实通过，可计入针对本索引版本的正式评测。",
+      "disputed": "证据或预期行为存在争议，暂不纳入评测。"
+    }
+  }
+}

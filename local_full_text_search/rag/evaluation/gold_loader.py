@@ -132,6 +132,15 @@ def load_gold_dataset(path: Path, *, reviewed_only: bool = True) -> GoldDataset:
         for index, item in enumerate(evidence if isinstance(evidence, list) else [], 1):
             if not isinstance(item, dict) or not item.get("file") or not item.get("quote"):
                 errors.append(f"{case_id}：gold_evidence 第 {index} 条缺少 file 或 quote")
+            elif "alternative_sources" in item:
+                from .evidence_matcher import approved_alternative_sources
+                if not isinstance(item["alternative_sources"], list):
+                    errors.append(f"{case_id}：alternative_sources 必须是数组")
+                else:
+                    try:
+                        approved_alternative_sources(item)
+                    except ValueError as exc:
+                        errors.append(f"{case_id}：{exc}")
         negatives = row.get("hard_negatives", [])
         for index, item in enumerate(negatives if isinstance(negatives, list) else [], 1):
             if not isinstance(item, dict) or not item.get("file") or not item.get("quote"):

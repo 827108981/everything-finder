@@ -1,0 +1,107 @@
+"""Render the fixed condition experiment, including failures and limitations."""
+from __future__ import annotations
+
+import html
+import json
+from pathlib import Path
+
+ROOT = Path('reports/constraint_design_20261102_v2')
+LABELS = {
+    'baseline':'纯模型排序＋原条件处理',
+    'generic_only':'仅取消普通词“项目”的条件影响',
+    'dedup_only':'仅同义条件去重',
+    'generic_dedup':'普通词中性＋同义条件去重',
+    'branch_only':'再加入显式假设分支拆分',
+    'local_only':'再加入按句/行判断（不拆问题分支）',
+    'branch_local':'分支拆分＋按句/行判断',
+    'joint_gate_diagnostic':'上述组合＋同一句共同确认条件',
+}
+
+
+def main():
+    summary = json.loads((ROOT/'summary.json').read_text(encoding='utf-8'))
+    protocol = json.loads((ROOT/'protocol.json').read_text(encoding='utf-8'))
+    cases = json.loads((ROOT/'cases.json').read_text(encoding='utf-8'))
+    controls = json.loads((ROOT/'controls.json').read_text(encoding='utf-8'))
+    lines = ['# 条件处理方案验证（2026-11-02）', '',
+        '结论：普通词“项目”不主导条件判断有局部实证支持；同义条件去重没有额外覆盖收益；显式分支拆分纠正了构造场景中的顺序，但没有提高真实资料题的覆盖；按句/行判断及同句确认的简化实现产生退步，不建议应用。完整的“结论—证据”语义核验尚未实现或验证，不能用本轮结果宣称整套方案有效。', '',
+        '## 实验范围与可复现性', '',
+        f'- 当前发布 AI 包 `{protocol["bundle_id"]}`，1200对问题/候选正文与本次实际索引逐条相等。',
+        '- 固定50题开发集＋10题pending预验收，复用相同候选及经过前轮推理核实的纯BGE模型分；8组共480次下游重放。不是480次全链路检索或模型推理。',
+        '- 基线60/60题的上下文计分字典与历史纯模型结果完全相同；普通词与去重拆开测量，分支与局部判断也拆开测量。',
+        '- 各组最终最多8块、12000字符、同文件最多3块；多分支采用轮流选取并共享总预算，没有放大为每个分支8块。',
+        '- 数据集SHA256与历史冻结协议一致，审核状态保持原样；只在诊断文件中评分pending题。实际重排、召回和生成算法未修改。',
+        '- 同时构造11个逻辑边界控制，预期来自逻辑关系，不是新增临床Gold。控制题通过数不能当成业务准确率。',
+        '- 脚本第一次探索组合后补充单因素拆分，第一版结果保存在 reports/constraint_design_20261102。没有按结果调整阈值；该实验属于已查看题目的诊断，不能当作全新独立验收。', '',
+        '## 50题最终上下文', '',
+        '4道refuse题不进入正向证据覆盖分母；命中表示至少命中一条完整Gold，平均覆盖按题计算。指定干扰次数不等于错误答案数量。', '',
+        '| 方案 | 命中（46题） | 平均证据覆盖 | 指定干扰次数 | 相对基线退步题 |',
+        '|---|---:|---:|---:|---|']
+    for arm, label in LABELS.items():
+        x=summary['summary']['development'][arm]
+        lines.append(f'| {label} | {x["hit"]}/46 | {x["coverage"]:.1%} | {x["negatives"]} | {", ".join(x["regressions"]) or "无"} |')
+    lines += ['', '## 原18题与新增32题固定集合', '',
+              '| 方案 | 原18题：命中/覆盖（16题有正证据） | 新增32题：命中/覆盖（30题有正证据） |',
+              '|---|---:|---:|']
+    for arm,label in LABELS.items():
+        a,b=(summary['summary'][c][arm] for c in ('original18','added32'))
+        lines.append(f'| {label} | {a["hit"]}/16，{a["coverage"]:.1%} | {b["hit"]}/30，{b["coverage"]:.1%} |')
+    lines += ['', '按group_id等权的覆盖统计在summary.json中，基线82.4%，普通词中性＋去重88.1%。', '',
+        '## 10题预验收', '',
+        '全部8组均为10/10命中、平均覆盖100%、指定干扰0。由于这10题均为answer、对这些条件缺陷不敏感，而且已被前轮查看，此结果只说明本轮未发现退步，不能证明分支、澄清、拒答或跨场景作答已通过验收。', '',
+        '## 逐步结论及退步解释', '',
+        '1. 普通词中性：只去掉“项目”这个泛称的条件影响，保留样本、试剂、发光值等其他对象。020覆盖1/2→2/2，021为1/3→2/3，027和037从0→完整命中。没有已标注正向覆盖退步，干扰次数维持10。比把全部对象字段都降为中性更窄，取得相同收益。',
+        '2. 同义去重：按字段、规范值、强度与极性去重，保留原词证据。单独去重没有覆盖变化；不能把第一步收益归因于去重。',
+        '3. 分支拆分：仅识别问号/分号/句号后明确的如果、假如、若，不猜继承的机型或主体。040被拆成两个分支，但平均覆盖仍为50%，因为缺失的另一页仍不在固定候选中。控制场景中能修正后半句条件对前半句顺序的影响，但并未证明一般关系解析正确。',
+        '4. 按句/行判断：030的质控参数第26/27张原本match；正文同时提到校准品批号等变异因素，简化局部判定误认为混合阶段，转为unknown，相关块从第1/7降至第10/12，覆盖50%→0。043第4/27张也转为unknown，叠加同文件限额后覆盖100%→50%。这表明分句并没有解决词语与业务关系绑定问题。',
+        '5. 同句共同确认：能拦截“各片段分别凑条件”的控制场景，但错误拦截022第39张及033第35张。022把范围和定标写在一行，把“普遍偏低”写在下一行；这些行属于同一故障说明，不能因换行就断开。按句/行判断已有030/043退步，再加此门禁新增022/033退步，最终覆盖降至79.7%。这不是完整的结论证据核验，只是一个应被否决的简化替代实现。', '',
+        '## 逻辑边界控制', '',
+        '| 方案 | 通过/11 | 未通过场景 |', '|---|---:|---|']
+    for arm,label in LABELS.items():
+        s=summary['controls'][arm]
+        lines.append(f'| {label} | {s["passed"]}/11 | {", ".join(s["failures"])} |')
+    lines += ['',
+        '- 最严格组仍把“所有项目温度偏低，同时单个项目发光值偏高”当成支持“所有项目发光值偏低”；同一句出现所有词也不能证明关系正确。',
+        '- 最严格组误拒“所有项目→定标→偏低处理”这种合法的标题继承结构。',
+        '- 两种错误同时存在，说明继续调整句子长度、增加词表或统一关闭条件判断不能解决核心关系问题。', '',
+        '## 可采用范围与尚未完成的验证', '',
+        '第一步可以作为小范围实现候选继续推进，但本轮只证明固定候选下的证据改善，没有实际生成答案，不能据此宣称用户回答正确率提高。分支识别可先记录诊断，不以不可靠解析作为硬过滤依据。', '',
+        '上一版方案中“按结论核验证据”的目标仍需实现：依据文档标题层级、表头/行、明确主语和条件关系，形成可追溯的支持链，允许经证实的跨段连接。不能用“同一句出现全部条件”替代。该部分尚未完成，本轮没有实际验证answer/partial_answer/clarify/refuse的最终输出。', '',
+        '23项现有条件安全测试通过；业务代码与Gold未因本轮修改。新增内容只有隔离验证脚本与说明。', '',
+        '## 审核入口', '',
+        f'- [逐题可展开报告]({(ROOT/"report.html").resolve().as_posix()})',
+        f'- [完整统计]({(ROOT/"summary.json").resolve().as_posix()})',
+        f'- [逐题证据、条件判断和上下文]({(ROOT/"cases.json").resolve().as_posix()})',
+        f'- [逻辑控制与预期]({(ROOT/"controls.json").resolve().as_posix()})',
+        f'- [冻结协议及哈希]({(ROOT/"protocol.json").resolve().as_posix()})']
+    Path('docs/rag_constraint_design_validation_20261102.md').write_text('\n'.join(lines)+'\n',encoding='utf-8')
+    esc=html.escape
+    parts=['<!doctype html><html lang="zh"><meta charset="utf-8"><title>条件处理验证</title>',
+        '<style>body{font:16px system-ui;margin:30px;max-width:1450px}summary{cursor:pointer;padding:10px}table{border-collapse:collapse;width:100%}td,th{border:1px solid #ccc;padding:8px;vertical-align:top}pre{white-space:pre-wrap}details{margin:8px 0}.note{background:#fff4d8;padding:15px}</style>',
+        '<h1>条件处理方案验证</h1><p class="note">固定候选重放；未生成答案；pending题仅诊断。普通词中性有局部支持，按句和同句门禁产生退步。完整结论证据核验尚未验证。</p>',
+        '<h2>开发集50题（46题有正向证据）</h2><table><tr><th>方案</th><th>命中</th><th>平均覆盖</th><th>指定干扰次数</th></tr>']
+    for arm,label in LABELS.items():
+        s=summary['summary']['development'][arm]
+        parts.append(f'<tr><td>{esc(label)}</td><td>{s["hit"]}/46</td><td>{s["coverage"]:.1%}</td><td>{s["negatives"]}</td></tr>')
+    parts.append('</table><h2>业务题逐题复查</h2>')
+    for r in cases:
+        parts.append(f'<details><summary>{esc(r["id"]+" "+r["question"])}</summary><p>{esc(r["cohort"])}</p>')
+        for arm in LABELS:
+            v=r['arms'][arm];s=v['score']
+            parts.append(f'<details><summary>{esc(LABELS[arm])}：覆盖={s["gold_evidence_recall"]}，干扰={s["hard_negative_found"]}</summary>')
+            for d in v['diagnostics']:
+                parts.append('<pre>'+esc(json.dumps({k:v for k,v in d.items() if k!='ordered'},ensure_ascii=False,indent=2))+'</pre>')
+            for c in v['context']:
+                parts.append('<details><summary>'+esc(c['filename']+' '+c['location'])+'</summary><pre>'+esc(c['text'])+'</pre></details>')
+            parts.append('</details>')
+        parts.append('</details>')
+    parts.append('<h2>逻辑边界场景（非临床Gold）</h2>')
+    for c in controls:
+        parts.append('<details><summary>'+esc(c['name']+' '+c['question'])+'</summary><pre>'+esc(json.dumps(c,ensure_ascii=False,indent=2))+'</pre></details>')
+    parts.append('</html>')
+    (ROOT/'report.html').write_text('\n'.join(parts),encoding='utf-8')
+    print('Wrote audit document and expandable HTML.')
+
+
+if __name__=='__main__':
+    main()

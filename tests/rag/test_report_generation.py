@@ -46,7 +46,7 @@ def test_detail_contains_stage_ranks_and_mixed_category(tmp_path: Path) -> None:
             "vector": [{"chunk_id": "c1", "filename": "guide.pdf", "page_number": 19, "location": "第 19 页", "text": "正确流量 12；旧机型流量 8", "vector_rank": 2}],
             "fusion": [{"chunk_id": "c1", "filename": "guide.pdf", "page_number": 19, "location": "第 19 页", "text": "正确流量 12；旧机型流量 8"}],
             "evidence": [{"chunk_id": "c1", "filename": "guide.pdf", "page_number": 19, "location": "第 19 页", "text": "正确流量 12；旧机型流量 8", "selected": True, "final_rank": 1}],
-            "context": [{"chunk_id": "c1", "filename": "guide.pdf", "page_number": 19, "location": "第 19 页", "text": "正确流量 12；旧机型流量 8"}],
+            "context": [{"chunk_id": "c1", "filename": "guide.pdf", "page_number": 19, "location": "第 19 页", "text": "正确流量 12；旧机型流量 8", "included_text": "正确流量 12；旧机型流量 8"}],
         },
         "events": [],
     }
@@ -94,7 +94,7 @@ def test_baseline_marks_wrong_to_right_and_csv_exposes_change(tmp_path: Path) ->
         "candidate_stages": {
             "context": [{
                 "chunk_id": "c1", "filename": "guide.pdf", "page_number": 19,
-                "location": "第 19 页", "text": "正确流量 12",
+                "location": "第 19 页", "text": "正确流量 12", "included_text": "正确流量 12",
             }],
         },
         "events": [],

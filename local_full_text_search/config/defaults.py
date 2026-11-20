@@ -92,6 +92,10 @@ class AppSettings:
     save_search_history: bool = True
     # RAG remains optional: absent RAG packages or models never block ordinary search.
     rag_enabled: bool = False
+    # Opt-in until paired native-entry regression has passed. Empty config = generic.
+    rag_query_plan_enabled: bool = False
+    rag_structured_answer_enabled: bool = False
+    rag_domain_config: str = "chemiluminescence"
     rag_lexical_multi_route_enabled: bool = False
     # V2 在完成真实评测前保持显式选择，避免升级后悄悄改变用户结果。
     rag_lexical_backend: str = "legacy"
@@ -125,11 +129,11 @@ class AppSettings:
     rag_max_chunks: int = 200_000
     rag_reranker_batch_size: int = 4
     rag_reranker_max_length: int = 512
-    # 重排同时参考 Cross-Encoder、前置检索名次和通用答案支持度。
-    rag_rerank_cross_encoder_weight: float = 0.65
-    rag_rerank_retrieval_prior_weight: float = 0.05
-    rag_rerank_answer_support_weight: float = 0.30
-    rag_rerank_max_rank_drop: int = 3
+    # Compatibility fields for older settings files; BGE-only ordering ignores them.
+    rag_rerank_cross_encoder_weight: float = 1.0
+    rag_rerank_retrieval_prior_weight: float = 0.0
+    rag_rerank_answer_support_weight: float = 0.0
+    rag_rerank_max_rank_drop: int = 0
     rag_lexical_top_k: int = 50
     rag_vector_top_k: int = 50
     rag_fusion_top_k: int = 30
@@ -141,8 +145,11 @@ class AppSettings:
     rag_context_max_chars: int = 12_000
     rag_max_chunks_per_document: int = 3
     rag_clarification_enabled: bool = True
+    # Source-grounded semantic routing remains opt-in until business validation.
+    rag_semantic_clarification_enabled: bool = False
     rag_dedup_jaccard_threshold: float = 0.92
-    rag_constraint_matching_enabled: bool = True
+    # Legacy experiment switch; the simple evidence policy never filters by it.
+    rag_constraint_matching_enabled: bool = False
     rag_answer_review_enabled: bool = True
     rag_answer_review_max_output_tokens: int = 1400
     rag_answer_review_strict: bool = True

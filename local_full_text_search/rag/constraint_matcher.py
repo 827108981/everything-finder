@@ -41,20 +41,45 @@ _VALUES = {
 class ConstraintMatcher:
     """只对互斥条件做淘汰；未提及条件的正文标记 UNKNOWN。"""
 
+    def __init__(self, *, domain_adapter=None, local_conditions: bool = False,
+                 preserve_order: bool = False, judgement_mode: str = "legacy"):
+        if judgement_mode not in {"legacy", "source_bound"}:
+            raise ValueError("Unknown condition judgement mode")
+        self.domain_adapter = domain_adapter
+        self.local_conditions = local_conditions
+        self.preserve_order = preserve_order
+        self.judgement_mode = judgement_mode
+
     def evaluate(
         self, plan: QueryPlan, candidates: Sequence[EvidenceChunk]
     ) -> tuple[EvidenceChunk, ...]:
+        if self.local_conditions:
+            from local_full_text_search.rag.condition_binding import evaluate_local
+            return evaluate_local(plan, candidates, self.domain_adapter)
+        if self.domain_adapter is not None and not plan.adapter_active:
+            return ConstraintMatcher(preserve_order=self.preserve_order,
+                                     judgement_mode=self.judgement_mode).evaluate(plan,candidates)
         for item in candidates:
             filenames = "\n".join(source.filename for source in item.all_sources)
             applicability_text = "\n".join((
                 item.chunk.text,
                 filenames,
             ))
-            judgements = tuple(
-                self._judge(constraint, applicability_text, item.chunk.text, filenames,
-                            plan.lexical_terms)
-                for constraint in plan.constraints
-            )
+            if self.judgement_mode == "source_bound":
+                from .condition_relations import judge_relation
+                checked = [judge_relation(c, item.chunk.text, plan.original_text, plan.lexical_terms)
+                           for c in plan.constraints]
+                judgements = tuple(j for j, _ in checked)
+                item.query_plan_diagnostics['condition_relations'] = {
+                    'version': 'source-bound-v1', 'checks': [p for _, p in checked],
+                    'order': 'preserve_bge' if self.preserve_order else 'legacy_control',
+                }
+            else:
+                judgements = tuple(
+                    self._judge(constraint, applicability_text, item.chunk.text, filenames,
+                                plan.lexical_terms)
+                    for constraint in plan.constraints
+                )
             hard = tuple(result for result in judgements if result.constraint.is_hard)
             soft = tuple(result for result in judgements
                          if result.constraint.polarity is ConstraintPolarity.AFFIRMED
@@ -76,6 +101,7 @@ class ConstraintMatcher:
                 reason=(
                     f"硬条件冲突：{conflict_detail}" if conflicts else
                     "适用性未知，保留为背景但不能单独支撑确定性结论" if unknown else
+                    f"软条件冲突 {soft_conflicts} 项，保留原序" if soft_conflicts and self.preserve_order else
                     f"软条件冲突 {soft_conflicts} 项，已降权但保留" if soft_conflicts else
                     "条件一致" if matches or soft_matches else "正文未明确说明条件"
                 ),
@@ -89,6 +115,8 @@ class ConstraintMatcher:
                 support_spans=tuple(result.matched_text for result in hard
                                     if result.status is ConstraintStatus.MATCH and result.matched_text),
             )
+        if self.preserve_order:
+            return tuple(candidates)
         # 开放问题没有可验证的适用性排序依据，保留重排原序。
         if not plan.constraints:
             return tuple(candidates)
@@ -121,6 +149,16 @@ class ConstraintMatcher:
     def _judge(self, constraint: QueryConstraint, text: str,
                body: str = "", filenames: str = "",
                lexical_terms: tuple[str, ...] = ()) -> ConstraintJudgement:
+        if constraint.kind is ConstraintKind.MODEL and self.domain_adapter:
+            from local_full_text_search.rag.identifier_evidence import exact
+            if exact(body,constraint.source_text or constraint.value):
+                return ConstraintJudgement(constraint,ConstraintStatus.MATCH,'正文明确提及用户型号',constraint.source_text)
+            pattern=self.domain_adapter.patterns.get('instrument_model','')
+            from local_full_text_search.rag.evidence_contract import exclusive_scope
+            models=exclusive_scope(body,pattern)
+            if len(models)==1:
+                return ConstraintJudgement(constraint,ConstraintStatus.CONFLICT,'正文明确说明不同型号',models[0])
+            return ConstraintJudgement(constraint,ConstraintStatus.UNKNOWN,'正文没有唯一明确的型号适用范围')
         if constraint.kind is ConstraintKind.TOPIC:
             topic = constraint.value.casefold()
             title_match = topic in filenames.casefold()
@@ -166,6 +204,18 @@ class ConstraintMatcher:
                 constraint.value if found else "",
             )
         values = _VALUES.get(constraint.kind)
+        if self.domain_adapter and constraint.kind is ConstraintKind.SCOPE:
+            from local_full_text_search.rag.query_semantics import quantity_scopes
+            found = [(m.group(), value) for m, value in quantity_scopes(body)]
+            if any(value == constraint.value for _, value in found):
+                matched = next(span for span, value in found if value == constraint.value)
+                return ConstraintJudgement(constraint, ConstraintStatus.MATCH, '正文明确量词与对象范围一致', matched)
+            if len({value for _, value in found}) == 1:
+                return ConstraintJudgement(constraint, ConstraintStatus.CONFLICT, '正文明确不同数量范围', found[0][0])
+        if self.domain_adapter and constraint.kind.value in self.domain_adapter.aliases:
+            values = dict(values or {})
+            for value, aliases in self.domain_adapter.aliases[constraint.kind.value].items():
+                values[value] = tuple(dict.fromkeys((*values.get(value, ()), *aliases)))
         if values is None:
             return ConstraintJudgement(constraint, ConstraintStatus.UNKNOWN, "没有该类型的确定性判断规则")
         patterns = values.get(constraint.value, ())

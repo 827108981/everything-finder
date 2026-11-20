@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -26,6 +27,44 @@ def _request(api_style: str = "chat_completions") -> GenerationRequest:
         api_style=api_style,
         api_key="secret-that-must-not-leak",
     )
+
+
+@pytest.mark.parametrize("api_style", ["chat_completions", "responses"])
+def test_source_grounded_clarification_assessment(api_style):
+    gateway = OpenAICompatibleGateway()
+    gateway.complete_text = lambda *args: json.dumps({
+        "needs_clarification": True, "missing_fields": ["处理阶段"],
+        "question": "请确认当前处理阶段？", "reason": "流程取决于阶段",
+        "decision_type": "unique_value", "request_quote": "检查点有什么用？",
+        "all_requested_parts_blocked": True, "answerable_parts": [],
+        "evidence": [{"source_id": "S1", "quote": "检查点可以恢复任务"}],
+    })
+    result = gateway.assess_clarification(_request(api_style), CancelToken())
+    assert result.needs_clarification and result.question == "请确认当前处理阶段？"
+    assert result.evidence == (("S1", "检查点可以恢复任务"),)
+
+
+@pytest.mark.parametrize("patch", [
+    {"needs_clarification": "true"}, {"question": ""}, {"missing_fields": []},
+    {"evidence": []}, {"evidence": [{"source_id": "S99", "quote": "检查点"}]},
+    {"evidence": [{"source_id": "S1", "quote": "正文不存在的条件分支"}]},
+    {"decision_type": "other"}, {"request_quote": "用户没问过的选择"},
+    {"all_requested_parts_blocked": False}, {"answerable_parts": ["定义可以回答"]},
+])
+def test_unverified_clarification_abstains(patch):
+    gateway = OpenAICompatibleGateway()
+    value = {"needs_clarification": True, "missing_fields": ["版本"],
+        "decision_type": "unique_value", "request_quote": "检查点有什么用？",
+        "all_requested_parts_blocked": True, "answerable_parts": [],
+        "question": "请提供版本？", "evidence": [{"source_id": "S1", "quote": "检查点"}]}
+    gateway.complete_text = lambda *args: json.dumps({**value, **patch})
+    assert gateway.assess_clarification(_request(), CancelToken()) is None
+
+
+def test_no_missing_user_condition_does_not_require_evidence():
+    gateway = OpenAICompatibleGateway()
+    gateway.complete_text = lambda *args: '{"needs_clarification":false,"reason":"用户已说明条件"}'
+    assert not gateway.assess_clarification(_request(), CancelToken()).needs_clarification
 
 
 @pytest.mark.parametrize("api_style", ["chat_completions", "responses"])

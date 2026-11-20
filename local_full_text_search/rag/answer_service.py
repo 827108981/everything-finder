@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Callable
+from dataclasses import asdict, replace
 
 from local_full_text_search.core.index_generation_store import IndexGenerationStore
 from local_full_text_search.core.task_manager import CancelToken
@@ -13,7 +14,7 @@ from local_full_text_search.rag.context_builder import ContextBuilder
 from local_full_text_search.rag.errors import (
     RagIndexStaleError, RagModelMissingError, VectorIndexNotReadyError,
 )
-from local_full_text_search.rag.evidence_policy import EvidencePolicy
+from local_full_text_search.rag.evidence_policy import EvidencePolicy, SimpleEvidencePolicy
 from local_full_text_search.rag.generation.base import AnswerReviewRequest, GenerationRequest
 from local_full_text_search.rag.generation.openai_compatible import (
     OpenAICompatibleGateway,
@@ -57,7 +58,7 @@ class AnswerService:
         clarification_policy: ClarificationPolicy | None = None,
         deduplicator: CandidateDeduplicator | None = None,
         constraint_matcher: ConstraintMatcher | None = None,
-        evidence_policy: EvidencePolicy | None = None,
+        evidence_policy: EvidencePolicy | SimpleEvidencePolicy | None = None,
         progress_callback: Callable[[dict[str, object]], None] | None = None,
     ) -> None:
         self.source_generation_store = source_generation_store
@@ -68,19 +69,21 @@ class AnswerService:
         self.secret_store = secret_store
         self.settings = settings
         self.progress_callback = progress_callback
-        self.query_interpreter = query_interpreter or QueryInterpreter()
+        self.query_interpreter = query_interpreter or QueryInterpreter(
+            enhanced=bool(getattr(settings, 'rag_query_plan_enabled', False)),
+            domain_config=getattr(settings, 'rag_domain_config', ''),
+        )
         self.clarification_policy = clarification_policy or ClarificationPolicy()
         self.deduplicator = deduplicator or CandidateDeduplicator(
             jaccard_threshold=getattr(settings, "rag_dedup_jaccard_threshold", 0.92)
         )
-        self.constraint_matcher = constraint_matcher or ConstraintMatcher()
+        self.constraint_matcher = constraint_matcher or ConstraintMatcher(
+            domain_adapter=getattr(self.query_interpreter, 'domain_adapter', None))
         self.context_builder = ContextBuilder()
         self.citation_validator = CitationValidator()
-        self.evidence_policy = evidence_policy or EvidencePolicy(
-            min_vector_score=settings.rag_min_vector_score,
-            min_rerank_score=settings.rag_min_rerank_score,
-            max_per_document=getattr(settings, "rag_max_chunks_per_document", 3),
-        )
+        # Historical policies can be injected for controlled comparisons. Normal
+        # questions use ranked, complete evidence under the Context budget only.
+        self.evidence_policy = evidence_policy or SimpleEvidencePolicy()
 
     def answer(
         self, query: RagQuery, token: CancelToken, *, trace_id: str | None = None
@@ -299,6 +302,7 @@ class AnswerService:
 
                 rerank_input = deduped[: max(1, int(query.reranker_top_k))]
                 for item in deduped:
+                    # Read-only historical diagnostics, never a BGE ranking input.
                     item.answer_support_score, item.answer_support_reasons = compute_answer_support(
                         plan, item
                     )
@@ -308,6 +312,9 @@ class AnswerService:
                     "正在使用 Cross-Encoder 精排去重后的候选",
                     candidate_count=len(rerank_input),
                     reranker_top_k=query.reranker_top_k,
+                    reranker_input_mode=getattr(self.reranker, "input_mode", "unrecorded"),
+                    reranker_window_overlap=getattr(self.reranker, "window_overlap", None),
+                    reranker_max_length=getattr(self.reranker, "max_length", None),
                     rerank_input_candidates=[
                         candidate_snapshot(
                             item, selected=item.chunk.stable_chunk_id in rerank_input_ids,
@@ -339,7 +346,7 @@ class AnswerService:
                     ],
                 )
 
-                constraint_matching_enabled = bool(
+                constraint_matching_enabled = self.evidence_policy.uses_constraints and bool(
                     getattr(self.settings, "rag_constraint_matching_enabled", True)
                 )
                 constrained = (
@@ -349,7 +356,15 @@ class AnswerService:
                 )
                 self._report(
                     "checking_constraints",
-                    "正在检查证据是否符合问题范围和场景",
+                    "正在检查证据是否符合问题范围和场景" if constraint_matching_enabled
+                    else "条件过滤已移除，保留 BGE 顺序",
+                    condition_check_enabled=constraint_matching_enabled,
+                    selection_mode=self.evidence_policy.selection_mode,
+                    condition_ordering=("preserve_bge" if getattr(self.constraint_matcher, "preserve_order", False)
+                                        else "legacy_condition_sort") if constraint_matching_enabled else "preserve_bge",
+                    condition_judgement_mode=(getattr(self.constraint_matcher, "judgement_mode", "legacy")
+                                              if constraint_matching_enabled else "disabled"),
+                    condition_confirmation_gate=getattr(self.evidence_policy, "require_confirmed_conditions", True),
                     constraint_candidates=[
                         candidate_snapshot(
                             item,
@@ -377,7 +392,7 @@ class AnswerService:
 
                 competing = (
                     self.clarification_policy.evaluate_competing_stages(plan, constrained)
-                    if clarification_enabled
+                    if clarification_enabled and constraint_matching_enabled
                     else None
                 )
                 if competing is not None and competing.required:
@@ -407,6 +422,9 @@ class AnswerService:
                 self._report(
                     "checking_evidence",
                     "正在筛选可用于回答的最终证据",
+                    selection_mode=self.evidence_policy.selection_mode,
+                    fixed_top_k_applied=self.evidence_policy.uses_constraints,
+                    constraint_filter_applied=constraint_matching_enabled,
                     decision_reason=decision.reason,
                     reranked_count=len(constrained),
                     accepted_count=len(decision.accepted),
@@ -422,7 +440,8 @@ class AnswerService:
                                         "软条件冲突，降权后通过证据门禁"
                                         if item.constraint_decision
                                         and item.constraint_decision.soft_conflict_count
-                                        else "通过证据门禁"
+                                    else "保留 BGE 顺序，待 Context 长度预算选入"
+                                    if not self.evidence_policy.uses_constraints else "通过证据门禁"
                                     )
                                     if item.chunk.stable_chunk_id in accepted_ids
                                     else rejected_reasons.get(item.chunk.stable_chunk_id)
@@ -445,7 +464,22 @@ class AnswerService:
                 context = self.context_builder.build(
                     decision.accepted,
                     max_chars=self.settings.rag_context_max_chars,
+                    preserve_complete_chunks=self.evidence_policy.preserve_complete_chunks,
                 )
+                if plan.adapter_active:
+                    from local_full_text_search.rag.context_builder import organize_context
+                    context = organize_context(context, plan, decision.rejected)
+                    self._report('structured_evidence', '绑定实际正文的事实、范围与条件',
+                        parsed_request=plan.parsed_request, evidence_facts=list(context.evidence_facts),
+                        context_sections=context.sections, special_rule_invocations=[])
+                    from local_full_text_search.rag.source_consensus import attach_context_consensus
+                    context, source_consensus = attach_context_consensus(context)
+                    self._report('source_consensus', '核对实际引用的跨文档事实一致性', source_consensus=source_consensus)
+                    from local_full_text_search.rag.identifier_evidence import coverage
+                    from local_full_text_search.rag.evidence_contract import context_audit
+                    self._report('answer_slot_coverage', '核对实际上下文中的答案槽位',
+                                 answer_slot_coverage=coverage(plan, context.entries),
+                                 context_contract_audit=context_audit(plan,context.entries))
                 if not context.sources:
                     answer = self._insufficient(trace_id, "empty_context", stale_warnings)
                     return self._retrieval_result(answer) if retrieval_only else answer
@@ -513,26 +547,56 @@ class AnswerService:
                     "timeout_seconds": self.settings.rag_api_timeout_seconds,
                 }
                 plan_summary = self._plan_summary(plan)
+                if plan.adapter_active:
+                    from local_full_text_search.rag.source_consensus import generation_consensus_contract
+                    plan_summary += generation_consensus_contract(source_consensus)
                 request = GenerationRequest(
                     question=text,
                     context=context.text,
                     query_plan_summary=plan_summary,
                     **common,
                 )
+                token.throw_if_cancelled()
+                assess = getattr(self.gateway, "assess_clarification", None)
+                if (clarification_enabled
+                        and bool(getattr(self.settings, "rag_semantic_clarification_enabled", False))
+                        and callable(assess)):
+                    assessment = None
+                    self._report("assessing_clarification", "正在核对是否缺少决定处理路径的信息")
+                    try:
+                        assessment = assess(request, token)
+                    except Exception:
+                        token.throw_if_cancelled()
+                        self._report("clarification_assessment_unavailable", "未获得有效澄清判断，继续按现有证据回答")
+                    self._report(
+                        "clarification_assessed", "澄清条件判断完成",
+                        decision_available=assessment is not None,
+                        needs_clarification=bool(assessment and assessment.needs_clarification),
+                        missing_fields=list(assessment.missing_fields) if assessment else [],
+                        evidence=list(assessment.evidence) if assessment else [],
+                        decision_reason=assessment.reason if assessment else "结构或引用未通过核验",
+                        decision_type=assessment.decision_type if assessment else "",
+                        request_quote=assessment.request_quote if assessment else "",
+                    )
+                    if assessment and assessment.needs_clarification:
+                        return replace(
+                            self._clarification(trace_id, assessment.question, assessment.reason, stale_warnings),
+                            provider_name="OpenAI Compatible", model_name=request.model,
+                        )
                 self._report(
-                    "generating",
-                    "正在根据证据生成答案初稿",
-                    evidence_count=len(context.source_map),
-                    source_count=len(context.sources),
-                    context_chars=len(context.text),
-                    model=request.model,
-                    api_style=request.api_style,
-                    timeout_seconds=request.timeout_seconds,
+                    "generating", "正在根据证据生成答案初稿",
+                    evidence_count=len(context.source_map), source_count=len(context.sources),
+                    context_chars=len(context.text), model=request.model,
+                    api_style=request.api_style, timeout_seconds=request.timeout_seconds,
                     provider_host=provider_host(request.api_base_url),
                     api_request=provider_request_payload(request),
                 )
-                token.throw_if_cancelled()
-                model_answer = self.gateway.generate(request, token)
+                if plan.adapter_active and bool(getattr(self.settings, 'rag_structured_answer_enabled', False)):
+                    from local_full_text_search.rag.generation.structured import generate_structured
+                    model_answer = generate_structured(self.gateway, request, plan, context, token,
+                        lambda data: self._report('structured_answer_plan', '核验逐条答案计划与实际引文', **data))
+                else:
+                    model_answer = self.gateway.generate(request, token)
                 citation_check = self.citation_validator.inspect(
                     model_answer.text, context.source_map
                 )
@@ -680,7 +744,14 @@ class AnswerService:
             f"{item.kind.value}={item.value}（{item.source_text or '规则识别'}）"
             for item in plan.constraints
         ) or "无明确条件"
-        return f"意图={plan.intent}; 条件={constraints}; 检索词={', '.join(plan.lexical_terms)}"
+        summary = f"意图={plan.intent}; 条件={constraints}; 检索词={', '.join(plan.lexical_terms)}"
+        if plan.adapter_active:
+            ids = [e.text for e in plan.entity_details if e.type in ('alarm_code', 'identifier_candidate', 'instrument_model')]
+            summary += f"; 用户指定标识={', '.join(ids)}; 答案目标={', '.join(s.name for s in plan.answer_requirements)}"
+            summary += '; 分别回答有依据的问项，缺乏依据的问项说明缺口。标识相似不代表相同，禁止套用其他标识的处理。解析是问题线索，不是事实证据。'
+            from local_full_text_search.rag.evidence_contract import contract_summary
+            summary += contract_summary(plan)
+        return summary
 
     @staticmethod
     def _plan_snapshot(plan) -> dict[str, object]:
@@ -688,6 +759,19 @@ class AnswerService:
             "original_text": plan.original_text,
             "intent": plan.intent,
             "entities": list(plan.entities),
+            "entity_details": [asdict(e) for e in plan.entity_details],
+            "answer_requirements": [asdict(e) for e in plan.answer_requirements],
+            "sub_queries": [asdict(e) for e in plan.sub_queries],
+            "retrieval_hints": [asdict(e) for e in plan.retrieval_hints],
+            "unknown_entities": [asdict(e) for e in plan.unknown_entities],
+            "domain_config": plan.domain_config,
+            "adapter_active": plan.adapter_active,
+            "strategies": [asdict(e) for e in plan.strategies],
+            "scope_constraints": [asdict(e) for e in plan.scope_constraints],
+            "protected_evidence": [asdict(e) for e in plan.protected_evidence],
+            "method_branches": [asdict(e) for e in plan.method_branches],
+            "ambiguities": [asdict(e) for e in plan.ambiguities],
+            "plan_diagnostics": [asdict(e) for e in plan.plan_diagnostics],
             "constraints": [
                 {
                     "kind": item.kind.value,
@@ -699,6 +783,10 @@ class AnswerService:
                     "confidence": item.confidence,
                     "source": item.source,
                     "reason": item.reason,
+                    "subject": item.subject,
+                    "source_start": item.source_start,
+                    "source_end": item.source_end,
+                    "role": item.role,
                 }
                 for item in plan.constraints
             ],

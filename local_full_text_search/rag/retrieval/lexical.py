@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 import time
+import re
 
 from local_full_text_search.core.task_manager import CancelToken
 from local_full_text_search.rag.index_store import RagIndexStore
@@ -41,6 +42,39 @@ class LexicalRetriever:
             raise ValueError("word_v2 必须绑定明确的 AI 索引 bundle")
 
     def retrieve(
+        self, query: RagQuery, token: CancelToken, plan: QueryPlan | None = None
+    ) -> list[EvidenceChunk]:
+        results = self._retrieve_original(query, token, plan)
+        if not plan or not plan.adapter_active:
+            return results
+        from local_full_text_search.rag.identifier_evidence import identifiers, exact, prioritize
+        # Independent exact route on the published metadata FTS, for both backends.
+        # Original lexical search always runs; filters are identical on all routes.
+        merged = {i.chunk.stable_chunk_id:i for i in results}
+        connection = self.store.connect_read_only(self.metadata_path)
+        try:
+            soft_ids=tuple(dict.fromkeys(e.text for e in plan.unknown_entities if e.type == 'identifier_candidate' and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{1,30}',e.text)))[:3]
+            for value in dict.fromkeys((*identifiers(plan),*soft_ids)):
+                token.throw_if_cancelled()
+                expression='"'+value.replace('"','""')+'"' if len(value)>=3 else ''
+                p=replace(plan,lexical_expression=expression,lexical_terms=(value,),fallback_terms=(value,))
+                hits=self.store.lexical_search(connection,value,top_k=query.lexical_top_k,
+                    root_ids=query.root_ids,extensions=query.extensions,include_ocr=query.include_ocr,
+                    min_ocr_confidence=query.min_ocr_confidence,analysis=p)
+                hits=[i for i in hits if exact(i.chunk.text,value)]
+                self.route_diagnostics.append({'route_id':'identifier_exact' if value not in soft_ids else 'unknown_identifier_hint','query_text':value,
+                    'candidate_count':len(hits),'reason':'Exact body token; no inferred identity or meaning'})
+                for rank,i in enumerate(hits,1):
+                    target=merged.setdefault(i.chunk.stable_chunk_id,i)
+                    target.lexical_route_hits+=(RetrievalRouteHit('identifier_exact:'+value,rank,i.lexical_score,'bm25_raw'),)
+        finally:
+            connection.close()
+        from local_full_text_search.rag.source_consensus import supplement, reserve
+        results=reserve(prioritize(plan,supplement(self,query,plan,list(merged.values()),token)))[:query.lexical_top_k]
+        for rank,i in enumerate(results,1): i.lexical_rank=rank
+        return results
+
+    def _retrieve_original(
         self, query: RagQuery, token: CancelToken, plan: QueryPlan | None = None
     ) -> list[EvidenceChunk]:
         token.throw_if_cancelled()

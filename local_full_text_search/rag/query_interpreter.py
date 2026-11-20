@@ -11,9 +11,14 @@ from local_full_text_search.rag.query_analyzer import QueryAnalyzer
 class QueryInterpreter:
     """第一版完全确定性；保留注入点供未来可选 LLM 解析器使用。"""
 
-    def __init__(self, analyzer: QueryAnalyzer | None = None, llm_parser=None) -> None:
+    def __init__(self, analyzer: QueryAnalyzer | None = None, llm_parser=None, *,
+                 enhanced: bool = False, domain_config=None, bound_conditions: bool = False) -> None:
         self.analyzer = analyzer or QueryAnalyzer()
         self.llm_parser = llm_parser
+        self.enhanced = enhanced
+        self.bound_conditions = bound_conditions
+        from local_full_text_search.rag.domain_adapter import DomainAdapter
+        self.domain_adapter = DomainAdapter.load(domain_config) if enhanced else DomainAdapter()
 
     def interpret(self, text: str, token=None) -> QueryPlan:
         if token is not None:
@@ -23,7 +28,7 @@ class QueryInterpreter:
         if self.llm_parser is not None:
             parsed = self.llm_parser.parse(text, token)
             analysis = self._merge_optional_result(analysis, parsed)
-        return QueryPlan(
+        plan = QueryPlan(
             original_text=analysis.original_text,
             normalized_text=analysis.normalized_text,
             intent=analysis.intent,
@@ -40,6 +45,13 @@ class QueryInterpreter:
             lexical_variants=analysis.lexical_variants,
             semantic_variants=analysis.semantic_variants,
         )
+        if self.bound_conditions:
+            from local_full_text_search.rag.condition_binding import bind_plan
+            plan = bind_plan(plan)
+        if self.enhanced:
+            from local_full_text_search.rag.query_plan_enrichment import enrich_plan
+            return enrich_plan(plan, self.domain_adapter)
+        return plan
 
     @staticmethod
     def _missing_fields(intent: str, constraints) -> tuple[str, ...]:

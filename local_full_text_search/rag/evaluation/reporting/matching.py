@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from difflib import SequenceMatcher
 from pathlib import PurePath
 from typing import Any
@@ -51,7 +51,7 @@ class EvidenceMatch:
 
     @property
     def is_countable(self) -> bool:
-        return self.status in {"exact", "high"}
+        return self.status == "exact" if self.kind == "hard_negative" else self.status in {"exact", "high"}
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -112,7 +112,7 @@ def _status(coverage: float, config: MatchConfig) -> tuple[str, str]:
     return "unmatched", "未达到匹配阈值"
 
 
-def match_quote(
+def _match_declared_quote(
     chunk: dict[str, Any],
     evidence: dict[str, Any],
     *,
@@ -170,6 +170,8 @@ def match_quote(
     )
     coverage = match.size / len(quote_norm.value)
     status, label = _status(coverage, config)
+    if kind == "hard_negative" and status == "high":
+        status, label = "partial", "负例引文仅部分覆盖，不计完整召回"
     original_start = original_end = None
     if match.size:
         original_start = chunk_norm.source_offsets[match.b]
@@ -190,6 +192,25 @@ def match_quote(
         original_start,
         original_end,
     )
+
+
+def match_quote(
+    chunk: dict[str, Any], evidence: dict[str, Any], *, kind: str,
+    evidence_id: str, config: MatchConfig | None = None,
+) -> EvidenceMatch:
+    result = _match_declared_quote(chunk, evidence, kind=kind, evidence_id=evidence_id, config=config)
+    if kind not in {"positive", "gold"}:
+        return result
+    from ..evidence_matcher import approved_alternative_sources
+    for source in approved_alternative_sources(evidence):
+        expected = str(source["file"]).replace("\\", "/").casefold()
+        locations = [chunk, *(s for s in chunk.get("sources", []) if isinstance(s, dict))]
+        if not any(str(s.get("file_path") or "").replace("\\", "/").casefold() == expected for s in locations):
+            continue
+        alternative = _match_declared_quote(chunk, source, kind=kind, evidence_id=evidence_id, config=config)
+        if alternative.coverage > result.coverage:
+            result = replace(alternative, reason="已批准同事实替代来源：" + alternative.reason)
+    return result
 
 
 def highlight_segments(text: str, matches: list[EvidenceMatch]) -> list[dict[str, Any]]:
